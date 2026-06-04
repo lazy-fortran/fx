@@ -140,6 +140,25 @@ function readBareResponse(proc, timeout) {
   });
 }
 
+function makeToolsCallPayload(targetBytes, id, action = 'status') {
+  const message = {
+    jsonrpc: '2.0',
+    id,
+    method: 'tools/call',
+    params: {
+      name: 'fx',
+      arguments: {
+        action,
+        payload: '',
+      },
+    },
+  };
+  const baseLength = JSON.stringify(message).length;
+  const payloadLength = Math.max(0, targetBytes - baseLength);
+  message.params.arguments.payload = 'x'.repeat(payloadLength);
+  return message;
+}
+
 async function runSuite(label, send, readResponse) {
   process.stdout.write('\n--- ' + label + ' ---\n');
   const srv = startServer();
@@ -180,8 +199,34 @@ async function runSuite(label, send, readResponse) {
     const callResp = await readResponse(srv.proc);
     assert(callResp.id === 4, 'tools/call with id returns response');
 
+    process.stdout.write('tools/call boundary payload (32KB):\n');
+    const boundaryPayload = makeToolsCallPayload(32768, 7);
+    assert(
+      JSON.stringify(boundaryPayload).length <= 32768,
+      'boundary tools/call payload is within 32KB',
+    );
+    send(srv.proc, boundaryPayload);
+    const boundaryResp = await readResponse(srv.proc);
+    assert(boundaryResp.id === 7, 'boundary payload returns a tools/call response');
+
+    process.stdout.write('tools/call oversize payload (>32KB):\n');
+    const oversizedPayload = makeToolsCallPayload(33000, 8);
+    assert(
+      JSON.stringify(oversizedPayload).length > 32768,
+      'oversized tools/call payload exceeds 32KB',
+    );
+    send(srv.proc, oversizedPayload);
+    const oversizeResp = await readResponse(srv.proc);
+    assert(oversizeResp.error && oversizeResp.error.code === -32700,
+      'oversize payload yields parse error');
+
+    process.stdout.write('post-oversize tools/call recovery check:\n');
+    send(srv.proc, { jsonrpc: '2.0', id: 9, method: 'tools/list' });
+    const recovery = await readResponse(srv.proc);
+    assert(Array.isArray(recovery.result.tools), 'server recovers from oversize payload');
+
     process.stdout.write('unknown method:\n');
-    send(srv.proc, { jsonrpc: '2.0', id: 5, method: 'bogus/method' });
+    send(srv.proc, { jsonrpc: '2.0', id: 10, method: 'bogus/method' });
     const unknown = await readResponse(srv.proc);
     assert(unknown.error && unknown.error.code === -32601, 'unknown method uses method not found');
 
@@ -195,7 +240,7 @@ async function runSuite(label, send, readResponse) {
     assert(bad.error && bad.error.code === -32700, 'malformed json returns parse error');
 
     process.stdout.write('shutdown:\n');
-    send(srv.proc, { jsonrpc: '2.0', id: 6, method: 'shutdown' });
+    send(srv.proc, { jsonrpc: '2.0', id: 11, method: 'shutdown' });
     const shut = await readResponse(srv.proc);
     assert(shut.result === null || (shut.result && shut.result.closed === true) || typeof shut.result === 'object',
       'shutdown responds');

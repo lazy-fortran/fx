@@ -106,6 +106,10 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
     int pos = 0;
     int is_json = 0;
     int ch;
+    char discard[256];
+    int remaining;
+    size_t n;
+    size_t got;
 
     *nread = 0;
     if (bufsize <= 0) return;
@@ -155,8 +159,21 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
         }
     }
 
-    if (content_length < 0 || content_length > bufsize) {
+    if (content_length < 0) {
         *nread = -1;
+        return;
+    }
+
+    if (content_length > bufsize) {
+        if (fx_mcp_framing < 0) fx_mcp_framing = 1;
+        remaining = content_length;
+        while (remaining > 0) {
+            n = (size_t)(remaining < (int)sizeof(discard) ? remaining : (int)sizeof(discard));
+            got = fread(discard, 1, n, stdin);
+            if (got == 0) break;
+            remaining -= (int)got;
+        }
+        *nread = -2;
         return;
     }
 

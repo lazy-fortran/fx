@@ -10,6 +10,9 @@ module fx_mcp
 
     integer, parameter :: MAX_LINE = 32768
     integer, parameter :: MAX_ACTIONS = 32
+    integer, parameter :: MCP_READ_OK = 0
+    integer, parameter :: MCP_READ_EOF = -1
+    integer, parameter :: MCP_READ_TOO_LARGE = -2
 
     type, public :: mcp_tool_t
         character(len=64) :: name = ' '
@@ -101,6 +104,7 @@ contains
         character(len=:), allocatable :: handler_result
         logical :: is_error
         logical :: eof
+        integer :: read_status
 
         do
             line = ' '
@@ -113,7 +117,12 @@ contains
             handler_result = ''
             is_error = .false.
 
-            call mcp_read_message(line, MAX_LINE, s%framing_mode, eof)
+            call mcp_read_message(line, MAX_LINE, s%framing_mode, eof, read_status)
+            if (read_status == MCP_READ_TOO_LARGE) then
+                call mcp_make_error_response('', -32700, 'parse error', response)
+                call mcp_send_response(response, s%framing_mode)
+                cycle
+            end if
             if (eof) exit
             if (len_trim(line) == 0) cycle
 
@@ -189,11 +198,12 @@ contains
         end do
     end subroutine mcp_server_run
 
-    subroutine mcp_read_message(line, max_len, framing, eof)
+    subroutine mcp_read_message(line, max_len, framing, eof, read_status)
         character(len=*), intent(out) :: line
         integer, intent(in) :: max_len
         integer, intent(inout) :: framing
         logical, intent(out) :: eof
+        integer, intent(out) :: read_status
         character(kind=c_char), allocatable :: c_buf(:)
         integer(c_int) :: c_nread
         integer :: i, n
@@ -201,11 +211,20 @@ contains
         if (max_len <= 0) then
             line = ' '
             eof = .true.
+            read_status = MCP_READ_EOF
             return
         end if
 
         allocate(character(kind=c_char) :: c_buf(max_len))
         call fx_c_read_jsonrpc_message(c_buf, int(max_len, c_int), c_nread)
+        read_status = int(c_nread, kind=4)
+        if (read_status == MCP_READ_TOO_LARGE) then
+            line = ' '
+            eof = .false.
+            framing = fx_c_get_mcp_framing()
+            deallocate(c_buf)
+            return
+        end if
 
         if (c_nread <= 0) then
             line = ' '
