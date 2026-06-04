@@ -15,6 +15,8 @@ program test_lsp
     call test_make_diagnostic(failures, passes)
     call test_parse_did_save(failures, passes)
     call test_parse_did_open(failures, passes)
+    call test_parse_did_save_nested_fields(failures, passes)
+    call test_parse_did_open_nested_fields(failures, passes)
     call test_uri_encoding_roundtrip(failures, passes)
 
     if (failures == 0) then
@@ -146,6 +148,46 @@ contains
         call expect_true(text == 'print *, ''ok''', &
             'didOpen parser extracts raw text', failures, passes)
     end subroutine test_parse_did_open
+
+    subroutine test_parse_did_save_nested_fields(failures, passes)
+        integer, intent(inout) :: failures
+        integer, intent(inout) :: passes
+        character(len=:), allocatable :: uri
+        character(len=:), allocatable :: text
+        character(len=:), allocatable :: payload
+
+        payload = '{' // &
+            '"uri":"file:///tmp/outer.f90",' // &
+            '"jsonrpc":"2.0",' // &
+            '"method":"textDocument/didSave",' // &
+            '"params":{"textDocument":{"uri":"file:///tmp/inner.f90"}}}'
+        call lsp_parse_did_save(payload, uri, text)
+
+        call expect_true(uri == 'file:///tmp/inner.f90', &
+            'didSave parser extracts nested textDocument.uri, not top-level uri', failures, passes)
+        call expect_true(len(text) == 0, 'didSave parser keeps text empty when absent', failures, passes)
+    end subroutine test_parse_did_save_nested_fields
+
+    subroutine test_parse_did_open_nested_fields(failures, passes)
+        integer, intent(inout) :: failures
+        integer, intent(inout) :: passes
+        character(len=:), allocatable :: uri
+        character(len=:), allocatable :: text
+        character(len=:), allocatable :: payload
+
+        payload = '{' // &
+            '"text":"top-level text should be ignored",' // &
+            '"jsonrpc":"2.0",' // &
+            '"method":"textDocument/didOpen",' // &
+            '"params":{"textDocument":{"uri":"file:///tmp/inner-open.f90",' // &
+            '"text":"nested text line"}}}'
+        call lsp_parse_did_open(payload, uri, text)
+
+        call expect_true(uri == 'file:///tmp/inner-open.f90', &
+            'didOpen parser extracts nested textDocument.uri, not top-level text', failures, passes)
+        call expect_true(text == 'nested text line', &
+            'didOpen parser extracts nested textDocument.text', failures, passes)
+    end subroutine test_parse_did_open_nested_fields
 
     subroutine test_uri_encoding_roundtrip(failures, passes)
         integer, intent(inout) :: failures
