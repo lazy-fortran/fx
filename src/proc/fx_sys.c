@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -92,4 +94,85 @@ int fx_c_pid(void)
 int fx_c_kill(int pid, int signal)
 {
     return kill((pid_t)pid, signal);
+}
+
+/* Framing state used for MCP input/output.
+ * -1 = unknown, 0 = bare JSON, 1 = Content-Length.
+ */
+static int fx_mcp_framing = -1;
+
+void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
+    int content_length = -1;
+    int pos = 0;
+    int is_json = 0;
+    int ch;
+
+    *nread = 0;
+    if (bufsize <= 0) return;
+
+    for (;;) {
+        pos = 0;
+        is_json = 0;
+        for (;;) {
+            ch = fgetc(stdin);
+            if (ch == EOF) {
+                *nread = -1;
+                return;
+            }
+            if (ch == '\r') continue;
+            if (ch == '\n') break;
+
+            if (pos == 0 && isspace((unsigned char)ch)) continue;
+            if (pos == 0) is_json = (ch == '{');
+
+            if (is_json) {
+                if (pos < bufsize) buf[pos++] = (char) ch;
+            } else {
+                if (pos < bufsize - 1) buf[pos++] = (char) ch;
+            }
+        }
+
+        if (pos == 0) {
+            if (content_length > 0) break;
+            continue;
+        }
+
+        if (is_json) {
+            *nread = pos < bufsize ? pos : bufsize;
+            if (fx_mcp_framing < 0) fx_mcp_framing = 0;
+            return;
+        }
+
+        buf[pos] = '\0';
+        if (strncasecmp(buf, "content-length:", 14) == 0) {
+            char *p = buf + 14;
+            while (isspace((unsigned char)*p)) p++;
+            if (*p == ':') {
+                p++;
+                while (isspace((unsigned char)*p)) p++;
+                content_length = atoi(p);
+            }
+        }
+    }
+
+    if (content_length < 0 || content_length > bufsize) {
+        *nread = -1;
+        return;
+    }
+
+    if (fx_mcp_framing < 0) fx_mcp_framing = 1;
+
+    {
+        int total = 0;
+        while (total < content_length) {
+            size_t got = fread(buf + total, 1, (size_t)(content_length - total), stdin);
+            if (got == 0) break;
+            total += (int)got;
+        }
+        *nread = total;
+    }
+}
+
+int fx_c_get_mcp_framing(void) {
+    return fx_mcp_framing;
 }

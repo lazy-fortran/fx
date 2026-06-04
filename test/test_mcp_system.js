@@ -26,9 +26,15 @@ function findLocalServer() {
     path.join(root, 'app', 'fx-mcp-server'),
   ];
 
-  for (const base of [path.join(root, 'build'), path.join(root, 'build', 'gfortran_']]) {
-    if (!fs.existsSync(base)) continue;
-    candidates.push(...findBuildBinaries(base));
+  const rootBuild = path.join(root, 'build');
+  if (fs.existsSync(rootBuild)) {
+    candidates.push(...findBuildBinaries(rootBuild));
+    for (const entry of fs.readdirSync(rootBuild)) {
+      const p = path.join(rootBuild, entry);
+      if (fs.statSync(p).isDirectory()) {
+        candidates.push(...findBuildBinaries(p));
+      }
+    }
   }
 
   for (const c of candidates) {
