@@ -10,3 +10,8 @@ auto-executables = false
 
 [install]
 library = true
+
+[[executable]]
+name = "fx-mcp-server"
+source-dir = "app"
+main = "fx_mcp_server.f90"

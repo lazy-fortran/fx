@@ -105,6 +105,7 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
     int content_length = -1;
     int pos = 0;
     int is_json = 0;
+    int saw_header = 0;
     int ch;
     char discard[256];
     int remaining;
@@ -120,7 +121,11 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
         for (;;) {
             ch = fgetc(stdin);
             if (ch == EOF) {
-                *nread = -1;
+                if (pos == 0 && !saw_header) {
+                    *nread = -1;
+                } else {
+                    *nread = -2;
+                }
                 return;
             }
             if (ch == '\r') continue;
@@ -138,6 +143,10 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
 
         if (pos == 0) {
             if (content_length > 0) break;
+            if (saw_header) {
+                *nread = -2;
+                return;
+            }
             continue;
         }
 
@@ -148,29 +157,36 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
         }
 
         buf[pos] = '\0';
-        if (strncasecmp(buf, "content-length:", 14) == 0) {
-            char *p = buf + 14;
+        if (strncasecmp(buf, "content-length:", 15) == 0) {
+            char *p = buf + 15;
+            if (fx_mcp_framing < 0) fx_mcp_framing = 1;
+            saw_header = 1;
             while (isspace((unsigned char)*p)) p++;
-            if (*p == ':') {
-                p++;
-                while (isspace((unsigned char)*p)) p++;
-                content_length = atoi(p);
+            content_length = atoi(p);
+            if (content_length <= 0) {
+                *nread = -2;
+                return;
             }
+            break;
         }
+        saw_header = 1;
+        if (fx_mcp_framing < 0) fx_mcp_framing = 1;
     }
 
-    if (content_length < 0) {
-        *nread = -1;
+    if (content_length <= 0) {
+        *nread = -2;
         return;
     }
 
     if (content_length > bufsize) {
-        if (fx_mcp_framing < 0) fx_mcp_framing = 1;
         remaining = content_length;
         while (remaining > 0) {
             n = (size_t)(remaining < (int)sizeof(discard) ? remaining : (int)sizeof(discard));
             got = fread(discard, 1, n, stdin);
-            if (got == 0) break;
+            if (got == 0) {
+                *nread = -2;
+                return;
+            }
             remaining -= (int)got;
         }
         *nread = -2;
@@ -183,7 +199,10 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
         int total = 0;
         while (total < content_length) {
             size_t got = fread(buf + total, 1, (size_t)(content_length - total), stdin);
-            if (got == 0) break;
+            if (got == 0) {
+                *nread = -2;
+                return;
+            }
             total += (int)got;
         }
         *nread = total;
