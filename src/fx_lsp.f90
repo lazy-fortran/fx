@@ -4,6 +4,11 @@ module fx_lsp
     implicit none
     private
 
+    integer, parameter, private :: JSON_VALUE_STRING = 1
+    integer, parameter, private :: JSON_VALUE_OBJECT = 2
+    integer, parameter, private :: JSON_VALUE_ARRAY = 3
+    integer, parameter, private :: JSON_VALUE_PRIMITIVE = 4
+
     type, public :: lsp_server_t
         character(len=64) :: name = ' '
         integer :: capabilities = 0
@@ -23,6 +28,7 @@ module fx_lsp
     public :: lsp_make_initialize_response
     public :: lsp_publish_diagnostics, lsp_make_diagnostic
     public :: lsp_parse_did_save, lsp_parse_did_open
+    public :: lsp_make_parse_error_response, lsp_make_shutdown_response
     public :: lsp_path_to_uri, lsp_uri_to_path
 
 contains
@@ -40,7 +46,7 @@ contains
         type(lsp_server_t), intent(inout) :: s
         procedure(lsp_save_callback) :: on_save_callback
 
-        character(len=4096) :: body
+        character(len=:), allocatable :: body
         integer :: content_len
         logical :: eof
         character(len=:), allocatable :: method
@@ -54,9 +60,16 @@ contains
             call lsp_read_message(body, content_len, eof)
             if (eof) exit
             if (content_len <= 0) cycle
+            method = ''
+            id = ''
+            response = ''
 
             call lsp_extract_json_string(body, 'method', method, found)
-            if (.not. found) cycle
+            if (.not. found) then
+                call lsp_make_parse_error_response(response)
+                call lsp_send_message(response)
+                cycle
+            end if
 
             if (trim(method) == 'initialize') then
                 call lsp_extract_json_value(body, 'id', id, found)
@@ -67,7 +80,7 @@ contains
                 cycle
             else if (trim(method) == 'shutdown') then
                 call lsp_extract_json_value(body, 'id', id, found)
-                response = '{"jsonrpc":"2.0","id":' // trim(id) // ',"result":null}'
+                call lsp_make_shutdown_response(id, response)
                 call lsp_send_message(response)
                 s%shutdown_received = .true.
             else if (trim(method) == 'exit') then
@@ -84,20 +97,23 @@ contains
     end subroutine lsp_server_run
 
     subroutine lsp_read_message(content, content_len, eof)
-        character(len=*), intent(out) :: content
+        character(len=:), allocatable, intent(out) :: content
         integer, intent(out) :: content_len
         logical, intent(out) :: eof
         character(len=256) :: header
         character(len=:), allocatable :: body
         integer :: ios
-        integer :: iostat_value
         integer :: target_len
         integer :: bytes_read
         integer :: colon_pos
+        logical :: saw_len
 
-        content = ' '
+        content = ''
         content_len = 0
         eof = .false.
+        bytes_read = 0
+        target_len = -1
+        saw_len = .false.
 
         do
             read (*, '(A)', iostat=ios) header
@@ -110,30 +126,43 @@ contains
             if (index(lsp_to_lower(trim(header)), 'content-length:') == 1) then
                 colon_pos = index(header, ':')
                 if (colon_pos > 0) then
-                    read (header(colon_pos + 1:), *) target_len
-                else
-                    target_len = 0
+                    read (header(colon_pos + 1:), *, iostat=ios) target_len
+                    if (ios == 0) then
+                        saw_len = .true.
+                    else
+                        target_len = -1
+                    end if
                 end if
             end if
         end do
 
-        if (target_len <= 0) return
+        if (.not. saw_len .or. target_len < 0) return
 
-        allocate (character(len=target_len) :: body)
-        read (*, '(A)', advance='no', iostat=iostat_value, size=bytes_read) body
-        if (iostat_value /= 0 .and. iostat_value /= -1) then
-            bytes_read = 0
+        if (target_len == 0) then
+            content_len = 0
+            content = ''
+            return
         end if
 
-        if (bytes_read <= 0) then
+        allocate (character(len=target_len) :: body)
+        read (*, '(A)', advance='no', iostat=ios, size=bytes_read) body
+        if (ios /= 0 .and. ios /= -1) then
             eof = .true.
+            content_len = 0
             deallocate (body)
             return
         end if
 
-        content_len = min(bytes_read, target_len, len(content))
-        content = ' '
-        if (content_len > 0) content(1:content_len) = body(1:content_len)
+        if (bytes_read /= target_len) then
+            eof = .true.
+            content_len = bytes_read
+            content = body(1:bytes_read)
+            deallocate (body)
+            return
+        end if
+
+        content_len = target_len
+        content = body
         deallocate (body)
     end subroutine lsp_read_message
 
@@ -211,10 +240,10 @@ contains
         character(len=:), allocatable, intent(out) :: text
         logical :: found
 
-        call lsp_extract_json_string(content, 'uri', uri, found)
+        call lsp_extract_json_string(content, 'params.textDocument.uri', uri, found)
         if (.not. found) uri = ''
 
-        call lsp_extract_json_string(content, 'text', text, found)
+        call lsp_extract_json_string(content, 'params.textDocument.text', text, found)
         if (.not. found) text = ''
     end subroutine lsp_parse_did_save
 
@@ -224,12 +253,25 @@ contains
         character(len=:), allocatable, intent(out) :: text
         logical :: found
 
-        call lsp_extract_json_string(content, 'uri', uri, found)
+        call lsp_extract_json_string(content, 'params.textDocument.uri', uri, found)
         if (.not. found) uri = ''
 
-        call lsp_extract_json_string(content, 'text', text, found)
+        call lsp_extract_json_string(content, 'params.textDocument.text', text, found)
         if (.not. found) text = ''
     end subroutine lsp_parse_did_open
+
+    subroutine lsp_make_shutdown_response(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=:), allocatable, intent(out) :: response
+
+        response = '{"jsonrpc":"2.0","id":' // trim(lsp_normalize_id(id_str)) // ',"result":null}'
+    end subroutine lsp_make_shutdown_response
+
+    subroutine lsp_make_parse_error_response(response)
+        character(len=:), allocatable, intent(out) :: response
+        response = '{"jsonrpc":"2.0","id":null,' // &
+            '"error":{"code":-32700,"message":"Parse error"}}'
+    end subroutine lsp_make_parse_error_response
 
     function lsp_path_to_uri(path) result(uri)
         character(len=*), intent(in) :: path
@@ -326,46 +368,283 @@ contains
         character(len=:), allocatable, intent(out) :: value
         logical, intent(out) :: found
 
-        integer :: key_pos
-        integer :: cursor
+        character(len=64) :: path_parts(8)
+        integer :: n_parts
+
+        if (len_trim(key) == 0) then
+            found = .false.
+            value = ''
+            return
+        end if
+
+        call lsp_split_json_path(key, path_parts, n_parts)
+        if (n_parts == 0) then
+            found = .false.
+            value = ''
+            return
+        end if
+
+        call lsp_json_find_path_value(input, 1, path_parts, 1, n_parts, value, found)
+    end subroutine lsp_extract_json_value
+
+    recursive subroutine lsp_json_find_path_value(input, start_pos, path_parts, part_idx, n_parts, value, found)
+        character(len=*), intent(in) :: input
+        integer, intent(in) :: start_pos
+        character(len=*), intent(in) :: path_parts(:)
+        integer, intent(in) :: part_idx
+        integer, intent(in) :: n_parts
+        character(len=:), allocatable, intent(out) :: value
+        logical, intent(out) :: found
+
+        character(len=:), allocatable :: raw_value
+        integer :: value_type
+        integer :: next_obj_pos
+
+        if (part_idx > n_parts) then
+            found = .false.
+            value = ''
+            return
+        end if
+
+        if (trim(path_parts(part_idx)) == '') then
+            found = .false.
+            value = ''
+            return
+        end if
+
+        call lsp_json_find_member(input, start_pos, trim(path_parts(part_idx)), raw_value, value_type, next_obj_pos, found)
+        if (.not. found) then
+            value = ''
+            return
+        end if
+
+        if (part_idx == n_parts) then
+            value = raw_value
+            return
+        end if
+
+        if (value_type /= JSON_VALUE_OBJECT) then
+            found = .false.
+            value = ''
+            return
+        end if
+
+        call lsp_json_find_path_value(input, next_obj_pos, path_parts, part_idx + 1, n_parts, value, found)
+    end subroutine lsp_json_find_path_value
+
+    subroutine lsp_json_find_member(input, obj_pos, key, value, value_type, next_obj_pos, found)
+        character(len=*), intent(in) :: input
+        integer, intent(in) :: obj_pos
+        character(len=*), intent(in) :: key
+        character(len=:), allocatable, intent(out) :: value
+        integer, intent(out) :: value_type
+        integer, intent(out) :: next_obj_pos
+        logical, intent(out) :: found
+
+        integer :: n
         integer :: pos
+        character(len=:), allocatable :: key_raw
+        character(len=:), allocatable :: value_str
+        integer :: value_pos
+        integer :: value_end
+        integer :: next_pos
+
+        found = .false.
+        value = ''
+        value_type = 0
+        next_obj_pos = 0
+
+        n = len_trim(input)
+        if (obj_pos < 1 .or. obj_pos > n) return
+        if (input(obj_pos:obj_pos) /= '{') return
+
+        pos = obj_pos + 1
+        do
+            call lsp_skip_ws(input, pos)
+            if (pos > n) return
+            if (input(pos:pos) == '}') return
+
+            call lsp_parse_json_string(input, pos, key_raw, pos, found)
+            if (.not. found) return
+            if (trim(key_raw) /= trim(key)) then
+                call lsp_skip_ws(input, pos)
+                if (pos > n .or. input(pos:pos) /= ':') return
+                pos = pos + 1
+                call lsp_skip_ws(input, pos)
+                if (pos > n) return
+                call lsp_skip_value(input, pos, pos)
+                call lsp_skip_ws(input, pos)
+                if (pos > n) return
+                if (input(pos:pos) == ',') pos = pos + 1
+                cycle
+            end if
+
+            call lsp_skip_ws(input, pos)
+            if (pos > n .or. input(pos:pos) /= ':') return
+            pos = pos + 1
+            call lsp_skip_ws(input, pos)
+            call lsp_parse_json_value(input, pos, value_type, value_pos, value_end, value_str, next_pos, found)
+            if (.not. found) return
+            if (value_type == JSON_VALUE_STRING) then
+                value = value_str
+            else
+                value = input(value_pos:value_end)
+            end if
+            next_obj_pos = value_pos
+            return
+        end do
+    end subroutine lsp_json_find_member
+
+    subroutine lsp_parse_json_value(input, pos, value_type, value_pos, value_end, value_str, next_pos, found)
+        character(len=*), intent(in) :: input
+        integer, intent(in) :: pos
+        integer, intent(out) :: value_type
+        integer, intent(out) :: value_pos
+        integer, intent(out) :: value_end
+        character(len=:), allocatable, intent(out) :: value_str
+        integer, intent(out) :: next_pos
+        logical, intent(out) :: found
+
+        integer :: n
+        integer :: cursor
+        integer :: depth
+        logical :: escape
+
+        found = .false.
+        value_str = ''
+        value_type = JSON_VALUE_PRIMITIVE
+        value_pos = pos
+        value_end = pos
+        next_pos = pos
+
+        n = len_trim(input)
+        if (pos < 1 .or. pos > n) return
+
+        cursor = pos
+        call lsp_skip_ws(input, cursor)
+        if (cursor > n) return
+        value_pos = cursor
+
+        if (input(cursor:cursor) == '"') then
+            call lsp_parse_json_string(input, cursor, value_str, next_pos, found)
+            if (.not. found) return
+            value_type = JSON_VALUE_STRING
+            value_pos = cursor + 1
+            if (next_pos - 2 >= value_pos) then
+                value_end = next_pos - 2
+            else
+                value_end = value_pos - 1
+            end if
+            return
+        end if
+
+        if (input(cursor:cursor) == '{') then
+            value_type = JSON_VALUE_OBJECT
+            depth = 1
+            cursor = cursor + 1
+            escape = .false.
+            do while (cursor <= n)
+                if (escape) then
+                    escape = .false.
+                else if (input(cursor:cursor) == '\\') then
+                    escape = .true.
+                else if (input(cursor:cursor) == '"') then
+                    call lsp_skip_json_string(input, cursor, cursor)
+                else if (input(cursor:cursor) == '{') then
+                    depth = depth + 1
+                else if (input(cursor:cursor) == '}') then
+                    depth = depth - 1
+                    if (depth == 0) exit
+                end if
+                cursor = cursor + 1
+            end do
+            if (depth /= 0) return
+            value_end = cursor
+            next_pos = cursor + 1
+            found = .true.
+            return
+        end if
+
+        if (input(cursor:cursor) == '[') then
+            value_type = JSON_VALUE_ARRAY
+            depth = 1
+            cursor = cursor + 1
+            escape = .false.
+            do while (cursor <= n)
+                if (escape) then
+                    escape = .false.
+                else if (input(cursor:cursor) == '\\') then
+                    escape = .true.
+                else if (input(cursor:cursor) == '"') then
+                    call lsp_skip_json_string(input, cursor, cursor)
+                else if (input(cursor:cursor) == '[') then
+                    depth = depth + 1
+                else if (input(cursor:cursor) == ']') then
+                    depth = depth - 1
+                    if (depth == 0) exit
+                end if
+                cursor = cursor + 1
+            end do
+            if (depth /= 0) return
+            value_end = cursor
+            next_pos = cursor + 1
+            found = .true.
+            return
+        end if
+
+        do while (cursor <= n)
+            if (lsp_is_ws(input(cursor:cursor)) .or. input(cursor:cursor) == ',' .or. &
+                input(cursor:cursor) == '}' .or. input(cursor:cursor) == ']') exit
+            cursor = cursor + 1
+        end do
+        value_end = cursor - 1
+        next_pos = cursor
+        found = .true.
+    end subroutine lsp_parse_json_value
+
+    subroutine lsp_skip_value(input, pos, next_pos)
+        character(len=*), intent(in) :: input
+        integer, intent(in) :: pos
+        integer, intent(out) :: next_pos
+
+        integer :: value_type
+        integer :: value_pos
+        integer :: value_end
+        character(len=:), allocatable :: value_str
+        logical :: found
+
+        call lsp_parse_json_value(input, pos, value_type, value_pos, value_end, value_str, next_pos, found)
+    end subroutine lsp_skip_value
+
+    subroutine lsp_parse_json_string(input, pos, value, next_pos, found)
+        character(len=*), intent(in) :: input
+        integer, intent(in) :: pos
+        character(len=:), allocatable, intent(out) :: value
+        integer, intent(out) :: next_pos
+        logical, intent(out) :: found
+
+        integer :: n
+        integer :: cursor
         integer :: write_pos
-        integer :: raw_len
         integer :: cbyte
         logical :: escape
+        character(len=1) :: ch
         character(len=:), allocatable :: raw
 
         found = .false.
         value = ''
-        key_pos = 0
-        do
-            cursor = index(input(key_pos + 1:), '"' // trim(key) // '"')
-            if (cursor == 0) return
+        n = len_trim(input)
+        if (pos < 1 .or. pos > n) return
+        if (input(pos:pos) /= '"') return
 
-            key_pos = key_pos + cursor
-
-            cursor = key_pos + len_trim(key) + 2
-            do while (cursor <= len(input) .and. lsp_is_ws(input(cursor:cursor)))
-                cursor = cursor + 1
-            end do
-            if (cursor <= len(input) .and. input(cursor:cursor) == ':') exit
-        end do
-        cursor = cursor + 1
-        do while (cursor <= len(input) .and. lsp_is_ws(input(cursor:cursor)))
-            cursor = cursor + 1
-        end do
-        if (cursor > len(input) .or. input(cursor:cursor) /= '"') return
-
-        cursor = cursor + 1
-        raw_len = len_trim(input)
-        allocate (character(len=raw_len) :: raw)
+        cursor = pos + 1
+        allocate (character(len=n) :: raw)
         write_pos = 0
         escape = .false.
-        do while (cursor <= len(input))
-            if (cursor > len(input)) exit
-
+        do while (cursor <= n)
+            ch = input(cursor:cursor)
             if (escape) then
-                select case (input(cursor:cursor))
+                select case (ch)
                 case ('"')
                     write_pos = write_pos + 1
                     raw(write_pos:write_pos) = '"'
@@ -391,7 +670,7 @@ contains
                     write_pos = write_pos + 1
                     raw(write_pos:write_pos) = achar(9)
                 case ('u')
-                    if (cursor + 4 <= len(input)) then
+                    if (cursor + 4 <= n) then
                         cbyte = lsp_hex_value(input(cursor + 1:cursor + 2)) * 16 + &
                             lsp_hex_value(input(cursor + 3:cursor + 4))
                         write_pos = write_pos + 1
@@ -400,16 +679,16 @@ contains
                     end if
                 case default
                     write_pos = write_pos + 1
-                    raw(write_pos:write_pos) = input(cursor:cursor)
+                    raw(write_pos:write_pos) = ch
                 end select
                 escape = .false.
-            else if (input(cursor:cursor) == '\') then
+            else if (ch == '\') then
                 escape = .true.
-            else if (input(cursor:cursor) == '"') then
+            else if (ch == '"') then
                 exit
             else
                 write_pos = write_pos + 1
-                raw(write_pos:write_pos) = input(cursor:cursor)
+                raw(write_pos:write_pos) = ch
             end if
             cursor = cursor + 1
         end do
@@ -420,8 +699,80 @@ contains
             value = ''
         end if
         deallocate (raw)
+        next_pos = cursor + 1
         found = .true.
-    end subroutine lsp_extract_json_value
+    end subroutine lsp_parse_json_string
+
+    subroutine lsp_skip_json_string(input, pos, end_pos)
+        character(len=*), intent(in) :: input
+        integer, intent(inout) :: pos
+        integer, intent(out) :: end_pos
+
+        logical :: escape
+        integer :: n
+
+        end_pos = pos
+        n = len_trim(input)
+        if (pos < 1 .or. pos > n) return
+        if (input(pos:pos) /= '"') return
+
+        escape = .false.
+        do while (pos <= n)
+            pos = pos + 1
+            if (escape) then
+                escape = .false.
+            else if (input(pos:pos) == '\\') then
+                escape = .true.
+            else if (input(pos:pos) == '"') then
+                end_pos = pos
+                return
+            end if
+        end do
+        end_pos = n
+    end subroutine lsp_skip_json_string
+
+    subroutine lsp_split_json_path(path, parts, n_parts)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: parts(:)
+        integer, intent(out) :: n_parts
+
+        integer :: i
+        integer :: start_pos
+        integer :: n
+
+        n_parts = 0
+        n = len_trim(path)
+        if (n <= 0) return
+        start_pos = 1
+
+        do i = 1, n
+            if (path(i:i) == '.') then
+                if (n_parts + 1 <= size(parts)) then
+                    n_parts = n_parts + 1
+                    parts(n_parts) = trim(path(start_pos:i - 1))
+                end if
+                start_pos = i + 1
+            end if
+        end do
+
+        if (start_pos <= n .and. n_parts + 1 <= size(parts)) then
+            n_parts = n_parts + 1
+            parts(n_parts) = trim(path(start_pos:n))
+        end if
+    end subroutine lsp_split_json_path
+
+    subroutine lsp_skip_ws(input, pos)
+        character(len=*), intent(in) :: input
+        integer, intent(inout) :: pos
+
+        integer :: n
+
+        n = len_trim(input)
+        do while (pos <= n)
+            if (.not. lsp_is_ws(input(pos:pos))) return
+            pos = pos + 1
+        end do
+    end subroutine lsp_skip_ws
 
     function lsp_normalize_id(id_str) result(res)
         character(len=*), intent(in) :: id_str
