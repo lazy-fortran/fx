@@ -1,0 +1,12 @@
+name = "fx"
+version = "0.1.0"
+license = "MIT"
+author = "Christopher Albert"
+maintainer = "albert@tugraz.at"
+description = "Shared Fortran infrastructure: string, JSON, cache, DAG, MCP, LSP"
+
+[build]
+auto-executables = false
+
+[install]
+library = true
