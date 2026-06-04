@@ -16,7 +16,6 @@ name = "fx-mcp-server"
 source-dir = "app"
 main = "fx_mcp_server.f90"
 
-[[executable]]
+[[test]]
 name = "test_fx_test"
-source-dir = "test"
 main = "test_fx_test.f90"
