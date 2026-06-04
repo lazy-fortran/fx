@@ -6,7 +6,7 @@ maintainer = "albert@tugraz.at"
 description = "Shared Fortran infrastructure: string, JSON, cache, DAG, MCP, LSP"
 
 [build]
-auto-executables = false
+auto-executables = true
 
 [install]
 library = true
@@ -15,3 +15,8 @@ library = true
 name = "fx-mcp-server"
 source-dir = "app"
 main = "fx_mcp_server.f90"
+
+[[executable]]
+name = "test_fx_test"
+source-dir = "test"
+main = "test_fx_test.f90"
