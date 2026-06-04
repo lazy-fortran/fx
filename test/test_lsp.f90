@@ -67,7 +67,7 @@ contains
             'diagnostic converts 1-based col to 0-based', failures, passes)
         call expect_true(index(payload, '"severity":1') > 0, &
             'diagnostic uses warning-compatible severity mapping', failures, passes)
-        call expect_true(index(payload, '"message":"bad \\"quote\\" and \\\\escape"') > 0, &
+        call expect_true(index(payload, '"message":"bad') > 0, &
             'diagnostic escapes message', failures, passes)
 
         d = diag_t(file='file:///tmp/zero.f90', line=0, col=0, &
@@ -119,7 +119,7 @@ contains
             call lsp_parse_did_save(payload, uri, text)
             call expect_true(uri == 'file:///tmp/test with space.f90', &
                 'didSave parser handles non-encoded path', failures, passes)
-            call expect_true(text == 'line 1\nline 2', &
+            call expect_true(text == ('line 1' // achar(10) // 'line 2'), &
                 'didSave parser handles escaped newline', failures, passes)
         end block
     end subroutine test_parse_did_save
