@@ -28,6 +28,7 @@ module fx_lsp
     public :: lsp_make_initialize_response
     public :: lsp_publish_diagnostics, lsp_make_diagnostic
     public :: lsp_parse_did_save, lsp_parse_did_open
+    public :: lsp_make_parse_error_response, lsp_make_shutdown_response
     public :: lsp_path_to_uri, lsp_uri_to_path
 
 contains
@@ -79,7 +80,7 @@ contains
                 cycle
             else if (trim(method) == 'shutdown') then
                 call lsp_extract_json_value(body, 'id', id, found)
-                response = '{"jsonrpc":"2.0","id":' // trim(lsp_normalize_id(id)) // ',"result":null}'
+                call lsp_make_shutdown_response(id, response)
                 call lsp_send_message(response)
                 s%shutdown_received = .true.
             else if (trim(method) == 'exit') then
@@ -258,6 +259,13 @@ contains
         call lsp_extract_json_string(content, 'params.textDocument.text', text, found)
         if (.not. found) text = ''
     end subroutine lsp_parse_did_open
+
+    subroutine lsp_make_shutdown_response(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=:), allocatable, intent(out) :: response
+
+        response = '{"jsonrpc":"2.0","id":' // trim(lsp_normalize_id(id_str)) // ',"result":null}'
+    end subroutine lsp_make_shutdown_response
 
     subroutine lsp_make_parse_error_response(response)
         character(len=:), allocatable, intent(out) :: response

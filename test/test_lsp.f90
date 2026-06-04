@@ -1,6 +1,7 @@
 program test_lsp
     use fx_diag, only: diag_t, DIAG_ERROR, DIAG_WARNING, DIAG_HINT
     use fx_lsp, only: lsp_make_diagnostic, lsp_make_initialize_response, &
+                       lsp_make_parse_error_response, lsp_make_shutdown_response, &
                        lsp_parse_did_open, lsp_parse_did_save, lsp_path_to_uri, &
                        lsp_uri_to_path
     implicit none
@@ -17,6 +18,8 @@ program test_lsp
     call test_parse_did_open(failures, passes)
     call test_parse_did_save_nested_fields(failures, passes)
     call test_parse_did_open_nested_fields(failures, passes)
+    call test_parse_error_response(failures, passes)
+    call test_shutdown_response_id_handling(failures, passes)
     call test_uri_encoding_roundtrip(failures, passes)
 
     if (failures == 0) then
@@ -188,6 +191,39 @@ contains
         call expect_true(text == 'nested text line', &
             'didOpen parser extracts nested textDocument.text', failures, passes)
     end subroutine test_parse_did_open_nested_fields
+
+    subroutine test_parse_error_response(failures, passes)
+        integer, intent(inout) :: failures
+        integer, intent(inout) :: passes
+        character(len=:), allocatable :: response
+
+        call lsp_make_parse_error_response(response)
+
+        call expect_true(index(response, '"jsonrpc":"2.0"') > 0, &
+            'parse-error response carries jsonrpc', failures, passes)
+        call expect_true(index(response, '"id":null') > 0, &
+            'parse-error response id is null', failures, passes)
+        call expect_true(index(response, '"error":{"code":-32700') > 0, &
+            'parse-error response uses parse error code', failures, passes)
+        call expect_true(index(response, '"message":"Parse error"') > 0, &
+            'parse-error response includes parse error message', failures, passes)
+    end subroutine test_parse_error_response
+
+    subroutine test_shutdown_response_id_handling(failures, passes)
+        integer, intent(inout) :: failures
+        integer, intent(inout) :: passes
+        character(len=:), allocatable :: response
+
+        call lsp_make_shutdown_response('17', response)
+        call expect_true(index(response, '"id":17') > 0, &
+            'shutdown response preserves numeric id', failures, passes)
+
+        call lsp_make_shutdown_response('abc', response)
+        call expect_true(index(response, '"id":"abc"') > 0, &
+            'shutdown response preserves string id', failures, passes)
+        call expect_true(index(response, '"result":null') > 0, &
+            'shutdown response has null result', failures, passes)
+    end subroutine test_shutdown_response_id_handling
 
     subroutine test_uri_encoding_roundtrip(failures, passes)
         integer, intent(inout) :: failures
