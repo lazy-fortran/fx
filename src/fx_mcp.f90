@@ -617,12 +617,13 @@ contains
         end do
     end subroutine parse_quoted_string
 
-    subroutine parse_value_bounds(text, pos_in, end_idx, value_start, value_end)
+    subroutine parse_value_bounds(text, pos_in, end_idx, value_start, value_end, pos_out)
         character(len=*), intent(in) :: text
         integer, intent(in) :: pos_in
         integer, intent(in) :: end_idx
         integer, intent(out) :: value_start
         integer, intent(out) :: value_end
+        integer, intent(out) :: pos_out
 
         integer :: depth, p
         logical :: in_str, escaped
@@ -631,6 +632,7 @@ contains
         if (p > end_idx) then
             value_start = 0
             value_end = 0
+            pos_out = p
             return
         end if
 
@@ -638,6 +640,7 @@ contains
         select case (text(p:p))
         case ('"')
             call parse_quoted_string(text, p, value_start, value_end, p)
+            pos_out = p
         case ('{')
             depth = 1
             in_str = .false.
@@ -661,12 +664,14 @@ contains
                         depth = depth - 1
                         if (depth == 0) then
                             value_end = p
+                            pos_out = p
                             return
                         end if
                     end if
                 end if
                 p = p + 1
             end do
+            pos_out = p
         case ('[')
             depth = 1
             in_str = .false.
@@ -690,25 +695,30 @@ contains
                         depth = depth - 1
                         if (depth == 0) then
                             value_end = p
+                            pos_out = p
                             return
                         end if
                     end if
                 end if
                 p = p + 1
             end do
+            pos_out = p
         case default
             do while (p <= end_idx)
                 if (p < len(text) .and. is_json_ws(text(p:p))) then
                     value_end = p - 1
+                    pos_out = p
                     return
                 end if
                 if (text(p:p) == ',' .or. text(p:p) == '}' .or. text(p:p) == ']') then
                     value_end = p - 1
+                    pos_out = p
                     return
                 end if
                 p = p + 1
             end do
             value_end = end_idx
+            pos_out = p
         end select
     end subroutine parse_value_bounds
 
@@ -721,7 +731,7 @@ contains
         logical, intent(out) :: found
 
         integer :: pos, key_start, key_end, ks
-        integer :: skipped_start, skipped_end
+        integer :: skipped_start, skipped_end, skipped_pos
 
         found = .false.
         value_start = 0
@@ -746,13 +756,13 @@ contains
             pos = pos + 1
             ks = len_trim(key)
             if (trim(json_text(key_start:key_end)) /= trim(key)) then
-                call parse_value_bounds(json_text, pos, end_idx, skipped_start, skipped_end)
+                call parse_value_bounds(json_text, pos, end_idx, skipped_start, skipped_end, skipped_pos)
                 if (skipped_start == 0) return
-                pos = skipped_end + 1
+                pos = skipped_pos
                 cycle
             end if
 
-            call parse_value_bounds(json_text, pos, end_idx, value_start, value_end)
+            call parse_value_bounds(json_text, pos, end_idx, value_start, value_end, pos)
             if (value_start == 0) return
             found = .true.
             return
@@ -776,7 +786,7 @@ contains
         search_start = first_non_ws_index(json_text)
         if (search_start == 0) return
         search_end = last_non_ws_index(json_text)
-        if (search_start >= search_end) return
+        if (search_start > search_end) return
 
         i = 1
         do while (i <= len_trim(path))
@@ -796,8 +806,8 @@ contains
             end if
 
             if (json_text(value_start:value_start) /= '{') return
-            search_start = value_start + 1
-            search_end = value_end - 1
+            search_start = value_start
+            search_end = value_end
             i = i + 1
         end do
     end subroutine mcp_json_find_value
