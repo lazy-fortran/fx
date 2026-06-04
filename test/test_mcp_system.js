@@ -79,6 +79,10 @@ function sendBare(proc, obj) {
   proc.stdin.write(data + '\n');
 }
 
+function sendRaw(proc, data) {
+  proc.stdin.write(data);
+}
+
 function readFramedResponse(proc, timeout) {
   timeout = timeout || 10000;
   return new Promise((resolve, reject) => {
@@ -238,6 +242,19 @@ async function runSuite(label, send, readResponse) {
     }
     const bad = await readResponse(srv.proc);
     assert(bad.error && bad.error.code === -32700, 'malformed json returns parse error');
+
+    if (readResponse === readFramedResponse) {
+      process.stdout.write('malformed content-length header:\n');
+      sendRaw(srv.proc, 'Content-Length: abc\r\n\r\n');
+      const badHeader = await readResponse(srv.proc);
+      assert(badHeader.error && badHeader.error.code === -32700,
+             'malformed content-length header yields parse error');
+
+      process.stdout.write('post-malformed-header recovery check:\n');
+      send(srv.proc, { jsonrpc: '2.0', id: 12, method: 'ping' });
+      const recoverPing = await readResponse(srv.proc);
+      assert(recoverPing.result !== undefined, 'server recovers after malformed header');
+    }
 
     process.stdout.write('shutdown:\n');
     send(srv.proc, { jsonrpc: '2.0', id: 11, method: 'shutdown' });

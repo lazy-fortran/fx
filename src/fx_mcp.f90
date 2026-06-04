@@ -123,6 +123,11 @@ contains
                 call mcp_send_response(response, s%framing_mode)
                 cycle
             end if
+            if (read_status /= MCP_READ_OK .and. read_status /= MCP_READ_EOF) then
+                call mcp_make_error_response('', -32700, 'parse error', response)
+                call mcp_send_response(response, s%framing_mode)
+                cycle
+            end if
             if (eof) exit
             if (len_trim(line) == 0) cycle
 
@@ -228,8 +233,8 @@ contains
 
         if (c_nread <= 0) then
             line = ' '
-            eof = c_nread < 0
-            if (c_nread == 0) eof = .true.
+            eof = (c_nread == MCP_READ_EOF) .or. (c_nread == 0)
+            read_status = int(c_nread, kind=4)
             framing = fx_c_get_mcp_framing()
             deallocate(c_buf)
             return
@@ -240,6 +245,7 @@ contains
         do i = 1, n
             line(i:i) = c_buf(i)
         end do
+        read_status = MCP_READ_OK
         eof = .false.
         framing = fx_c_get_mcp_framing()
         deallocate(c_buf)
