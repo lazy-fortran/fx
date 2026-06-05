@@ -1,5 +1,5 @@
 program test_cli
-    use fx_cli, only: cli_t, cli_has_flag, cli_get_value, &
+    use fx_cli, only: cli_t, cli_init, cli_has_flag, cli_get_value, &
                       cli_get_positional, cli_n_positional, cli_command
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
                        test_assert_equal_int, test_assert_equal_str, &
@@ -21,20 +21,24 @@ contains
     subroutine test_cli_flag_and_value_patterns(suite)
         type(test_suite_t), intent(inout) :: suite
         type(cli_t) :: cli
+        type(cli_t) :: dot_cli
         type(cli_t) :: spaced_cli
         type(cli_t) :: blocked_cli
-        character(len=32), parameter :: args(3) = [character(len=32) :: &
-            '--json=compact', '--dot', 'build']
+        character(len=32), parameter :: args(2) = [character(len=32) :: &
+            '--json=compact', 'build']
+        character(len=32), parameter :: dot_args(1) = [character(len=32) :: &
+            '--dot']
         character(len=32), parameter :: spaced_args(2) = [character(len=32) :: &
             '--json', 'full']
         character(len=32), parameter :: blocked_args(2) = [character(len=32) :: &
             '--json', '--other']
 
         call load_cli(cli, args)
+        call load_cli(dot_cli, dot_args)
         call load_cli(spaced_cli, spaced_args)
         call load_cli(blocked_cli, blocked_args)
 
-        call test_assert(suite, cli_has_flag(cli, '--dot'), &
+        call test_assert(suite, cli_has_flag(dot_cli, '--dot'), &
                          'cli_has_flag exact match')
         call test_assert(suite, .not. cli_has_flag(cli, '--json'), &
                          'cli_has_flag ignores key=value')
@@ -48,12 +52,22 @@ contains
                                    cli_get_value(spaced_cli, 'json', &
                                                  'fallback'), &
                                    'cli_get_value spaced value')
+        call test_assert_equal_int(suite, 0, cli_n_positional(spaced_cli), &
+                                   'cli_n_positional skips consumed value')
+        call test_assert_equal_str(suite, '', &
+                                   cli_get_positional(spaced_cli, 1), &
+                                   'cli_get_positional skips consumed value')
         call test_assert_equal_str(suite, 'fallback', &
                                    cli_get_value(blocked_cli, 'json', &
                                                  'fallback'), &
                                    'cli_get_value does not consume next flag')
         call test_assert(suite, cli_has_flag(blocked_cli, '--other'), &
                          'cli_has_flag sees later flag')
+        call test_assert_equal_int(suite, 0, cli_n_positional(blocked_cli), &
+                                   'cli_n_positional skips bare flags')
+        call test_assert_equal_str(suite, '', &
+                                   cli_get_positional(blocked_cli, 1), &
+                                   'cli_get_positional skips bare flags')
         call test_assert_equal_int(suite, 1, cli_n_positional(cli), &
                                    'cli_n_positional counts one positional')
         call test_assert_equal_str(suite, 'build', cli_command(cli), &
@@ -80,7 +94,7 @@ contains
                          'cli_has_flag ignores args after terminator')
         call test_assert(suite, .not. cli_has_flag(cli, '-s'), &
                          'cli_has_flag rejects short flags')
-        call test_assert_equal_int(suite, 3, cli_n_positional(cli), &
+        call test_assert_equal_int(suite, 4, cli_n_positional(cli), &
                                    'cli_n_positional counts args after terminator')
         call test_assert_equal_str(suite, 'build', cli_command(cli), &
                                    'cli_command before terminator')
@@ -100,7 +114,7 @@ contains
         type(test_suite_t), intent(inout) :: suite
         type(cli_t) :: cli
         character(len=32), parameter :: args(4) = [character(len=32) :: &
-            '--json=', '--check', '--check', 'go']
+            'go', '--json=', '--check', '--check']
 
         call load_cli(cli, args)
 
@@ -142,14 +156,8 @@ contains
     subroutine load_cli(cli, args)
         type(cli_t), intent(out) :: cli
         character(len=*), intent(in) :: args(:)
-        integer :: i
 
-        cli%n_args = size(args)
-        cli%args = ' '
-        cli%program_name = ' '
-        do i = 1, cli%n_args
-            cli%args(i) = trim(args(i))
-        end do
+        call cli_init(cli, args)
     end subroutine load_cli
 
 end program test_cli
