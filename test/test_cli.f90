@@ -9,6 +9,7 @@ program test_cli
     type(test_suite_t) :: suite
 
     call test_suite_init(suite, 'fx_cli')
+    call test_cli_init_fallback(suite)
     call test_cli_flag_and_value_patterns(suite)
     call test_cli_terminator_and_positionals(suite)
     call test_cli_duplicates_and_empty_value(suite)
@@ -23,6 +24,7 @@ contains
         type(cli_t) :: cli
         type(cli_t) :: dot_cli
         type(cli_t) :: spaced_cli
+        type(cli_t) :: short_spaced_cli
         type(cli_t) :: blocked_cli
         character(len=32), parameter :: args(2) = [character(len=32) :: &
             '--json=compact', 'build']
@@ -30,12 +32,15 @@ contains
             '--dot']
         character(len=32), parameter :: spaced_args(2) = [character(len=32) :: &
             '--json', 'full']
+        character(len=32), parameter :: short_spaced_args(3) = &
+            [character(len=32) :: '--json', '-s', 'build']
         character(len=32), parameter :: blocked_args(2) = [character(len=32) :: &
             '--json', '--other']
 
         call load_cli(cli, args)
         call load_cli(dot_cli, dot_args)
         call load_cli(spaced_cli, spaced_args)
+        call load_cli(short_spaced_cli, short_spaced_args)
         call load_cli(blocked_cli, blocked_args)
 
         call test_assert(suite, cli_has_flag(dot_cli, '--dot'), &
@@ -58,6 +63,21 @@ contains
                                    cli_get_positional(spaced_cli, 1), &
                                    'cli_get_positional skips consumed value')
         call test_assert_equal_str(suite, 'fallback', &
+                                   cli_get_value(short_spaced_cli, 'json', &
+                                                 'fallback'), &
+                                   'cli_get_value leaves short token positional')
+        call test_assert_equal_int(suite, 2, &
+                                   cli_n_positional(short_spaced_cli), &
+                                   'cli_n_positional keeps short token positional')
+        call test_assert_equal_str(suite, '-s', &
+                                   cli_get_positional(short_spaced_cli, 1), &
+                                   'cli_get_positional keeps short token positional')
+        call test_assert_equal_str(suite, 'build', &
+                                   cli_get_positional(short_spaced_cli, 2), &
+                                   'cli_get_positional keeps trailing positional')
+        call test_assert_equal_str(suite, '-s', cli_command(short_spaced_cli), &
+                                   'cli_command keeps short token positional')
+        call test_assert_equal_str(suite, 'fallback', &
                                    cli_get_value(blocked_cli, 'json', &
                                                  'fallback'), &
                                    'cli_get_value does not consume next flag')
@@ -78,6 +98,18 @@ contains
         call test_assert_equal_str(suite, '', cli_get_positional(cli, 0), &
                                    'cli_get_positional rejects zero index')
     end subroutine test_cli_flag_and_value_patterns
+
+    subroutine test_cli_init_fallback(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(cli_t) :: cli
+
+        call cli_init(cli)
+
+        call test_assert(suite, len_trim(cli%program_name) > 0, &
+                         'cli_init fallback sets program name')
+        call test_assert_equal_int(suite, command_argument_count(), cli%n_args, &
+                                   'cli_init fallback reads command arguments')
+    end subroutine test_cli_init_fallback
 
     subroutine test_cli_terminator_and_positionals(suite)
         type(test_suite_t), intent(inout) :: suite

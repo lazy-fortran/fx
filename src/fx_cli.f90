@@ -221,8 +221,19 @@ contains
     logical function takes_value(text)
         character(len=*), intent(in) :: text
 
-        takes_value = .not. is_terminator(text) .and. .not. is_long_flag(text)
+        takes_value = .not. is_terminator(text) .and. &
+                      .not. is_long_flag(text) .and. &
+                      .not. is_short_flag(text)
     end function takes_value
+
+    logical function is_short_flag(text)
+        character(len=*), intent(in) :: text
+        integer :: text_len
+
+        text_len = len_trim(text)
+        is_short_flag = text_len > 0 .and. text(1:1) == '-' .and. &
+                        .not. is_long_flag(text)
+    end function is_short_flag
 
     logical function consumes_separate_value(arg_text, arg_index, c)
         character(len=*), intent(in) :: arg_text
