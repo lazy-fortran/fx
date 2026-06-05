@@ -7,7 +7,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#ifdef __linux__
 #include <sys/inotify.h>
+#endif
 #include <dirent.h>
 #include <poll.h>
 #include <fcntl.h>
@@ -20,7 +22,9 @@
 #define PATH_MAX 4096
 #endif
 
+#ifdef __linux__
 static int fx_inotify_force_enospc_once = 0;
+#endif
 
 /*
  * fx_sys.c: C implementations for fx_proc.f90 Fortran interfaces.
@@ -406,10 +410,12 @@ int fx_c_kill(int pid, int signal)
     return kill((pid_t)pid, signal);
 }
 
+#ifdef __linux__
 void fx_c_inotify_test_force_enospc_once(void)
 {
     fx_inotify_force_enospc_once = 1;
 }
+#endif
 
 int fx_c_stderr_redirect(const char *path)
 {
@@ -565,6 +571,7 @@ int fx_c_get_mcp_framing(void) {
     return fx_mcp_framing;
 }
 
+#ifdef __linux__
 typedef struct watch_entry {
     int wd;
     char *path;
@@ -581,6 +588,7 @@ typedef struct watch_state {
 } watch_state_t;
 
 static watch_state_t *fx_watch_states = NULL;
+#endif /* __linux__ */
 
 static void fx_trim_path(const char *path, char *out, size_t out_len)
 {
@@ -712,6 +720,7 @@ long long fx_c_unix_time(void)
     return (long long) time(NULL);
 }
 
+#ifdef __linux__
 static watch_state_t *fx_watch_state_find(int fd)
 {
     watch_state_t *state;
@@ -846,6 +855,7 @@ static void fx_watch_state_remove_wd(watch_state_t *state, int wd)
     }
     fx_watch_entry_free(entry);
 }
+#endif /* __linux__ */
 
 static int fx_dir_count_rec(const char *path, int *count)
 {
@@ -1094,6 +1104,7 @@ static int fx_file_collect_rec(const char *path, char *files, int file_len,
     return 0;
 }
 
+#ifdef __linux__
 int fx_c_inotify_init(void)
 {
     int fd;
@@ -1289,6 +1300,18 @@ int fx_c_inotify_poll(int fd, char *path_buf, int path_len,
         return 1;
     }
 }
+
+#else /* !__linux__: stubs for platforms without inotify */
+void fx_c_inotify_test_force_enospc_once(void) { }
+int fx_c_inotify_init(void) { return -1; }
+int fx_c_inotify_add_watch(int fd, const char *path, int mask)
+    { (void)fd; (void)path; (void)mask; return -1; }
+int fx_c_inotify_rm_watch(int fd, int wd) { (void)fd; (void)wd; return -1; }
+int fx_c_inotify_close(int fd) { (void)fd; return -1; }
+int fx_c_inotify_poll(int fd, char *path_buf, int path_len,
+    int *event_type)
+    { (void)fd; (void)path_buf; (void)path_len; (void)event_type; return -1; }
+#endif /* __linux__ */
 
 int fx_c_count_dirs(const char *root, int *n_dirs)
 {
