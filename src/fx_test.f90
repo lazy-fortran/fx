@@ -3,7 +3,9 @@ module fx_test
                                              real64
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     implicit none
-    private :: json_escape, int_to_string, real_to_string
+    private :: json_escape, int_to_string, real_to_string, &
+               real_scientific_to_string, location_suffix, &
+               write_prefixed_lines
 
     integer, public, parameter :: initial_test_capacity = 64
 
@@ -65,17 +67,10 @@ contains
             call test_record(s, name, '', .true.)
         else
             s%n_fail = s%n_fail + 1
-            location = ''
-            if (present(file) .and. present(line)) then
-                location = ' (' // trim(file) // ':' // int_to_string(line) // ')'
-            else if (present(file)) then
-                location = ' (' // trim(file) // ')'
-            else if (present(line)) then
-                location = ' (' // int_to_string(line) // ')'
-            end if
+            location = location_suffix(file, line)
             write(error_unit, '(A)') 'FAIL: ' // trim(name) // location
             if (len_trim(message) > 0) then
-                write(error_unit, '(A)') '  ' // trim(message)
+                call write_prefixed_lines(error_unit, message)
             end if
             call test_record(s, name, message, .false.)
         end if
@@ -91,8 +86,8 @@ contains
 
         character(len=:), allocatable :: msg
 
-        msg = 'expected ' // int_to_string(expected) // &
-              ', got ' // int_to_string(actual)
+        msg = 'expected: ' // int_to_string(expected) // new_line('a') // &
+              'actual:   ' // int_to_string(actual)
         call test_assert(s, expected == actual, trim(label), msg, file, line)
     end subroutine test_assert_equal_int
 
@@ -105,8 +100,8 @@ contains
         integer, intent(in), optional :: line
         character(len=:), allocatable :: msg
 
-        msg = 'expected "' // trim(expected) // '", got "' // &
-              trim(actual) // '"'
+        msg = 'expected: "' // trim(expected) // '"' // new_line('a') // &
+              'actual:   "' // trim(actual) // '"'
         call test_assert(s, trim(expected) == trim(actual), trim(label), msg, &
                          file, line)
     end subroutine test_assert_equal_str
@@ -140,15 +135,11 @@ contains
 
         exp_str = real_to_string(expected)
         act_str = real_to_string(actual)
-        diff_str = real_to_string(diff)
-        if (tol_provided) then
-            tol_str = real_to_string(tolerance)
-            msg = 'expected ' // exp_str // ', got ' // act_str // &
-                  ', diff ' // diff_str // ', tol ' // tol_str
-        else
-            msg = 'expected ' // exp_str // ', got ' // act_str // &
-                  ', diff ' // diff_str
-        end if
+        diff_str = real_scientific_to_string(diff)
+        tol_str = real_scientific_to_string(tolerance)
+        msg = 'expected: ' // exp_str // new_line('a') // &
+              'actual:   ' // act_str // new_line('a') // &
+              'diff:     ' // diff_str // ' (tol: ' // tol_str // ')'
         call test_assert(s, pass, trim(label), msg, file, line)
     end subroutine test_assert_equal_real
 
@@ -195,6 +186,46 @@ contains
         s%tests(s%n_tests)%message = trim(message)
         s%tests(s%n_tests)%status = status
     end subroutine test_record
+
+    function location_suffix(file, line) result(location)
+        character(len=*), intent(in), optional :: file
+        integer, intent(in), optional :: line
+        character(len=:), allocatable :: location
+
+        location = ''
+        if (present(file) .and. present(line)) then
+            location = ' (' // trim(file) // ':' // int_to_string(line) // ')'
+        else if (present(file)) then
+            location = ' (' // trim(file) // ')'
+        else if (present(line)) then
+            location = ' (' // int_to_string(line) // ')'
+        end if
+    end function location_suffix
+
+    subroutine write_prefixed_lines(unit, text)
+        integer, intent(in) :: unit
+        character(len=*), intent(in) :: text
+        integer :: start
+        integer :: newline_pos
+        integer :: line_end
+
+        start = 1
+        do while (start <= len(text))
+            newline_pos = index(text(start:), new_line('a'))
+            if (newline_pos == 0) then
+                write(unit, '(A)') '  ' // text(start:)
+                exit
+            end if
+
+            line_end = start + newline_pos - 2
+            if (line_end >= start) then
+                write(unit, '(A)') '  ' // text(start:line_end)
+            else
+                write(unit, '(A)') '  '
+            end if
+            start = line_end + 2
+        end do
+    end subroutine write_prefixed_lines
 
     subroutine test_suite_to_json(s, output)
         type(test_suite_t), intent(in) :: s
@@ -255,6 +286,12 @@ contains
                 escaped = escaped // '\"'
             elseif (c == '\') then
                 escaped = escaped // '\\'
+            elseif (c == achar(10)) then
+                escaped = escaped // '\n'
+            elseif (c == achar(13)) then
+                escaped = escaped // '\r'
+            elseif (c == achar(9)) then
+                escaped = escaped // '\t'
             else
                 escaped = escaped // c
             end if
@@ -278,9 +315,22 @@ contains
         if (ieee_is_nan(value)) then
             text = 'NaN'
         else
-            write(buffer, '(G0.17)') value
+            write(buffer, '(F0.14)') value
             text = trim(adjustl(buffer))
         end if
     end function real_to_string
+
+    function real_scientific_to_string(value) result(text)
+        real(real64), intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=64) :: buffer
+
+        if (ieee_is_nan(value)) then
+            text = 'NaN'
+        else
+            write(buffer, '(ES12.2E2)') value
+            text = trim(adjustl(buffer))
+        end if
+    end function real_scientific_to_string
 
 end module fx_test

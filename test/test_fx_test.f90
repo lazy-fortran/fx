@@ -8,7 +8,21 @@ program test_fx_test
                        test_suite_to_json, initial_test_capacity
     implicit none
 
-    call run_all_tests()
+    character(len=256) :: mode
+
+    mode = ''
+    call get_command_argument(1, mode)
+    if (trim(mode) == '--exit-fail') then
+        block
+            type(test_suite_t) :: exit_suite
+
+            call test_suite_init(exit_suite, 'exit_failure')
+            exit_suite%n_fail = 1
+            call test_suite_exit(exit_suite)
+        end block
+    else
+        call run_all_tests()
+    end if
 
 contains
 
@@ -29,10 +43,12 @@ contains
         call test_assert_equal_int_mismatch(suite)
         call test_assert_equal_int_negative(suite)
         call test_assert_equal_int_zero(suite)
+        call test_assert_equal_int_message_format(suite)
         call test_assert_equal_str_match(suite)
         call test_assert_equal_str_mismatch(suite)
         call test_assert_equal_str_trailing_space(suite)
         call test_assert_equal_str_empty(suite)
+        call test_assert_equal_str_message_format(suite)
         call test_assert_equal_real_match(suite)
         call test_assert_equal_real_default_tol(suite)
         call test_assert_equal_real_custom_tol(suite)
@@ -40,11 +56,13 @@ contains
         call test_assert_equal_real_nan_actual(suite)
         call test_assert_equal_real_nan_both(suite)
         call test_assert_equal_real_negative(suite)
+        call test_assert_equal_real_message_format(suite)
         call test_suite_summary(suite)
         call test_suite_to_json_valid(suite)
         call test_suite_to_json_empty(suite)
         call test_suite_to_json_format(suite)
         call test_no_assertions(suite)
+        call test_suite_exit_failure_path(suite)
     end subroutine run_all_tests
 
     subroutine test_init_zeros(suite)
@@ -116,6 +134,21 @@ contains
         call test_assert_equal_int(suite, 0, 1, 'int_zero_mismatch')
     end subroutine test_assert_equal_int_zero
 
+    subroutine test_assert_equal_int_message_format(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(test_suite_t) :: s
+        character(len=:), allocatable :: expected_message
+
+        call test_suite_init(s, 'int_message')
+        call test_assert_equal_int(s, 42, 43, 'int_mismatch')
+
+        expected_message = 'expected: 42' // new_line('a') // &
+                           'actual:   43'
+        call test_assert(suite, s%n_tests == 1, 'int_message_recorded')
+        call test_assert(suite, s%tests(1)%message == expected_message, &
+                         'int_message_exact')
+    end subroutine test_assert_equal_int_message_format
+
     subroutine test_assert_equal_str_match(suite)
         type(test_suite_t), intent(inout) :: suite
 
@@ -146,6 +179,21 @@ contains
         call test_assert_equal_str(suite, '', '   ', 'str_empty_vs_spaces')
         call test_assert_equal_str(suite, '  ', '', 'str_spaces_vs_empty')
     end subroutine test_assert_equal_str_empty
+
+    subroutine test_assert_equal_str_message_format(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(test_suite_t) :: s
+        character(len=:), allocatable :: expected_message
+
+        call test_suite_init(s, 'str_message')
+        call test_assert_equal_str(s, 'foo', 'bar', 'str_mismatch')
+
+        expected_message = 'expected: "foo"' // new_line('a') // &
+                           'actual:   "bar"'
+        call test_assert(suite, s%n_tests == 1, 'str_message_recorded')
+        call test_assert(suite, s%tests(1)%message == expected_message, &
+                         'str_message_exact')
+    end subroutine test_assert_equal_str_message_format
 
     subroutine test_assert_equal_real_match(suite)
         type(test_suite_t), intent(inout) :: suite
@@ -216,6 +264,23 @@ contains
                                    'real_negative_mismatch', 1.0e-10_real64)
     end subroutine test_assert_equal_real_negative
 
+    subroutine test_assert_equal_real_message_format(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(test_suite_t) :: s
+        character(len=:), allocatable :: expected_message
+
+        call test_suite_init(s, 'real_message')
+        call test_assert_equal_real(s, 1.5_real64, 1.25_real64, &
+                                    'real_mismatch')
+
+        expected_message = 'expected: 1.50000000000000' // new_line('a') // &
+                           'actual:   1.25000000000000' // new_line('a') // &
+                           'diff:     2.50E-01 (tol: 1.00E-10)'
+        call test_assert(suite, s%n_tests == 1, 'real_message_recorded')
+        call test_assert(suite, s%tests(1)%message == expected_message, &
+                         'real_message_exact')
+    end subroutine test_assert_equal_real_message_format
+
     subroutine test_suite_to_json_valid(suite)
         type(test_suite_t), intent(inout) :: suite
         character(len=:), allocatable :: json
@@ -226,8 +291,8 @@ contains
         call test_assert(suite, .false., 'json_fail_1')
         call test_suite_to_json(suite, json)
 
-        call test_assert(suite, index(json, '"name":"json_test"') > 0, &
-                         'json_contains_name')
+        call test_assert(suite, index(json, '"suite":"json_test"') > 0, &
+                         'json_contains_suite')
     end subroutine test_suite_to_json_valid
 
     subroutine test_suite_to_json_empty(suite)
@@ -283,7 +348,7 @@ contains
                          '"name":"json_fail","status":"fail"') > 0, &
                          'json_records_fail_case')
         call test_assert(suite, index(json, &
-                         '"message":"expected 5, got 3"') > 0, &
+                         '"message":"expected: 5\nactual:   3"') > 0, &
                          'json_records_int_message')
     end subroutine test_suite_to_json_records_tests
 
@@ -309,6 +374,8 @@ contains
                          'json_escapes_quotes')
         call test_assert(suite, index(json, '\\') > 0, &
                          'json_escapes_backslashes')
+        call test_assert(suite, index(json, '\n') > 0, &
+                         'json_escapes_newlines')
     end subroutine test_suite_to_json_long_message
 
     subroutine test_suite_to_json_nan_message(suite)
@@ -362,5 +429,24 @@ contains
         call test_assert(suite, s%n_pass == 0, 'empty_suite_n_pass')
         call test_assert(suite, s%n_fail == 0, 'empty_suite_n_fail')
     end subroutine test_no_assertions
+
+    subroutine test_suite_exit_failure_path(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=256) :: exe
+        integer :: exit_code
+        integer :: cmdstat
+        character(len=256) :: cmdmsg
+
+        exe = ''
+        call get_command_argument(0, exe)
+        call execute_command_line(trim(exe) // ' --exit-fail', &
+                                  exitstat=exit_code, cmdstat=cmdstat, &
+                                  cmdmsg=cmdmsg)
+        call test_assert(suite, cmdstat == 0, 'exit_failure_spawn_command', &
+                         trim(cmdmsg))
+        if (cmdstat == 0) then
+            call test_assert(suite, exit_code == 1, 'exit_failure_exit_code')
+        end if
+    end subroutine test_suite_exit_failure_path
 
 end program test_fx_test
