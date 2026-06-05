@@ -206,10 +206,8 @@ contains
             select case (code)
             case (34)   ! "
                 res = res // '\"'
-            case (92)   ! \
+            case (92)   ! backslash
                 res = res // '\\'
-            case (47)   ! /
-                res = res // '\/'
             case (8)    ! backspace
                 res = res // '\b'
             case (12)   ! form feed
