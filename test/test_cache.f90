@@ -1,5 +1,4 @@
 program test_cache
-    use, intrinsic :: iso_fortran_env, only: int64
     use fx_cache, only: cache_t, cache_init, cache_key, cache_has, &
                         cache_store, cache_restore, cache_store_bytes, &
                         cache_restore_bytes, cache_evict, cache_gc, &

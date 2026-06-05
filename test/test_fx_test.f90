@@ -1,5 +1,5 @@
 program test_fx_test
-    use, intrinsic :: iso_fortran_env, only: real64, error_unit
+    use, intrinsic :: iso_fortran_env, only: real64
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use fx_test, only: test_suite_t, test_suite_init, &
                        test_assert, test_assert_equal_int, &

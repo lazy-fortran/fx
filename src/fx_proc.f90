@@ -1,6 +1,5 @@
 module fx_proc
-    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, &
-                                           c_null_char, c_null_ptr
+    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
     implicit none
     private
 
