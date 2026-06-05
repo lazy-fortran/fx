@@ -1,38 +1,155 @@
 program test_cli
-    use fx_test, only: test_suite_t, test_suite_init, &
+    use fx_cli, only: cli_t, cli_has_flag, cli_get_value, &
+                      cli_get_positional, cli_n_positional, cli_command
+    use fx_test, only: test_suite_t, test_suite_init, test_assert, &
+                       test_assert_equal_int, test_assert_equal_str, &
                        test_suite_summary, test_suite_exit
     implicit none
 
     type(test_suite_t) :: suite
 
     call test_suite_init(suite, 'fx_cli')
-    call test_cli_has_flag(suite)
-    call test_cli_get_value(suite)
-    call test_cli_positional(suite)
-    call test_cli_command(suite)
+    call test_cli_flag_and_value_patterns(suite)
+    call test_cli_terminator_and_positionals(suite)
+    call test_cli_duplicates_and_empty_value(suite)
+    call test_cli_empty_args(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
 contains
 
-    subroutine test_cli_has_flag(suite)
+    subroutine test_cli_flag_and_value_patterns(suite)
         type(test_suite_t), intent(inout) :: suite
-        error stop "test_cli_has_flag not implemented"
-    end subroutine test_cli_has_flag
+        type(cli_t) :: cli
+        type(cli_t) :: spaced_cli
+        type(cli_t) :: blocked_cli
+        character(len=32), parameter :: args(3) = [character(len=32) :: &
+            '--json=compact', '--dot', 'build']
+        character(len=32), parameter :: spaced_args(2) = [character(len=32) :: &
+            '--json', 'full']
+        character(len=32), parameter :: blocked_args(2) = [character(len=32) :: &
+            '--json', '--other']
 
-    subroutine test_cli_get_value(suite)
-        type(test_suite_t), intent(inout) :: suite
-        error stop "test_cli_get_value not implemented"
-    end subroutine test_cli_get_value
+        call load_cli(cli, args)
+        call load_cli(spaced_cli, spaced_args)
+        call load_cli(blocked_cli, blocked_args)
 
-    subroutine test_cli_positional(suite)
-        type(test_suite_t), intent(inout) :: suite
-        error stop "test_cli_positional not implemented"
-    end subroutine test_cli_positional
+        call test_assert(suite, cli_has_flag(cli, '--dot'), &
+                         'cli_has_flag exact match')
+        call test_assert(suite, .not. cli_has_flag(cli, '--json'), &
+                         'cli_has_flag ignores key=value')
+        call test_assert_equal_str(suite, 'compact', &
+                                   cli_get_value(cli, 'json', 'fallback'), &
+                                   'cli_get_value key=value')
+        call test_assert_equal_str(suite, 'fallback', &
+                                   cli_get_value(cli, 'missing', 'fallback'), &
+                                   'cli_get_value default when missing')
+        call test_assert_equal_str(suite, 'full', &
+                                   cli_get_value(spaced_cli, 'json', &
+                                                 'fallback'), &
+                                   'cli_get_value spaced value')
+        call test_assert_equal_str(suite, 'fallback', &
+                                   cli_get_value(blocked_cli, 'json', &
+                                                 'fallback'), &
+                                   'cli_get_value does not consume next flag')
+        call test_assert(suite, cli_has_flag(blocked_cli, '--other'), &
+                         'cli_has_flag sees later flag')
+        call test_assert_equal_int(suite, 1, cli_n_positional(cli), &
+                                   'cli_n_positional counts one positional')
+        call test_assert_equal_str(suite, 'build', cli_command(cli), &
+                                   'cli_command first positional')
+        call test_assert_equal_str(suite, 'build', &
+                                   cli_get_positional(cli, 1), &
+                                   'cli_get_positional 1-based index')
+        call test_assert_equal_str(suite, '', cli_get_positional(cli, 0), &
+                                   'cli_get_positional rejects zero index')
+    end subroutine test_cli_flag_and_value_patterns
 
-    subroutine test_cli_command(suite)
+    subroutine test_cli_terminator_and_positionals(suite)
         type(test_suite_t), intent(inout) :: suite
-        error stop "test_cli_command not implemented"
-    end subroutine test_cli_command
+        type(cli_t) :: cli
+        character(len=32), parameter :: args(5) = [character(len=32) :: &
+            'build', '--', '--check', '-s', 'target']
+
+        call load_cli(cli, args)
+
+        call test_assert_equal_str(suite, 'fallback', &
+                                   cli_get_value(cli, 'check', 'fallback'), &
+                                   'cli_get_value ignores args after terminator')
+        call test_assert(suite, .not. cli_has_flag(cli, '--check'), &
+                         'cli_has_flag ignores args after terminator')
+        call test_assert(suite, .not. cli_has_flag(cli, '-s'), &
+                         'cli_has_flag rejects short flags')
+        call test_assert_equal_int(suite, 3, cli_n_positional(cli), &
+                                   'cli_n_positional counts args after terminator')
+        call test_assert_equal_str(suite, 'build', cli_command(cli), &
+                                   'cli_command before terminator')
+        call test_assert_equal_str(suite, '--check', &
+                                   cli_get_positional(cli, 2), &
+                                   'cli_get_positional keeps post-terminator arg')
+        call test_assert_equal_str(suite, '-s', cli_get_positional(cli, 3), &
+                                   'cli_get_positional keeps short flag literal')
+        call test_assert_equal_str(suite, 'target', &
+                                   cli_get_positional(cli, 4), &
+                                   'cli_get_positional keeps trailing positional')
+        call test_assert_equal_str(suite, '', cli_get_positional(cli, -1), &
+                                   'cli_get_positional rejects negative index')
+    end subroutine test_cli_terminator_and_positionals
+
+    subroutine test_cli_duplicates_and_empty_value(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(cli_t) :: cli
+        character(len=32), parameter :: args(4) = [character(len=32) :: &
+            '--json=', '--check', '--check', 'go']
+
+        call load_cli(cli, args)
+
+        call test_assert_equal_str(suite, '', &
+                                   cli_get_value(cli, 'json', 'fallback'), &
+                                   'cli_get_value preserves empty value')
+        call test_assert(suite, cli_has_flag(cli, '--check'), &
+                         'cli_has_flag tolerates duplicates')
+        call test_assert_equal_int(suite, 1, cli_n_positional(cli), &
+                                   'cli_n_positional ignores duplicate flags')
+        call test_assert_equal_str(suite, 'go', cli_command(cli), &
+                                   'cli_command with one positional')
+        call test_assert_equal_str(suite, 'go', cli_get_positional(cli, 1), &
+                                   'cli_get_positional with one positional')
+        call test_assert_equal_str(suite, '', cli_get_positional(cli, 2), &
+                                   'cli_get_positional rejects out-of-range index')
+    end subroutine test_cli_duplicates_and_empty_value
+
+    subroutine test_cli_empty_args(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(cli_t) :: cli
+        character(len=32), allocatable :: args(:)
+
+        allocate(args(0))
+        call load_cli(cli, args)
+
+        call test_assert_equal_int(suite, 0, cli_n_positional(cli), &
+                                   'cli_n_positional zero for empty args')
+        call test_assert_equal_str(suite, '', cli_command(cli), &
+                                   'cli_command empty for empty args')
+        call test_assert_equal_str(suite, '', cli_get_positional(cli, 1), &
+                                   'cli_get_positional empty for empty args')
+        call test_assert_equal_str(suite, '', cli_get_value(cli, 'json', ''), &
+                                   'cli_get_value default for empty args')
+        call test_assert(suite, .not. cli_has_flag(cli, '--json'), &
+                         'cli_has_flag false for empty args')
+    end subroutine test_cli_empty_args
+
+    subroutine load_cli(cli, args)
+        type(cli_t), intent(out) :: cli
+        character(len=*), intent(in) :: args(:)
+        integer :: i
+
+        cli%n_args = size(args)
+        cli%args = ' '
+        cli%program_name = ' '
+        do i = 1, cli%n_args
+            cli%args(i) = trim(args(i))
+        end do
+    end subroutine load_cli
 
 end program test_cli
