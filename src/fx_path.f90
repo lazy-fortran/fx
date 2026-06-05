@@ -15,19 +15,21 @@ contains
         character(len=*), intent(in) :: b
         character(len=:), allocatable :: res
         character(len=:), allocatable :: left
-        character(len=:), allocatable :: right
+
+        if (path_is_absolute(b)) then
+            res = trim(b)
+            return
+        end if
 
         left = strip_trailing_slashes(a)
-        right = trim(b)
-
         if (len_trim(left) == 0) then
-            res = right
-        else if (len_trim(right) == 0) then
+            res = trim(b)
+        else if (len_trim(b) == 0) then
             res = left
         else if (left == '/') then
-            res = '/' // right
+            res = '/' // trim(b)
         else
-            res = left // '/' // right
+            res = left // '/' // trim(b)
         end if
     end function path_join
 
@@ -125,7 +127,7 @@ contains
         clean_prefix = path_normalize(prefix)
         n_prefix = len_trim(clean_prefix)
 
-        if (n_prefix == 0) then
+        if (n_prefix == 0 .or. clean_prefix == '.') then
             res = clean_p
             return
         end if
@@ -147,26 +149,70 @@ contains
     pure function path_normalize(p) result(res)
         character(len=*), intent(in) :: p
         character(len=:), allocatable :: res
-        integer :: i
-        logical :: prev_slash
-        character(len=1) :: ch
+        character(len=256) :: stack(256)
+        integer :: n_stack
+        logical :: is_abs
+        integer :: i, start, seg_end
+        character(len=256) :: seg
 
-        res = ''
-        prev_slash = .false.
-        do i = 1, len_trim(p)
-            ch = p(i:i)
-            if (ch == '/') then
-                if (prev_slash) cycle
-                prev_slash = .true.
+        if (len_trim(p) == 0) then
+            res = '.'
+            return
+        end if
+
+        is_abs = p(1:1) == '/'
+        n_stack = 0
+        i = 1
+
+        do
+            if (i > len_trim(p)) exit
+
+            ! Skip consecutive slashes
+            do while (i <= len_trim(p) .and. p(i:i) == '/')
+                i = i + 1
+            end do
+            if (i > len_trim(p)) exit
+
+            ! Find end of segment
+            start = i
+            do while (i <= len_trim(p) .and. p(i:i) /= '/')
+                i = i + 1
+            end do
+            seg_end = i - 1
+            seg = p(start:seg_end)
+
+            if (trim(seg) == '.' .or. len_trim(seg) == 0) then
+                cycle
+            else if (trim(seg) == '..') then
+                if (n_stack > 0 .and. trim(stack(n_stack)) /= '..') then
+                    n_stack = n_stack - 1
+                else if (.not. is_abs) then
+                    n_stack = n_stack + 1
+                    stack(n_stack) = '..'
+                end if
             else
-                prev_slash = .false.
+                n_stack = n_stack + 1
+                stack(n_stack) = seg
             end if
-            res = res // ch
         end do
 
-        if (len_trim(res) > 1 .and. res(len_trim(res):len_trim(res)) == '/') then
-            res = res(:len_trim(res) - 1)
+        if (n_stack == 0) then
+            if (is_abs) then
+                res = '/'
+            else
+                res = '.'
+            end if
+            return
         end if
+
+        if (is_abs) then
+            res = '/' // trim(stack(1))
+        else
+            res = trim(stack(1))
+        end if
+        do i = 2, n_stack
+            res = res // '/' // trim(stack(i))
+        end do
     end function path_normalize
 
     pure logical function path_is_absolute(p)
@@ -175,31 +221,57 @@ contains
         path_is_absolute = len_trim(p) > 0 .and. p(1:1) == '/'
     end function path_is_absolute
 
-    pure function path_relative(p, base) result(res)
-        character(len=*), intent(in) :: p
+    pure function path_relative(base, target) result(res)
         character(len=*), intent(in) :: base
+        character(len=*), intent(in) :: target
         character(len=:), allocatable :: res
-        character(len=:), allocatable :: clean_p
-        character(len=:), allocatable :: clean_base
-        integer :: n_base
+        character(len=:), allocatable :: norm_base
+        character(len=:), allocatable :: norm_target
+        character(len=256) :: base_parts(256)
+        character(len=256) :: tgt_parts(256)
+        integer :: n_base, n_tgt, common, i
+        character(len=:), allocatable :: rel
 
-        clean_p = path_normalize(p)
-        clean_base = path_normalize(base)
-        n_base = len_trim(clean_base)
+        norm_base = path_normalize(base)
+        norm_target = path_normalize(target)
 
-        if (n_base == 0) then
-            res = clean_p
+        if (norm_base == norm_target) then
+            res = '.'
             return
         end if
 
-        if (trim(clean_p) == trim(clean_base)) then
-            res = ''
-        else if (len_trim(clean_p) > n_base .and. &
-                 clean_p(1:n_base) == clean_base .and. &
-                 clean_p(n_base + 1:n_base + 1) == '/') then
-            res = clean_p(n_base + 2:)
+        call split_path(norm_base, base_parts, n_base)
+        call split_path(norm_target, tgt_parts, n_tgt)
+
+        common = 0
+        do while (common < n_base .and. common < n_tgt)
+            if (trim(base_parts(common + 1)) == trim(tgt_parts(common + 1))) then
+                common = common + 1
+            else
+                exit
+            end if
+        end do
+
+        rel = ''
+        do i = 1, n_base - common
+            if (len_trim(rel) == 0) then
+                rel = '..'
+            else
+                rel = rel // '/..'
+            end if
+        end do
+        do i = common + 1, n_tgt
+            if (len_trim(rel) == 0) then
+                rel = trim(tgt_parts(i))
+            else
+                rel = rel // '/' // trim(tgt_parts(i))
+            end if
+        end do
+
+        if (len_trim(rel) == 0) then
+            res = '.'
         else
-            res = clean_p
+            res = rel
         end if
     end function path_relative
 
@@ -222,6 +294,40 @@ contains
 
         path_is_file = path_exists(p) .and. .not. path_is_dir(p)
     end function path_is_file
+
+    ! Split normalized path on '/' into parts array
+    pure subroutine split_path(p, parts, n_parts)
+        character(len=*), intent(in) :: p
+        character(len=256), intent(out) :: parts(:)
+        integer, intent(out) :: n_parts
+        integer :: i, start
+
+        n_parts = 0
+        start = 1
+        if (len_trim(p) == 0 .or. p == '.') return
+
+        ! Skip leading slash for absolute paths
+        if (p(1:1) == '/') start = 2
+
+        i = start
+        do
+            if (i > len_trim(p)) then
+                if (i > start) then
+                    n_parts = n_parts + 1
+                    parts(n_parts) = p(start:)
+                end if
+                exit
+            end if
+            if (p(i:i) == '/') then
+                if (i > start) then
+                    n_parts = n_parts + 1
+                    parts(n_parts) = p(start:i - 1)
+                end if
+                start = i + 1
+            end if
+            i = i + 1
+        end do
+    end subroutine split_path
 
     pure function strip_trailing_slashes(p) result(res)
         character(len=*), intent(in) :: p
