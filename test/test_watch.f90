@@ -178,7 +178,8 @@ contains
         call test_assert_equal_int(suite, 0, ierr, 'delete add ierr')
 
         call run_cmd('rm -rf -- ' // trim(child_dir))
-        call watcher_poll(w, changed_path, event_type, 1000, got_event)
+        call poll_until_match(w, child_dir, WATCH_DELETE, 200, 10, &
+                              got_event, changed_path, event_type)
         call test_assert(suite, got_event, 'delete event received')
         call test_assert_equal_int(suite, WATCH_DELETE, event_type, &
                                    'delete event type')
@@ -216,7 +217,8 @@ contains
         call test_assert_equal_int(suite, 0, ierr, 'moved add ierr')
 
         call run_cmd('mv -- ' // trim(source_file) // ' ' // trim(moved_file))
-        call watcher_poll(w, changed_path, event_type, 1000, got_event)
+        call poll_until_match(w, moved_file, WATCH_CREATE, 200, 10, &
+                              got_event, changed_path, event_type)
         call test_assert(suite, got_event, 'moved-to event received')
         call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
                                    'moved-to maps to create')
@@ -231,6 +233,7 @@ contains
         type(test_suite_t), intent(inout) :: suite
         type(watcher_t) :: w
         character(len=:), allocatable :: root
+        character(len=:), allocatable :: external_root
         character(len=:), allocatable :: target_dir
         character(len=:), allocatable :: link_dir
         character(len=:), allocatable :: target_file
@@ -240,10 +243,12 @@ contains
         logical :: got_event
 
         root = temp_root('symlink')
-        target_dir = join_path(root, 'target')
+        external_root = temp_root('symlink-outside')
+        target_dir = join_path(external_root, 'target')
         link_dir = join_path(root, 'link')
         target_file = join_path(target_dir, 'linked.f90')
 
+        call run_cmd('mkdir -p -- ' // trim(root))
         call run_cmd('mkdir -p -- ' // trim(target_dir))
         call write_file(target_file, 'module target')
         call run_cmd('ln -s -- ' // trim(target_dir) // ' ' // trim(link_dir))
@@ -258,6 +263,7 @@ contains
 
         call watcher_close(w)
         call cleanup_tree(root)
+        call cleanup_tree(external_root)
     end subroutine test_watch_symlink_directory_limit
 
     subroutine run_cmd(cmd)
@@ -352,5 +358,38 @@ contains
         if (len_trim(path) == 0) return
         call run_cmd('rm -rf -- ' // trim(path))
     end subroutine cleanup_tree
+
+    subroutine poll_until_match(w, expected_path, expected_type, timeout_ms, &
+                                max_tries, matched, actual_path, actual_type)
+        type(watcher_t), intent(inout) :: w
+        character(len=*), intent(in) :: expected_path
+        integer, intent(in) :: expected_type
+        integer, intent(in) :: timeout_ms
+        integer, intent(in) :: max_tries
+        logical, intent(out) :: matched
+        character(len=*), intent(out) :: actual_path
+        integer, intent(out) :: actual_type
+
+        integer :: i
+        logical :: got_event
+        character(len=4096) :: path
+        integer :: event_type
+
+        matched = .false.
+        actual_path = ''
+        actual_type = 0
+
+        do i = 1, max_tries
+            call watcher_poll(w, path, event_type, timeout_ms, got_event)
+            if (.not. got_event) cycle
+            if (trim(path) == trim(expected_path) .and. &
+                event_type == expected_type) then
+                matched = .true.
+                actual_path = path
+                actual_type = event_type
+                return
+            end if
+        end do
+    end subroutine poll_until_match
 
 end program test_watch

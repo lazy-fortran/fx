@@ -7,9 +7,17 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/inotify.h>
 #include <dirent.h>
+#include <poll.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
+#include <limits.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 /*
  * fx_sys.c: C implementations for fx_proc.f90 Fortran interfaces.
@@ -211,4 +219,550 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
 
 int fx_c_get_mcp_framing(void) {
     return fx_mcp_framing;
+}
+
+typedef struct watch_entry {
+    int wd;
+    char *path;
+    struct watch_entry *next;
+} watch_entry_t;
+
+typedef struct watch_state {
+    int fd;
+    watch_entry_t *watches;
+    unsigned char pending[sizeof(struct inotify_event) + PATH_MAX + 1];
+    size_t pending_len;
+    size_t pending_pos;
+    struct watch_state *next;
+} watch_state_t;
+
+static watch_state_t *fx_watch_states = NULL;
+
+static void fx_trim_path(const char *path, char *out, size_t out_len)
+{
+    size_t len;
+
+    if (out_len == 0) return;
+    if (path == NULL) {
+        out[0] = '\0';
+        return;
+    }
+
+    len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    if (len >= out_len) len = out_len - 1;
+    memcpy(out, path, len);
+    out[len] = '\0';
+}
+
+static int fx_join_path(char *out, size_t out_len, const char *base,
+                        const char *name)
+{
+    char clean_base[PATH_MAX];
+    size_t len;
+
+    fx_trim_path(base, clean_base, sizeof(clean_base));
+    if (strcmp(clean_base, "/") == 0) {
+        return snprintf(out, out_len, "/%s", name);
+    }
+
+    len = strlen(clean_base);
+    if (len == 0) {
+        return snprintf(out, out_len, "%s", name);
+    }
+
+    return snprintf(out, out_len, "%s/%s", clean_base, name);
+}
+
+static int fx_path_kind(const char *path, int *is_dir, int *is_symlink_dir)
+{
+    struct stat lst;
+    struct stat st;
+
+    if (is_dir) *is_dir = 0;
+    if (is_symlink_dir) *is_symlink_dir = 0;
+
+    if (lstat(path, &lst) != 0) return -1;
+    if (S_ISLNK(lst.st_mode)) {
+        if (is_symlink_dir) *is_symlink_dir = 1;
+        if (stat(path, &st) != 0) return -1;
+        if (is_dir) *is_dir = S_ISDIR(st.st_mode);
+        return 0;
+    }
+
+    if (is_dir) *is_dir = S_ISDIR(lst.st_mode);
+    return 0;
+}
+
+static watch_state_t *fx_watch_state_find(int fd)
+{
+    watch_state_t *state;
+
+    for (state = fx_watch_states; state != NULL; state = state->next) {
+        if (state->fd == fd) return state;
+    }
+    return NULL;
+}
+
+static watch_state_t *fx_watch_state_add(int fd)
+{
+    watch_state_t *state;
+
+    state = (watch_state_t *)calloc(1, sizeof(*state));
+    if (state == NULL) return NULL;
+    state->fd = fd;
+    state->next = fx_watch_states;
+    fx_watch_states = state;
+    return state;
+}
+
+static void fx_watch_entry_free(watch_entry_t *entry)
+{
+    if (entry == NULL) return;
+    free(entry->path);
+    free(entry);
+}
+
+static void fx_watch_state_free(watch_state_t *state)
+{
+    watch_entry_t *entry;
+    watch_entry_t *next;
+
+    if (state == NULL) return;
+    entry = state->watches;
+    while (entry != NULL) {
+        next = entry->next;
+        fx_watch_entry_free(entry);
+        entry = next;
+    }
+    free(state);
+}
+
+static void fx_watch_state_remove_fd(int fd)
+{
+    watch_state_t *state;
+    watch_state_t *prev;
+
+    prev = NULL;
+    state = fx_watch_states;
+    while (state != NULL) {
+        if (state->fd == fd) {
+            if (prev == NULL) {
+                fx_watch_states = state->next;
+            } else {
+                prev->next = state->next;
+            }
+            fx_watch_state_free(state);
+            return;
+        }
+        prev = state;
+        state = state->next;
+    }
+}
+
+static watch_entry_t *fx_watch_state_find_wd(watch_state_t *state, int wd,
+                                             watch_entry_t **prev_out)
+{
+    watch_entry_t *entry;
+    watch_entry_t *prev;
+
+    if (prev_out != NULL) *prev_out = NULL;
+    if (state == NULL) return NULL;
+
+    prev = NULL;
+    entry = state->watches;
+    while (entry != NULL) {
+        if (entry->wd == wd) {
+            if (prev_out != NULL) *prev_out = prev;
+            return entry;
+        }
+        prev = entry;
+        entry = entry->next;
+    }
+    return NULL;
+}
+
+static void fx_watch_state_store(watch_state_t *state, int wd,
+                                 const char *path)
+{
+    watch_entry_t *entry;
+    watch_entry_t *prev;
+    char clean[PATH_MAX];
+    size_t len;
+
+    if (state == NULL) return;
+    entry = fx_watch_state_find_wd(state, wd, &prev);
+    fx_trim_path(path, clean, sizeof(clean));
+    if (entry != NULL) {
+        free(entry->path);
+        entry->path = strdup(clean);
+        return;
+    }
+
+    entry = (watch_entry_t *)calloc(1, sizeof(*entry));
+    if (entry == NULL) return;
+    len = strlen(clean);
+    entry->path = (char *)malloc(len + 1);
+    if (entry->path == NULL) {
+        free(entry);
+        return;
+    }
+    memcpy(entry->path, clean, len + 1);
+    entry->wd = wd;
+    entry->next = state->watches;
+    state->watches = entry;
+}
+
+static void fx_watch_state_remove_wd(watch_state_t *state, int wd)
+{
+    watch_entry_t *entry;
+    watch_entry_t *prev;
+
+    entry = fx_watch_state_find_wd(state, wd, &prev);
+    if (entry == NULL) return;
+
+    if (prev == NULL) {
+        state->watches = entry->next;
+    } else {
+        prev->next = entry->next;
+    }
+    fx_watch_entry_free(entry);
+}
+
+static int fx_dir_count_rec(const char *path, int *count)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char child[PATH_MAX];
+    int is_dir;
+    int is_symlink_dir;
+    int status;
+
+    status = fx_path_kind(path, &is_dir, &is_symlink_dir);
+    if (status != 0) return -1;
+    if (!is_dir) return -1;
+
+    (*count)++;
+    if (is_symlink_dir) return 0;
+
+    dir = opendir(path);
+    if (dir == NULL) return -1;
+
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (fx_join_path(child, sizeof(child), path, entry->d_name) < 0) {
+            closedir(dir);
+            return -1;
+        }
+        status = fx_path_kind(child, &is_dir, &is_symlink_dir);
+        if (status != 0) {
+            closedir(dir);
+            return -1;
+        }
+        if (!is_dir) {
+            continue;
+        }
+        if (fx_dir_count_rec(child, count) != 0) {
+            closedir(dir);
+            return -1;
+        }
+    }
+
+    if (errno != 0) {
+        closedir(dir);
+        return -1;
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+static int fx_dir_collect_rec(const char *path, char *dirs, int dir_len,
+                              int max_dirs, int *count)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char child[PATH_MAX];
+    int is_dir;
+    int is_symlink_dir;
+    int status;
+    char *slot;
+
+    if (*count >= max_dirs) return -1;
+    if (fx_path_kind(path, &is_dir, &is_symlink_dir) != 0) return -1;
+    if (!is_dir) return -1;
+
+    slot = dirs + ((size_t) *count) * (size_t) dir_len;
+    memset(slot, 0, (size_t) dir_len);
+    if (snprintf(slot, (size_t) dir_len, "%s", path) >= dir_len) {
+        return -1;
+    }
+    (*count)++;
+    if (is_symlink_dir) return 0;
+
+    dir = opendir(path);
+    if (dir == NULL) return -1;
+
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (fx_join_path(child, sizeof(child), path, entry->d_name) < 0) {
+            closedir(dir);
+            return -1;
+        }
+        status = fx_path_kind(child, &is_dir, &is_symlink_dir);
+        if (status != 0) {
+            closedir(dir);
+            return -1;
+        }
+        if (!is_dir) {
+            continue;
+        }
+        if (fx_dir_collect_rec(child, dirs, dir_len, max_dirs, count) != 0) {
+            closedir(dir);
+            return -1;
+        }
+    }
+
+    if (errno != 0) {
+        closedir(dir);
+        return -1;
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+int fx_c_inotify_init(void)
+{
+    int fd;
+    int flags;
+
+    fd = inotify_init();
+    if (fd < 0) return -1;
+
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    flags = fcntl(fd, F_GETFD, 0);
+    if (flags >= 0 && fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (fx_watch_state_add(fd) == NULL) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+int fx_c_inotify_add_watch(int fd, const char *path, int mask)
+{
+    char clean[PATH_MAX];
+    int is_dir;
+    int is_symlink_dir;
+    int effective_mask;
+    int wd;
+    watch_state_t *state;
+
+    state = fx_watch_state_find(fd);
+    if (state == NULL) state = fx_watch_state_add(fd);
+    if (state == NULL) return -1;
+
+    fx_trim_path(path, clean, sizeof(clean));
+    effective_mask = mask;
+    if (fx_path_kind(clean, &is_dir, &is_symlink_dir) == 0 &&
+        is_symlink_dir && is_dir) {
+        effective_mask |= IN_DONT_FOLLOW;
+    }
+
+    wd = inotify_add_watch(fd, clean, (uint32_t) effective_mask);
+    if (wd < 0) {
+        if (errno == ENOSPC) {
+            fprintf(stderr,
+                    "fx_watch: inotify watch limit reached for %s\n",
+                    clean);
+        }
+        return -1;
+    }
+
+    fx_watch_state_store(state, wd, clean);
+    return wd;
+}
+
+int fx_c_inotify_rm_watch(int fd, int wd)
+{
+    watch_state_t *state;
+    int rc;
+
+    state = fx_watch_state_find(fd);
+    if (state == NULL) return -1;
+
+    rc = inotify_rm_watch(fd, wd);
+    if (rc < 0 && errno != EINVAL) return -1;
+
+    fx_watch_state_remove_wd(state, wd);
+    return 0;
+}
+
+int fx_c_inotify_close(int fd)
+{
+    int rc;
+
+    if (fd < 0) return 0;
+    fx_watch_state_remove_fd(fd);
+    rc = close(fd);
+    return rc;
+}
+
+int fx_c_inotify_poll(int fd, char *path_buf, int path_len,
+                      int *event_type, int timeout_ms)
+{
+    struct pollfd pfd;
+    ssize_t len;
+    struct inotify_event *event;
+    watch_state_t *state;
+    watch_entry_t *entry;
+    char full_path[PATH_MAX];
+    int mapped_type;
+    int got;
+    size_t event_size;
+
+    if (event_type != NULL) *event_type = 0;
+    if (path_buf != NULL && path_len > 0) path_buf[0] = '\0';
+
+    state = fx_watch_state_find(fd);
+    if (state == NULL) return 0;
+
+    for (;;) {
+        if (state->pending_pos >= state->pending_len) {
+            pfd.fd = fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+
+            for (;;) {
+                got = poll(&pfd, 1, timeout_ms);
+                if (got < 0) {
+                    if (errno == EINTR) continue;
+                    return -1;
+                }
+                if (got == 0) return 0;
+                break;
+            }
+
+            for (;;) {
+                len = read(fd, state->pending, sizeof(state->pending));
+                if (len < 0) {
+                    if (errno == EINTR) continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+                    return -1;
+                }
+                if (len < (ssize_t) sizeof(struct inotify_event)) return 0;
+                state->pending_len = (size_t) len;
+                state->pending_pos = 0;
+                break;
+            }
+        }
+
+        event = (struct inotify_event *) (state->pending + state->pending_pos);
+        event_size = sizeof(struct inotify_event) + (size_t) event->len;
+        if (event_size == 0 || state->pending_pos + event_size > state->pending_len) {
+            state->pending_pos = state->pending_len;
+            continue;
+        }
+        state->pending_pos += event_size;
+        if (state->pending_pos >= state->pending_len) {
+            state->pending_pos = 0;
+            state->pending_len = 0;
+        }
+
+        if ((event->mask & IN_IGNORED) != 0 ||
+            (event->mask & IN_Q_OVERFLOW) != 0) {
+            continue;
+        }
+
+        mapped_type = 0;
+        if ((event->mask & (IN_DELETE | IN_DELETE_SELF |
+                            IN_MOVED_FROM | IN_MOVE_SELF)) != 0) {
+            mapped_type = 3;
+        } else if ((event->mask & (IN_CREATE | IN_MOVED_TO)) != 0) {
+            mapped_type = 2;
+        } else if ((event->mask & IN_MODIFY) != 0) {
+            mapped_type = 1;
+        }
+        if (mapped_type == 0) continue;
+
+        entry = fx_watch_state_find_wd(state, event->wd, NULL);
+        if (entry == NULL) continue;
+
+        if (event->len > 0 && event->name[0] != '\0' &&
+            (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF)) == 0) {
+            if (fx_join_path(full_path, sizeof(full_path), entry->path,
+                             event->name) < 0) {
+                continue;
+            }
+        } else {
+            if (snprintf(full_path, sizeof(full_path), "%s", entry->path) >=
+                (int) sizeof(full_path)) {
+                continue;
+            }
+        }
+
+        if (event_type != NULL) *event_type = mapped_type;
+        if (path_buf != NULL && path_len > 0) {
+            snprintf(path_buf, (size_t) path_len, "%s", full_path);
+        }
+        return 1;
+    }
+}
+
+int fx_c_count_dirs(const char *root, int *n_dirs)
+{
+    int count;
+
+    if (n_dirs == NULL) return -1;
+    count = 0;
+    if (fx_dir_count_rec(root, &count) != 0) return -1;
+    *n_dirs = count;
+    return 0;
+}
+
+int fx_c_collect_dirs(const char *root, char *dirs, int dir_len,
+                      int *n_dirs, int max_dirs)
+{
+    int count;
+
+    if (n_dirs == NULL || dirs == NULL || dir_len <= 0 || max_dirs <= 0) {
+        return -1;
+    }
+
+    count = 0;
+    if (fx_dir_collect_rec(root, dirs, dir_len, max_dirs, &count) != 0) {
+        return -1;
+    }
+    *n_dirs = count;
+    return 0;
+}
+
+int fx_c_path_is_dir(const char *path)
+{
+    int is_dir;
+    int is_symlink_dir;
+
+    if (fx_path_kind(path, &is_dir, &is_symlink_dir) != 0) return 0;
+    return is_dir ? 1 : 0;
 }
