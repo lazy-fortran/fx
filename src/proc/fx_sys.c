@@ -28,71 +28,370 @@ static int fx_inotify_force_enospc_once = 0;
  * signal handling via POSIX APIs.
  */
 
-/* Fork/execvp with stdout+stderr capture via pipes. */
+/* Slot size for fx_c_scan_dir output: matches character(len=512) in fx_proc.f90 */
+#define FX_SCAN_SLOT 512
+
+struct fx_path_list {
+    char **items;
+    size_t n;
+    size_t cap;
+};
+
+static int fx_path_list_add(struct fx_path_list *list, const char *path)
+{
+    char **next;
+    size_t next_cap;
+
+    if (list->n == list->cap) {
+        next_cap = list->cap == 0 ? 64 : list->cap * 2;
+        next = realloc(list->items, next_cap * sizeof(char *));
+        if (next == NULL) return -1;
+        list->items = next;
+        list->cap = next_cap;
+    }
+    list->items[list->n] = strdup(path);
+    if (list->items[list->n] == NULL) return -1;
+    list->n++;
+    return 0;
+}
+
+static void fx_path_list_free(struct fx_path_list *list)
+{
+    size_t i;
+    for (i = 0; i < list->n; i++) free(list->items[i]);
+    free(list->items);
+    list->items = NULL;
+    list->n = 0;
+    list->cap = 0;
+}
+
+static int fx_path_cmp(const void *lhs, const void *rhs)
+{
+    const char *const *a = lhs;
+    const char *const *b = rhs;
+    return strcmp(*a, *b);
+}
+
+static int fx_scan_skip_dir(const char *name)
+{
+    return strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
+           strcmp(name, ".git") == 0 || strcmp(name, "build") == 0 ||
+           strcmp(name, "node_modules") == 0;
+}
+
+static int fx_has_extension(const char *path, const char *extensions, int n_ext)
+{
+    const char *dot;
+    const char *p;
+    int i;
+
+    dot = strrchr(path, '.');
+    if (dot == NULL) return 0;
+    p = extensions;
+    for (i = 0; i < n_ext; i++) {
+        if (strcmp(dot, p) == 0) return 1;
+        p += strlen(p) + 1;
+    }
+    return 0;
+}
+
+/* !$omp parallel: future parallelism for large directory trees */
+static int fx_scan_dir_rec(const char *root, const char *extensions, int n_ext,
+                            struct fx_path_list *list)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char path[PATH_MAX];
+    struct stat st;
+
+    dir = opendir(root);
+    if (dir == NULL) return (errno == ENOENT) ? 0 : -1;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (fx_scan_skip_dir(entry->d_name)) continue;
+        snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (fx_scan_dir_rec(path, extensions, n_ext, list) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        } else if (S_ISREG(st.st_mode)) {
+            if (fx_has_extension(path, extensions, n_ext)) {
+                if (fx_path_list_add(list, path) != 0) {
+                    closedir(dir);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+/* Fork/execvp with stdout+stderr capture via pipes. Uses poll() to avoid deadlock. */
 int fx_c_exec(const char *argv, int n_argv,
               char *stdout_buf, int *stdout_len,
               char *stderr_buf, int *stderr_len)
 {
-    (void)argv;
-    (void)n_argv;
+    char **args;
+    const char *p;
+    int out_pipe[2], err_pipe[2];
+    pid_t pid;
+    int status;
+    int max_out, max_err;
+    int n_out, n_err;
+    int done_out, done_err;
+    struct pollfd pfds[2];
+    char discard[4096];
+    ssize_t got;
+    int i;
+
+    args = malloc(((size_t)n_argv + 1) * sizeof(char *));
+    if (args == NULL) return -1;
+    p = argv;
+    for (i = 0; i < n_argv; i++) {
+        args[i] = (char *)p;
+        p += strlen(p) + 1;
+    }
+    args[n_argv] = NULL;
+
+    max_out = *stdout_len;
+    max_err = *stderr_len;
     *stdout_len = 0;
     *stderr_len = 0;
-    stdout_buf[0] = '\0';
-    stderr_buf[0] = '\0';
-    return -1; /* not implemented */
+
+    if (pipe(out_pipe) < 0 || pipe(err_pipe) < 0) {
+        free(args);
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        free(args);
+        return -1;
+    }
+
+    if (pid == 0) {
+        close(out_pipe[0]);
+        close(err_pipe[0]);
+        if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
+        close(out_pipe[1]);
+        close(err_pipe[1]);
+        execvp(args[0], args);
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+    free(args);
+
+    done_out = 0;
+    done_err = 0;
+    n_out = 0;
+    n_err = 0;
+    pfds[0].fd = out_pipe[0];
+    pfds[0].events = POLLIN;
+    pfds[1].fd = err_pipe[0];
+    pfds[1].events = POLLIN;
+
+    while (!done_out || !done_err) {
+        pfds[0].fd = done_out ? -1 : out_pipe[0];
+        pfds[1].fd = done_err ? -1 : err_pipe[0];
+        pfds[0].revents = 0;
+        pfds[1].revents = 0;
+
+        if (poll(pfds, 2, -1) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        if (!done_out && (pfds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+            if (n_out < max_out) {
+                got = read(out_pipe[0], stdout_buf + n_out,
+                           (size_t)(max_out - n_out));
+            } else {
+                got = read(out_pipe[0], discard, sizeof(discard));
+            }
+            if (got <= 0) done_out = 1;
+            else if (n_out < max_out) n_out += (int)got;
+        }
+
+        if (!done_err && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+            if (n_err < max_err) {
+                got = read(err_pipe[0], stderr_buf + n_err,
+                           (size_t)(max_err - n_err));
+            } else {
+                got = read(err_pipe[0], discard, sizeof(discard));
+            }
+            if (got <= 0) done_err = 1;
+            else if (n_err < max_err) n_err += (int)got;
+        }
+    }
+
+    close(out_pipe[0]);
+    close(err_pipe[0]);
+    *stdout_len = n_out;
+    *stderr_len = n_err;
+
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 1;
 }
 
 /* Fork/execvp without output capture. Returns exit code. */
 int fx_c_exec_silent(const char *argv, int n_argv)
 {
-    (void)argv;
-    (void)n_argv;
-    return -1; /* not implemented */
+    char **args;
+    const char *p;
+    pid_t pid;
+    int status;
+    int i;
+
+    args = malloc(((size_t)n_argv + 1) * sizeof(char *));
+    if (args == NULL) return -1;
+    p = argv;
+    for (i = 0; i < n_argv; i++) {
+        args[i] = (char *)p;
+        p += strlen(p) + 1;
+    }
+    args[n_argv] = NULL;
+
+    pid = fork();
+    if (pid < 0) { free(args); return -1; }
+
+    if (pid == 0) {
+        execvp(args[0], args);
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    free(args);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 1;
 }
 
 /*
- * Recursive directory scan.
- * Walks root, collects files matching given extensions.
- * Skips .git, build, node_modules directories.
- * Returns sorted file list.
+ * Recursive directory scan with extension filtering.
+ * extensions: flat null-terminated strings, n_ext entries.
+ * files: output slots of FX_SCAN_SLOT bytes each (matches character(len=512)).
+ * Skips .git, build, node_modules. Sorts results.
  */
-/* !$omp parallel: future parallelism for large directory trees */
 int fx_c_scan_dir(const char *root, const char *extensions, int n_ext,
                   char *files, int *n_files, int max_files)
 {
-    (void)root;
-    (void)extensions;
-    (void)n_ext;
-    (void)files;
-    (void)max_files;
+    struct fx_path_list list;
+    size_t i;
+    char *slot;
+
     *n_files = 0;
-    return -1; /* not implemented */
+    list.items = NULL;
+    list.n = 0;
+    list.cap = 0;
+
+    if (fx_scan_dir_rec(root, extensions, n_ext, &list) != 0) {
+        fx_path_list_free(&list);
+        return -1;
+    }
+
+    qsort(list.items, list.n, sizeof(char *), fx_path_cmp);
+
+    for (i = 0; i < list.n && (int)i < max_files; i++) {
+        slot = files + i * FX_SCAN_SLOT;
+        memset(slot, 0, FX_SCAN_SLOT);
+        strncpy(slot, list.items[i], FX_SCAN_SLOT - 1);
+    }
+
+    *n_files = (int)(list.n < (size_t)max_files ? list.n : (size_t)max_files);
+    fx_path_list_free(&list);
+    return 0;
 }
 
-/* Read entire file into buffer. Returns 0 on success, -1 on error. */
+/* Read entire file into buffer. n_bytes: in=max, out=actual. */
 int fx_c_file_read(const char *path, char *content, int *n_bytes)
 {
-    (void)path;
-    (void)content;
+    int fd;
+    ssize_t got;
+    int max, total;
+
+    max = *n_bytes;
     *n_bytes = 0;
-    return -1; /* not implemented */
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+
+    total = 0;
+    while (total < max) {
+        got = read(fd, content + total, (size_t)(max - total));
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return -1;
+        }
+        if (got == 0) break;
+        total += (int)got;
+    }
+
+    close(fd);
+    *n_bytes = total;
+    return 0;
 }
 
 /* Write buffer to file. Returns 0 on success, -1 on error. */
 int fx_c_file_write(const char *path, const char *content, int n_bytes)
 {
-    (void)path;
-    (void)content;
-    (void)n_bytes;
-    return -1; /* not implemented */
+    int fd;
+    ssize_t written;
+    int total;
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return -1;
+
+    total = 0;
+    while (total < n_bytes) {
+        written = write(fd, content + total, (size_t)(n_bytes - total));
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return -1;
+        }
+        total += (int)written;
+    }
+
+    close(fd);
+    return 0;
 }
 
-/* Create a temp file with given prefix. Returns path and length. */
+/* Create a temp file. path_len receives the length of the path written. */
 void fx_c_tmpfile(const char *prefix, char *path, int *path_len)
 {
-    (void)prefix;
+    char tpl[PATH_MAX];
+    int fd;
+    int len;
+
     path[0] = '\0';
     *path_len = 0;
+
+    if (prefix != NULL && prefix[0] != '\0') {
+        len = snprintf(tpl, sizeof(tpl), "%sXXXXXX", prefix);
+    } else {
+        len = snprintf(tpl, sizeof(tpl), "/tmp/fx_XXXXXX");
+    }
+
+    if (len < 0 || len >= (int)sizeof(tpl)) return;
+
+    fd = mkstemp(tpl);
+    if (fd < 0) return;
+    close(fd);
+
+    len = (int)strlen(tpl);
+    memcpy(path, tpl, (size_t)len + 1);
+    *path_len = len;
 }
 
 /* Return current process ID. */
