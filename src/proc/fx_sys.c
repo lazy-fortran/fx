@@ -525,7 +525,8 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
                 *nread = -2;
                 return;
             }
-            break;
+            /* do not break: continue reading headers until blank line */
+            continue;
         }
         saw_header = 1;
         if (fx_mcp_framing < 0) fx_mcp_framing = 1;
