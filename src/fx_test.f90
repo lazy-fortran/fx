@@ -3,12 +3,23 @@ module fx_test
                                              real64
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     implicit none
-    private
+    private :: json_escape
+
+    integer, public, parameter :: initial_test_capacity = 64
+
+    type, public :: test_result_t
+        character(len=128) :: name = ''
+        character(len=256) :: message = ''
+        logical :: status = .false.
+    end type test_result_t
 
     type, public :: test_suite_t
         character(len=128) :: name = ''
         integer :: n_pass = 0
         integer :: n_fail = 0
+        integer :: n_tests = 0
+        integer :: max_tests = initial_test_capacity
+        type(test_result_t), allocatable, public :: tests(:)
     end type test_suite_t
 
     public :: test_suite_init, test_assert
@@ -16,16 +27,20 @@ module fx_test
     public :: test_assert_equal_real
     public :: test_suite_summary, test_suite_exit
     public :: test_suite_to_json
+    public :: test_record
 
 contains
 
     subroutine test_suite_init(s, name)
-        type(test_suite_t), intent(out) :: s
+        type(test_suite_t), intent(inout) :: s
         character(len=*), intent(in) :: name
 
         s%name = trim(name)
         s%n_pass = 0
         s%n_fail = 0
+        s%n_tests = 0
+        if (allocated(s%tests)) deallocate(s%tests)
+        allocate(s%tests(initial_test_capacity))
     end subroutine test_suite_init
 
     subroutine test_assert(s, condition, message)
@@ -49,19 +64,12 @@ contains
         character(len=*), intent(in) :: label
 
         character(len=128) :: msg
-        character(len=16) :: exp_str, act_str
-
-        write(exp_str, '(I0)') expected
-        write(act_str, '(I0)') actual
-        exp_str = adjustl(trim(exp_str))
-        act_str = adjustl(trim(act_str))
 
         if (expected == actual) then
             call test_assert(s, .true., trim(label))
         else
-       write(msg, '(A,A,I0,A,I0,A)') &
-            trim(label), ' (expected ', expected, &
-            ', got ', actual, ')'
+            write(msg, '(A,I0,A,I0,A)') trim(label), &
+                ' (expected ', expected, ', got ', actual, ')'
             call test_assert(s, .false., msg)
         end if
     end subroutine test_assert_equal_int
@@ -135,12 +143,12 @@ contains
             if (tol_provided) then
                 write(tol_str, '(G0)') tolerance
                 tol_str = adjustl(trim(tol_str))
-                write(msg, '(A,A,A,G0,A,G0,A,G0,A,G0,A)') &
+                write(msg, '(A,A,G0,A,G0,A,G0,A,G0,A,G0,A)') &
                     trim(label), ' (expected ', expected, &
                     ', got ', actual, ', diff ', diff, &
                     ', tol ', tolerance, ')'
             else
-                write(msg, '(A,A,A,G0,A,G0,A,G0,A)') &
+                write(msg, '(A,A,G0,A,G0,A,G0,A)') &
                     trim(label), ' (expected ', expected, &
                     ', got ', actual, ', diff ', diff, ')'
             end if
@@ -164,25 +172,111 @@ contains
         end if
     end subroutine test_suite_exit
 
+    subroutine test_record(s, name, message, status)
+        type(test_suite_t), intent(inout) :: s
+        character(len=*), intent(in) :: name
+        character(len=*), intent(in) :: message
+        logical, intent(in) :: status
+        type(test_result_t), allocatable :: temp_tests(:)
+
+        if (.not. allocated(s%tests)) then
+            allocate(s%tests(initial_test_capacity))
+            s%max_tests = initial_test_capacity
+        end if
+
+        if (s%n_tests >= s%max_tests) then
+            allocate(temp_tests(s%max_tests))
+            temp_tests = s%tests
+            s%max_tests = s%max_tests * 2
+            deallocate(s%tests)
+            allocate(s%tests(s%max_tests))
+            s%tests(1:s%n_tests) = temp_tests
+            deallocate(temp_tests)
+        end if
+
+        s%n_tests = s%n_tests + 1
+        s%tests(s%n_tests)%name = trim(name)
+        s%tests(s%n_tests)%message = trim(message)
+        s%tests(s%n_tests)%status = status
+    end subroutine test_record
+
     subroutine test_suite_to_json(s, output)
         type(test_suite_t), intent(in) :: s
         character(len=:), allocatable, intent(out) :: output
 
         character(len=32) :: pass_str, fail_str, total_str
+        integer :: i
+        character(len=128) :: test_name
+        character(len=10) :: test_status
+        character(len=256) :: test_json
+        character(len=256) :: escaped_msg
 
         write(pass_str, '(I0)') s%n_pass
         write(fail_str, '(I0)') s%n_fail
         write(total_str, '(I0)') s%n_pass + s%n_fail
-
         pass_str = adjustl(trim(pass_str))
         fail_str = adjustl(trim(fail_str))
         total_str = adjustl(trim(total_str))
 
-        output = '{"name":"' // trim(s%name) // &
-                 '","pass":' // pass_str // &
-                 ',"fail":' // fail_str // &
-                 ',"total":' // total_str // &
-                 '}'
+        output = '{"suite":"' // trim(s%name) // '",'
+        output = output // '"pass":' // pass_str
+        output = output // ',"fail":' // fail_str
+        output = output // ',"total":' // total_str
+        output = output // ',"tests":['
+
+        do i = 1, s%n_tests
+            if (i > 1) output = output // ','
+            test_name = trim(s%tests(i)%name)
+            if (s%tests(i)%status) then
+                test_status = '"pass"'
+            else
+                test_status = '"fail"'
+            end if
+
+            if (trim(s%tests(i)%message) == '') then
+                write(test_json, '(A,A,A,A,A)') &
+                    '{"name":"', test_name, '","status":', &
+                    test_status, '}'
+            else
+                escaped_msg = json_escape( &
+                    trim(s%tests(i)%message))
+                write(test_json, '(A,A,A,A,A,A,A,A,A)') &
+                    '{"name":"', test_name, '","status":', &
+                    test_status, ',"message":"', &
+                    escaped_msg, '"}'
+            end if
+
+            output = output // test_json
+        end do
+
+        output = output // ']}'
     end subroutine test_suite_to_json
+
+    function json_escape(s) result(escaped)
+        character(len=*), intent(in) :: s
+        character(len=len(s)) :: escaped
+        integer :: i, j
+        character(len=2) :: hex
+        character(len=1) :: c
+
+        escaped = s
+        j = 1
+        do i = 1, len(s)
+            c = s(i:i)
+            if (c == '"') then
+                escaped(j:j+1) = '\"'
+                j = j + 2
+            elseif (c == '\') then
+                escaped(j:j+1) = '\\'
+                j = j + 2
+            else
+                escaped(j:j) = c
+                j = j + 1
+            end if
+        end do
+        if (j <= len(escaped)) then
+            escaped = adjustl(trim(escaped))
+        end if
+    end function json_escape
 
 end module fx_test

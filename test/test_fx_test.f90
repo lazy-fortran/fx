@@ -5,7 +5,7 @@ program test_fx_test
                        test_assert, test_assert_equal_int, &
                        test_assert_equal_str, test_assert_equal_real, &
                        test_suite_summary, test_suite_exit, &
-                       test_suite_to_json
+                       test_suite_to_json, initial_test_capacity
     implicit none
 
     call run_all_tests()
@@ -15,6 +15,8 @@ contains
     subroutine run_all_tests()
         type(test_suite_t) :: suite
 
+        allocate(suite%tests(initial_test_capacity))
+        deallocate(suite%tests)
         call test_suite_init(suite, 'fx_test')
         call test_init_zeros(suite)
         call test_assert_pass(suite)
