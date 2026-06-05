@@ -159,14 +159,78 @@ contains
         character(len=*), intent(in) :: argv(:)
         integer, intent(in) :: n_argv
         type(proc_result_t), intent(out) :: result
-        error stop "fx_proc:proc_exec not implemented"
+
+        integer, parameter :: MAX_STDOUT = 4 * 1024 * 1024
+        integer, parameter :: MAX_STDERR = 256 * 1024
+        integer, parameter :: MAX_ARG = 4096
+
+        character(kind=c_char), allocatable :: c_argv(:)
+        character(kind=c_char), allocatable :: c_out(:)
+        character(kind=c_char), allocatable :: c_err(:)
+        integer(c_int) :: out_len, err_len
+        integer :: i, j, alen, pos, total_len
+
+        total_len = 0
+        do i = 1, n_argv
+            total_len = total_len + min(len_trim(argv(i)), MAX_ARG) + 1
+        end do
+        if (total_len == 0) total_len = 1
+
+        allocate(c_argv(total_len))
+        allocate(c_out(MAX_STDOUT))
+        allocate(c_err(MAX_STDERR))
+
+        pos = 1
+        do i = 1, n_argv
+            alen = min(len_trim(argv(i)), MAX_ARG)
+            do j = 1, alen
+                c_argv(pos) = char(iachar(argv(i)(j:j)), kind=c_char)
+                pos = pos + 1
+            end do
+            c_argv(pos) = c_null_char
+            pos = pos + 1
+        end do
+
+        out_len = int(MAX_STDOUT, c_int)
+        err_len = int(MAX_STDERR, c_int)
+        result%exit_code = int(fx_c_exec(c_argv, int(n_argv, c_int), &
+                                          c_out, out_len, c_err, err_len))
+        result%stdout_text = chars_to_string(c_out, int(out_len))
+        result%stderr_text = chars_to_string(c_err, int(err_len))
+
+        deallocate(c_argv, c_out, c_err)
     end subroutine proc_exec
 
     subroutine proc_exec_silent(argv, n_argv, exit_code)
         character(len=*), intent(in) :: argv(:)
         integer, intent(in) :: n_argv
         integer, intent(out) :: exit_code
-        error stop "fx_proc:proc_exec_silent not implemented"
+
+        integer, parameter :: MAX_ARG = 4096
+        character(kind=c_char), allocatable :: c_argv(:)
+        integer :: i, j, alen, pos, total_len
+
+        total_len = 0
+        do i = 1, n_argv
+            total_len = total_len + min(len_trim(argv(i)), MAX_ARG) + 1
+        end do
+        if (total_len == 0) total_len = 1
+
+        allocate(c_argv(total_len))
+
+        pos = 1
+        do i = 1, n_argv
+            alen = min(len_trim(argv(i)), MAX_ARG)
+            do j = 1, alen
+                c_argv(pos) = char(iachar(argv(i)(j:j)), kind=c_char)
+                pos = pos + 1
+            end do
+            c_argv(pos) = c_null_char
+            pos = pos + 1
+        end do
+
+        exit_code = int(fx_c_exec_silent(c_argv, int(n_argv, c_int)))
+        deallocate(c_argv)
     end subroutine proc_exec_silent
 
     subroutine proc_scan_dir(root, extensions, n_ext, files, &
@@ -177,7 +241,47 @@ contains
         character(len=512), intent(out) :: files(:)
         integer, intent(out) :: n_files
         integer, intent(in) :: max_files
-        error stop "fx_proc:proc_scan_dir not implemented"
+
+        character(kind=c_char) :: c_root(PATH_MAX_LEN)
+        character(kind=c_char), allocatable :: c_ext(:)
+        character(kind=c_char), allocatable :: c_files(:)
+        integer(c_int) :: c_n_files, c_status
+        integer :: i, j, elen, pos, total_ext, slot
+
+        call to_c_string(root, c_root)
+
+        total_ext = 0
+        do i = 1, n_ext
+            total_ext = total_ext + len_trim(extensions(i)) + 1
+        end do
+        if (total_ext == 0) total_ext = 1
+
+        allocate(c_ext(total_ext))
+        pos = 1
+        do i = 1, n_ext
+            elen = len_trim(extensions(i))
+            do j = 1, elen
+                c_ext(pos) = char(iachar(extensions(i)(j:j)), kind=c_char)
+                pos = pos + 1
+            end do
+            c_ext(pos) = c_null_char
+            pos = pos + 1
+        end do
+
+        allocate(c_files(max_files * 512))
+        c_files = c_null_char
+        c_n_files = 0_c_int
+
+        c_status = fx_c_scan_dir(c_root, c_ext, int(n_ext, c_int), &
+                                  c_files, c_n_files, int(max_files, c_int))
+
+        n_files = int(c_n_files)
+        do i = 1, n_files
+            slot = (i - 1) * 512 + 1
+            files(i) = c_string_from_chars(c_files(slot:slot + 511))
+        end do
+
+        deallocate(c_ext, c_files)
     end subroutine proc_scan_dir
 
     subroutine proc_file_read(path, content, n_bytes, ierr)
@@ -185,7 +289,29 @@ contains
         character(len=:), allocatable, intent(out) :: content
         integer, intent(out) :: n_bytes
         integer, intent(out) :: ierr
-        error stop "fx_proc:proc_file_read not implemented"
+
+        integer, parameter :: MAX_FILE = 32 * 1024 * 1024
+        character(kind=c_char) :: c_path(PATH_MAX_LEN)
+        character(kind=c_char), allocatable :: c_content(:)
+        integer(c_int) :: c_n_bytes, c_status
+
+        call to_c_string(path, c_path)
+        allocate(c_content(MAX_FILE))
+        c_n_bytes = int(MAX_FILE, c_int)
+
+        c_status = fx_c_file_read(c_path, c_content, c_n_bytes)
+
+        if (c_status /= 0_c_int) then
+            ierr = 1
+            n_bytes = 0
+            content = ''
+        else
+            ierr = 0
+            n_bytes = int(c_n_bytes)
+            content = chars_to_string(c_content, n_bytes)
+        end if
+
+        deallocate(c_content)
     end subroutine proc_file_read
 
     subroutine proc_file_write(path, content, n_bytes, ierr)
@@ -193,24 +319,54 @@ contains
         character(len=*), intent(in) :: content
         integer, intent(in) :: n_bytes
         integer, intent(out) :: ierr
-        error stop "fx_proc:proc_file_write not implemented"
+
+        character(kind=c_char) :: c_path(PATH_MAX_LEN)
+        character(kind=c_char), allocatable :: c_content(:)
+        integer(c_int) :: c_status
+        integer :: i
+
+        call to_c_string(path, c_path)
+
+        allocate(c_content(max(n_bytes, 1)))
+        do i = 1, n_bytes
+            c_content(i) = char(iachar(content(i:i)), kind=c_char)
+        end do
+
+        c_status = fx_c_file_write(c_path, c_content, int(n_bytes, c_int))
+        ierr = merge(0, 1, c_status == 0_c_int)
+        deallocate(c_content)
     end subroutine proc_file_write
 
     subroutine proc_tmpfile(prefix, path)
         character(len=*), intent(in) :: prefix
         character(len=:), allocatable, intent(out) :: path
-        error stop "fx_proc:proc_tmpfile not implemented"
+
+        character(kind=c_char) :: c_prefix(256)
+        character(kind=c_char) :: c_path(PATH_MAX_LEN)
+        integer(c_int) :: path_len
+
+        call to_c_string(prefix, c_prefix)
+        c_path = c_null_char
+        path_len = 0_c_int
+
+        call fx_c_tmpfile(c_prefix, c_path, path_len)
+
+        if (path_len > 0) then
+            path = c_string_from_chars(c_path(1:int(path_len)))
+        else
+            path = ''
+        end if
     end subroutine proc_tmpfile
 
     integer function proc_pid()
-        error stop "fx_proc:proc_pid not implemented"
+        proc_pid = int(fx_c_pid())
     end function proc_pid
 
     subroutine proc_kill(pid, signal, ierr)
         integer, intent(in) :: pid
         integer, intent(in) :: signal
         integer, intent(out) :: ierr
-        error stop "fx_proc:proc_kill not implemented"
+        ierr = int(fx_c_kill(int(pid, c_int), int(signal, c_int)))
     end subroutine proc_kill
 
     subroutine proc_watch_init(fd, ierr)
@@ -417,6 +573,19 @@ contains
         c_is_dir = fx_c_path_is_dir(c_path)
         proc_path_is_dir = (c_is_dir /= 0_c_int)
     end function proc_path_is_dir
+
+    ! Convert n bytes from c_char array to Fortran string (no null-terminator search)
+    function chars_to_string(chars, n) result(text)
+        character(kind=c_char), intent(in) :: chars(:)
+        integer, intent(in) :: n
+        character(len=:), allocatable :: text
+        integer :: i
+
+        allocate(character(len=max(n, 0)) :: text)
+        do i = 1, n
+            text(i:i) = char(iachar(chars(i)))
+        end do
+    end function chars_to_string
 
     subroutine to_c_string(text, c_text)
         character(len=*), intent(in) :: text
