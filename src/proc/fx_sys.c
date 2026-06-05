@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <limits.h>
+#include <time.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -336,6 +337,80 @@ static int fx_path_kind(const char *path, int *is_dir, int *is_symlink_dir)
 
     if (is_dir) *is_dir = S_ISDIR(lst.st_mode);
     return 0;
+}
+
+static int fx_mkdir_p(const char *path)
+{
+    char clean[PATH_MAX];
+    char parent[PATH_MAX];
+    char *slash;
+    struct stat st;
+    size_t parent_len;
+
+    if (path == NULL) return -1;
+
+    fx_trim_path(path, clean, sizeof(clean));
+    if (clean[0] == '\0') return -1;
+    if (strcmp(clean, "/") == 0) return 0;
+
+    if (stat(clean, &st) == 0) {
+        return S_ISDIR(st.st_mode) ? 0 : -1;
+    }
+
+    slash = strrchr(clean, '/');
+    if (slash != NULL && slash != clean) {
+        parent_len = (size_t) (slash - clean);
+        if (parent_len >= sizeof(parent)) return -1;
+        memcpy(parent, clean, parent_len);
+        parent[parent_len] = '\0';
+        if (fx_mkdir_p(parent) != 0) return -1;
+    }
+
+    if (mkdir(clean, 0777) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+int fx_c_mkdir_p(const char *path)
+{
+    return fx_mkdir_p(path);
+}
+
+int fx_c_rename(const char *src, const char *dst)
+{
+    if (rename(src, dst) == 0) return 0;
+    return -1;
+}
+
+int fx_c_unlink(const char *path)
+{
+    if (unlink(path) == 0) return 0;
+    if (errno == ENOENT) return 0;
+    return -1;
+}
+
+int fx_c_rmdir(const char *path)
+{
+    if (rmdir(path) == 0) return 0;
+    if (errno == ENOENT) return 0;
+    return -1;
+}
+
+int fx_c_file_stat(const char *path, long long *size_bytes, long long *mtime)
+{
+    struct stat st;
+
+    if (size_bytes != NULL) *size_bytes = 0;
+    if (mtime != NULL) *mtime = 0;
+
+    if (stat(path, &st) != 0) return -1;
+    if (size_bytes != NULL) *size_bytes = (long long) st.st_size;
+    if (mtime != NULL) *mtime = (long long) st.st_mtime;
+    return 0;
+}
+
+long long fx_c_unix_time(void)
+{
+    return (long long) time(NULL);
 }
 
 static watch_state_t *fx_watch_state_find(int fd)
