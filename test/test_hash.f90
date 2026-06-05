@@ -4,7 +4,11 @@ program test_hash
                        test_suite_summary, test_suite_exit, &
                        test_assert, test_assert_equal_str, &
                        test_assert_equal_int
-    use fx_hash, only: fnv1a_string, fnv1a_file, xxhash64, xxhash64_file, &
+    use fx_hash, only: fnv1a_string, fnv1a_file, xxhash64, &
+                       sha256, sha256_bytes, sha256_string, sha256_file, &
+                       sha256_init, sha256_update, sha256_final, &
+                       sha256_hardware_available, sha256_hardware_digest, &
+                       sha256_state_t, &
                        hash_to_hex, hash_combine, &
                        hash_state_init, hash_state_update, hash_state_final, &
                        hash_state_t
@@ -16,6 +20,7 @@ program test_hash
     call test_fnv1a_known_values(suite)
     call test_fnv1a_file(suite)
     call test_xxhash64(suite)
+    call test_sha256(suite)
     call test_hash_combine(suite)
     call test_hash_to_hex(suite)
     call test_incremental_hash(suite)
@@ -52,10 +57,10 @@ contains
         integer :: ierr, unit
 
         ! Write known content to a temp file
-        open(newunit=unit, file='/tmp/fx_test_hash_fnv1a.bin', &
-             access='stream', form='unformatted', status='replace')
-        write(unit) 'foobar'
-        close(unit)
+        open (newunit=unit, file='/tmp/fx_test_hash_fnv1a.bin', &
+              access='stream', form='unformatted', status='replace')
+        write (unit) 'foobar'
+        close (unit)
 
         call fnv1a_file('/tmp/fx_test_hash_fnv1a.bin', h_file, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'fnv1a_file: no error')
@@ -73,39 +78,111 @@ contains
         integer(int64) :: h1, h2
 
         ! Empty input, seed 0: known vector ef46db3751d8e999
-        allocate(data(0))
+        allocate (data(0))
         h1 = xxhash64(data, 0, 0_int64)
         call test_assert_equal_str(suite, 'ef46db3751d8e999', hash_to_hex(h1), &
                                    'xxhash64: empty seed 0')
-        deallocate(data)
+        deallocate (data)
 
         ! Different inputs produce different hashes
-        allocate(data(3))
+        allocate (data(3))
         data(1) = 'f'; data(2) = 'o'; data(3) = 'o'
         h1 = xxhash64(data, 3, 0_int64)
-        deallocate(data)
+        deallocate (data)
 
-        allocate(data(3))
+        allocate (data(3))
         data(1) = 'b'; data(2) = 'a'; data(3) = 'r'
         h2 = xxhash64(data, 3, 0_int64)
-        deallocate(data)
+        deallocate (data)
 
         call test_assert(suite, h1 /= h2, 'xxhash64: distinct inputs differ')
 
         ! Seed changes output
-        allocate(data(3))
+        allocate (data(3))
         data(1) = 'f'; data(2) = 'o'; data(3) = 'o'
         h2 = xxhash64(data, 3, 1_int64)
-        deallocate(data)
+        deallocate (data)
         call test_assert(suite, h1 /= h2, 'xxhash64: seed changes output')
 
         ! Large input (> 32 bytes) exercises the 4-lane path
-        allocate(data(40))
+        allocate (data(40))
         data = 'x'
         h1 = xxhash64(data, 40, 0_int64)
         call test_assert(suite, h1 /= 0_int64, 'xxhash64: 40-byte nonzero')
-        deallocate(data)
+        deallocate (data)
     end subroutine test_xxhash64
+
+    subroutine test_sha256(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=1), allocatable :: data(:)
+        character(len=64) :: h_empty, h_foo, h_file, h_stream
+        character(len=64) :: h_hw
+        type(sha256_state_t) :: state
+        character(len=1) :: chunk(3)
+        integer :: ierr, unit, i
+
+        allocate (data(0))
+        h_empty = sha256_bytes(data, 0)
+        deallocate (data)
+
+        call test_assert_equal_int(suite, 64, len(h_empty), &
+                                   'sha256: 64 hex chars')
+        call test_assert_equal_str(suite, &
+                                   'e3b0c44298fc1c149afbf4c8996fb924'// &
+                                   '27ae41e4649b934ca495991b7852b855', &
+                                   h_empty, 'sha256: empty vector')
+
+        h_foo = sha256_string('foo')
+        call test_assert(suite, h_foo /= h_empty, &
+                         'sha256: distinct input differs')
+        chunk(1) = 'f'; chunk(2) = 'o'; chunk(3) = 'o'
+        call test_assert_equal_str(suite, h_foo, sha256(chunk, 3), &
+                                   'sha256: compatibility wrapper')
+        call test_assert_equal_str(suite, &
+                                   '2c26b46b68ffc68ff99b453c1d304134'// &
+                                   '13422d706483bfa0f98a5e886266e7ae', &
+                                   h_foo, 'sha256: foo vector')
+
+        call sha256_init(state)
+        chunk(1) = 'f'
+        call sha256_update(state, chunk, 1)
+        chunk(1) = 'o'; chunk(2) = 'o'
+        call sha256_update(state, chunk, 2)
+        h_stream = sha256_final(state)
+        call test_assert_equal_str(suite, h_foo, h_stream, &
+                                   'sha256: streaming chunks match one-shot')
+
+        open (newunit=unit, file='/tmp/fx_test_hash_wide.bin', &
+              access='stream', form='unformatted', status='replace')
+        write (unit) 'foo'
+        close (unit)
+        call sha256_file('/tmp/fx_test_hash_wide.bin', h_file, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'sha256_file: no error')
+        call test_assert_equal_str(suite, h_foo, h_file, &
+                                   'sha256_file: matches string hash')
+
+        do i = 1, len(h_foo)
+            call test_assert(suite, &
+                             (iachar(h_foo(i:i)) >= iachar('0') .and. &
+                              iachar(h_foo(i:i)) <= iachar('9')) .or. &
+                             (iachar(h_foo(i:i)) >= iachar('a') .and. &
+                              iachar(h_foo(i:i)) <= iachar('f')), &
+                             'sha256: lowercase hex chars')
+        end do
+
+        call sha256_file('/tmp/fx_missing_wide_hash.bin', h_file, ierr)
+        call test_assert(suite, ierr /= 0, 'sha256_file: missing file errors')
+        chunk(1) = 'f'; chunk(2) = 'o'; chunk(3) = 'o'
+        if (sha256_hardware_available()) then
+            call test_assert(suite, sha256_hardware_digest(chunk, 3, h_hw), &
+                             'sha256 hardware digest succeeds when available')
+            call test_assert_equal_str(suite, h_foo, h_hw, &
+                                       'sha256 hardware digest matches scalar')
+        else
+            call test_assert(suite, .not. sha256_hardware_digest(chunk, 3, h_hw), &
+                             'sha256 hardware digest disabled when unavailable')
+        end if
+    end subroutine test_sha256
 
     subroutine test_hash_combine(suite)
         type(test_suite_t), intent(inout) :: suite
@@ -152,11 +229,11 @@ contains
             h = hash_to_hex(fnv1a_string('foobar'))
             do i = 1, 16
                 call test_assert(suite, &
-                    (iachar(h(i:i)) >= iachar('0') .and. &
-                     iachar(h(i:i)) <= iachar('9')) .or. &
-                    (iachar(h(i:i)) >= iachar('a') .and. &
-                     iachar(h(i:i)) <= iachar('f')), &
-                    'hash_to_hex: lowercase hex chars')
+                                 (iachar(h(i:i)) >= iachar('0') .and. &
+                                  iachar(h(i:i)) <= iachar('9')) .or. &
+                                 (iachar(h(i:i)) >= iachar('a') .and. &
+                                  iachar(h(i:i)) <= iachar('f')), &
+                                 'hash_to_hex: lowercase hex chars')
             end do
         end block
     end subroutine test_hash_to_hex

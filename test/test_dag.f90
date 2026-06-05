@@ -2,7 +2,7 @@ program test_dag
     use fx_test, only: test_suite_t, test_suite_init, &
                        test_suite_summary, test_suite_exit, &
                        test_assert, test_assert_equal_int
-    use fx_dag, only: dag_t, dag_node_t, dag_init, dag_add_node, &
+    use fx_dag, only: dag_t, dag_init, dag_add_node, &
                       dag_find_node, dag_add_edge, dag_topo_sort, &
                       dag_reverse_deps, dag_affected_set, dag_to_dot, &
                       dag_levels, MAX_NODES

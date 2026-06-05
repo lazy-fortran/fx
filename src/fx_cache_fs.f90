@@ -2,7 +2,7 @@ module fx_cache_fs
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
                                            c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
-    use fx_path, only: path_basename, path_dirname, path_exists, path_join
+    use fx_path, only: path_basename, path_dirname, path_join
     use fx_proc, only: proc_scan_dirs, proc_scan_files
     implicit none
     private
