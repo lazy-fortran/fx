@@ -3,13 +3,13 @@ module fx_test
                                              real64
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     implicit none
-    private :: json_escape
+    private :: json_escape, int_to_string, real_to_string
 
     integer, public, parameter :: initial_test_capacity = 64
 
     type, public :: test_result_t
-        character(len=128) :: name = ''
-        character(len=256) :: message = ''
+        character(len=:), allocatable :: name
+        character(len=:), allocatable :: message
         logical :: status = .false.
     end type test_result_t
 
@@ -39,70 +39,94 @@ contains
         s%n_pass = 0
         s%n_fail = 0
         s%n_tests = 0
+        s%max_tests = initial_test_capacity
         if (allocated(s%tests)) deallocate(s%tests)
         allocate(s%tests(initial_test_capacity))
     end subroutine test_suite_init
 
-    subroutine test_assert(s, condition, message)
+    subroutine test_assert(s, condition, name, detail, file, line)
         type(test_suite_t), intent(inout) :: s
         logical, intent(in) :: condition
-        character(len=*), intent(in) :: message
+        character(len=*), intent(in) :: name
+        character(len=*), intent(in), optional :: detail
+        character(len=*), intent(in), optional :: file
+        integer, intent(in), optional :: line
+
+        character(len=:), allocatable :: message
+        character(len=:), allocatable :: location
+
+        message = ''
+        if (present(detail)) then
+            message = trim(detail)
+        end if
 
         if (condition) then
             s%n_pass = s%n_pass + 1
-            write(output_unit, '(A)') '  PASS: ' // trim(message)
+            call test_record(s, name, '', .true.)
         else
             s%n_fail = s%n_fail + 1
-            write(error_unit, '(A)') '  FAIL: ' // trim(message)
+            location = ''
+            if (present(file) .and. present(line)) then
+                location = ' (' // trim(file) // ':' // int_to_string(line) // ')'
+            else if (present(file)) then
+                location = ' (' // trim(file) // ')'
+            else if (present(line)) then
+                location = ' (' // int_to_string(line) // ')'
+            end if
+            write(error_unit, '(A)') 'FAIL: ' // trim(name) // location
+            if (len_trim(message) > 0) then
+                write(error_unit, '(A)') '  ' // trim(message)
+            end if
+            call test_record(s, name, message, .false.)
         end if
     end subroutine test_assert
 
-    subroutine test_assert_equal_int(s, expected, actual, label)
+    subroutine test_assert_equal_int(s, expected, actual, label, file, line)
         type(test_suite_t), intent(inout) :: s
         integer, intent(in) :: expected
         integer, intent(in) :: actual
         character(len=*), intent(in) :: label
+        character(len=*), intent(in), optional :: file
+        integer, intent(in), optional :: line
 
-        character(len=128) :: msg
+        character(len=:), allocatable :: msg
 
-        if (expected == actual) then
-            call test_assert(s, .true., trim(label))
-        else
-            write(msg, '(A,I0,A,I0,A)') trim(label), &
-                ' (expected ', expected, ', got ', actual, ')'
-            call test_assert(s, .false., msg)
-        end if
+        msg = 'expected ' // int_to_string(expected) // &
+              ', got ' // int_to_string(actual)
+        call test_assert(s, expected == actual, trim(label), msg, file, line)
     end subroutine test_assert_equal_int
 
-    subroutine test_assert_equal_str(s, expected, actual, label)
+    subroutine test_assert_equal_str(s, expected, actual, label, file, line)
         type(test_suite_t), intent(inout) :: s
         character(len=*), intent(in) :: expected
         character(len=*), intent(in) :: actual
         character(len=*), intent(in) :: label
+        character(len=*), intent(in), optional :: file
+        integer, intent(in), optional :: line
+        character(len=:), allocatable :: msg
 
-        if (trim(expected) == trim(actual)) then
-            call test_assert(s, .true., trim(label))
-        else
-            call test_assert(s, .false., &
-                trim(label) // &
-                ' (expected "' // trim(expected) // '"' // &
-                ', got "' // trim(actual) // '")')
-        end if
+        msg = 'expected "' // trim(expected) // '", got "' // &
+              trim(actual) // '"'
+        call test_assert(s, trim(expected) == trim(actual), trim(label), msg, &
+                         file, line)
     end subroutine test_assert_equal_str
 
-    subroutine test_assert_equal_real(s, expected, actual, label, tol)
+    subroutine test_assert_equal_real(s, expected, actual, label, tol, file, &
+                                      line)
         type(test_suite_t), intent(inout) :: s
         real(real64), intent(in) :: expected
         real(real64), intent(in) :: actual
         character(len=*), intent(in) :: label
         real(real64), intent(in), optional :: tol
+        character(len=*), intent(in), optional :: file
+        integer, intent(in), optional :: line
 
         real(real64) :: tolerance
         real(real64) :: diff
         logical :: pass
         logical :: tol_provided
-        character(len=256) :: msg
-        character(len=32) :: exp_str, act_str, diff_str, tol_str
+        character(len=:), allocatable :: msg
+        character(len=:), allocatable :: exp_str, act_str, diff_str, tol_str
 
         tol_provided = present(tol)
         if (tol_provided) then
@@ -114,46 +138,18 @@ contains
         diff = abs(expected - actual)
         pass = (diff < tolerance)
 
-        if (pass) then
-            call test_assert(s, .true., trim(label))
+        exp_str = real_to_string(expected)
+        act_str = real_to_string(actual)
+        diff_str = real_to_string(diff)
+        if (tol_provided) then
+            tol_str = real_to_string(tolerance)
+            msg = 'expected ' // exp_str // ', got ' // act_str // &
+                  ', diff ' // diff_str // ', tol ' // tol_str
         else
-            if (ieee_is_nan(expected)) then
-                exp_str = 'NaN'
-            else
-                write(exp_str, '(G0)') expected
-                exp_str = adjustl(trim(exp_str))
-            end if
-
-            if (ieee_is_nan(actual)) then
-                act_str = 'NaN'
-            else
-                write(act_str, '(G0)') actual
-                act_str = adjustl(trim(act_str))
-            end if
-
-            if (diff == 0.0_real64) then
-                diff_str = '0.0'
-            elseif (ieee_is_nan(diff)) then
-                diff_str = 'NaN'
-            else
-                write(diff_str, '(G0)') diff
-                diff_str = adjustl(trim(diff_str))
-            end if
-
-            if (tol_provided) then
-                write(tol_str, '(G0)') tolerance
-                tol_str = adjustl(trim(tol_str))
-                write(msg, '(A,A,G0,A,G0,A,G0,A,G0,A,G0,A)') &
-                    trim(label), ' (expected ', expected, &
-                    ', got ', actual, ', diff ', diff, &
-                    ', tol ', tolerance, ')'
-            else
-                write(msg, '(A,A,G0,A,G0,A,G0,A)') &
-                    trim(label), ' (expected ', expected, &
-                    ', got ', actual, ', diff ', diff, ')'
-            end if
-            call test_assert(s, .false., msg)
+            msg = 'expected ' // exp_str // ', got ' // act_str // &
+                  ', diff ' // diff_str
         end if
+        call test_assert(s, pass, trim(label), msg, file, line)
     end subroutine test_assert_equal_real
 
     subroutine test_suite_summary(s)
@@ -204,21 +200,18 @@ contains
         type(test_suite_t), intent(in) :: s
         character(len=:), allocatable, intent(out) :: output
 
-        character(len=32) :: pass_str, fail_str, total_str
+        character(len=:), allocatable :: pass_str, fail_str, total_str
         integer :: i
-        character(len=128) :: test_name
-        character(len=10) :: test_status
-        character(len=256) :: test_json
-        character(len=256) :: escaped_msg
+        character(len=:), allocatable :: test_json
+        character(len=:), allocatable :: escaped_name
+        character(len=:), allocatable :: escaped_msg
+        character(len=:), allocatable :: test_status
 
-        write(pass_str, '(I0)') s%n_pass
-        write(fail_str, '(I0)') s%n_fail
-        write(total_str, '(I0)') s%n_pass + s%n_fail
-        pass_str = adjustl(trim(pass_str))
-        fail_str = adjustl(trim(fail_str))
-        total_str = adjustl(trim(total_str))
+        pass_str = int_to_string(s%n_pass)
+        fail_str = int_to_string(s%n_fail)
+        total_str = int_to_string(s%n_pass + s%n_fail)
 
-        output = '{"suite":"' // trim(s%name) // '",'
+        output = '{"suite":"' // json_escape(trim(s%name)) // '",'
         output = output // '"pass":' // pass_str
         output = output // ',"fail":' // fail_str
         output = output // ',"total":' // total_str
@@ -226,24 +219,21 @@ contains
 
         do i = 1, s%n_tests
             if (i > 1) output = output // ','
-            test_name = trim(s%tests(i)%name)
             if (s%tests(i)%status) then
-                test_status = '"pass"'
+                test_status = 'pass'
             else
-                test_status = '"fail"'
+                test_status = 'fail'
             end if
 
+            escaped_name = json_escape(trim(s%tests(i)%name))
             if (trim(s%tests(i)%message) == '') then
-                write(test_json, '(A,A,A,A,A)') &
-                    '{"name":"', test_name, '","status":', &
-                    test_status, '}'
+                test_json = '{"name":"' // escaped_name // '","status":"' // &
+                            test_status // '"}'
             else
                 escaped_msg = json_escape( &
                     trim(s%tests(i)%message))
-                write(test_json, '(A,A,A,A,A,A,A,A,A)') &
-                    '{"name":"', test_name, '","status":', &
-                    test_status, ',"message":"', &
-                    escaped_msg, '"}'
+                test_json = '{"name":"' // escaped_name // '","status":"' // &
+                            test_status // '","message":"' // escaped_msg // '"}'
             end if
 
             output = output // test_json
@@ -254,29 +244,43 @@ contains
 
     function json_escape(s) result(escaped)
         character(len=*), intent(in) :: s
-        character(len=len(s)) :: escaped
-        integer :: i, j
-        character(len=2) :: hex
+        character(len=:), allocatable :: escaped
+        integer :: i
         character(len=1) :: c
 
-        escaped = s
-        j = 1
+        escaped = ''
         do i = 1, len(s)
             c = s(i:i)
             if (c == '"') then
-                escaped(j:j+1) = '\"'
-                j = j + 2
+                escaped = escaped // '\"'
             elseif (c == '\') then
-                escaped(j:j+1) = '\\'
-                j = j + 2
+                escaped = escaped // '\\'
             else
-                escaped(j:j) = c
-                j = j + 1
+                escaped = escaped // c
             end if
         end do
-        if (j <= len(escaped)) then
-            escaped = adjustl(trim(escaped))
-        end if
     end function json_escape
+
+    function int_to_string(value) result(text)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=32) :: buffer
+
+        write(buffer, '(I0)') value
+        text = trim(adjustl(buffer))
+    end function int_to_string
+
+    function real_to_string(value) result(text)
+        real(real64), intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=64) :: buffer
+
+        if (ieee_is_nan(value)) then
+            text = 'NaN'
+        else
+            write(buffer, '(G0.17)') value
+            text = trim(adjustl(buffer))
+        end if
+    end function real_to_string
 
 end module fx_test
