@@ -124,6 +124,22 @@ module fx_proc
             integer(c_int), intent(in), value :: max_dirs
         end function fx_c_collect_dirs
 
+        integer(c_int) function fx_c_count_files(root, n_files) bind(C)
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: root(*)
+            integer(c_int), intent(out) :: n_files
+        end function fx_c_count_files
+
+        integer(c_int) function fx_c_collect_files(root, files, file_len, &
+                n_files, max_files) bind(C)
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: root(*)
+            character(kind=c_char), intent(out) :: files(*)
+            integer(c_int), intent(in), value :: file_len
+            integer(c_int), intent(out) :: n_files
+            integer(c_int), intent(in), value :: max_files
+        end function fx_c_collect_files
+
         integer(c_int) function fx_c_path_is_dir(path) bind(C)
             import :: c_int, c_char
             character(kind=c_char), intent(in) :: path(*)
@@ -135,7 +151,7 @@ module fx_proc
     public :: proc_tmpfile, proc_pid, proc_kill
     public :: proc_watch_init, proc_watch_add, proc_watch_rm
     public :: proc_watch_poll, proc_watch_close
-    public :: proc_scan_dirs, proc_path_is_dir
+    public :: proc_scan_dirs, proc_scan_files, proc_path_is_dir
 
 contains
 
@@ -338,6 +354,58 @@ contains
         ierr = 0
         deallocate(c_dirs)
     end subroutine proc_scan_dirs
+
+    subroutine proc_scan_files(root, files, n_files, ierr)
+        character(len=*), intent(in) :: root
+        character(len=:), allocatable, intent(out) :: files(:)
+        integer, intent(out) :: n_files
+        integer, intent(out) :: ierr
+
+        character(kind=c_char) :: c_root(PATH_MAX_LEN)
+        character(kind=c_char), allocatable :: c_files(:)
+        integer(c_int) :: c_count
+        integer(c_int) :: c_status
+        integer :: i
+        integer :: slot
+
+        call to_c_string(root, c_root)
+
+        c_count = 0_c_int
+        c_status = fx_c_count_files(c_root, c_count)
+        if (c_status /= 0_c_int .or. c_count < 0_c_int) then
+            ierr = 1
+            n_files = 0
+            allocate(character(len=PATH_MAX_LEN) :: files(0))
+            return
+        end if
+
+        n_files = int(c_count)
+        allocate(character(len=PATH_MAX_LEN) :: files(n_files))
+        if (n_files == 0) then
+            ierr = 0
+            return
+        end if
+
+        allocate(c_files(n_files * PATH_MAX_LEN))
+        c_files = c_null_char
+        c_status = fx_c_collect_files(c_root, c_files, &
+                                      int(PATH_MAX_LEN, c_int), c_count, &
+                                      int(n_files, c_int))
+        if (c_status /= 0_c_int) then
+            ierr = 1
+            deallocate(c_files)
+            return
+        end if
+
+        n_files = int(c_count)
+        do i = 1, n_files
+            slot = (i - 1) * PATH_MAX_LEN + 1
+            files(i) = c_string_from_chars(c_files(slot:slot + PATH_MAX_LEN - 1))
+        end do
+
+        ierr = 0
+        deallocate(c_files)
+    end subroutine proc_scan_files
 
     logical function proc_path_is_dir(path)
         character(len=*), intent(in) :: path

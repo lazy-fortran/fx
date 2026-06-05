@@ -1,8 +1,8 @@
 module fx_watch
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_proc, only: proc_path_is_dir, proc_scan_dirs, proc_watch_add, &
-                       proc_watch_close, proc_watch_init, proc_watch_poll, &
-                       proc_watch_rm
+                       proc_scan_files, proc_watch_close, proc_watch_init, &
+                       proc_watch_poll, proc_watch_rm
     implicit none
     private
 
@@ -14,6 +14,7 @@ module fx_watch
     integer, parameter :: WATCH_SELF_WRITE_WINDOW_MS = 500
     integer, parameter :: WATCH_INITIAL_WATCH_CAPACITY = 32
     integer, parameter :: WATCH_INITIAL_SELF_CAPACITY = 16
+    integer, parameter :: WATCH_INITIAL_PENDING_CAPACITY = 16
 
     integer, parameter :: IN_MODIFY_MASK = int(z'00000002')
     integer, parameter :: IN_CREATE_MASK = int(z'00000100')
@@ -36,6 +37,9 @@ module fx_watch
         character(len=WATCH_PATH_LEN), allocatable :: self_written(:)
         integer(int64), allocatable :: self_written_at(:)
         integer :: n_self_written = 0
+        character(len=WATCH_PATH_LEN), allocatable :: pending_paths(:)
+        integer, allocatable :: pending_types(:)
+        integer :: n_pending = 0
     end type watcher_t
 
     public :: watcher_init, watcher_add, watcher_remove
@@ -114,6 +118,7 @@ contains
         end do
 
         call watcher_remove_self_written_tree(w, target)
+        call watcher_remove_pending_tree(w, target)
     end subroutine watcher_remove
 
     subroutine watcher_poll(w, changed_path, event_type, &
@@ -132,6 +137,10 @@ contains
         got_event = .false.
 
         call watcher_prune_self_written(w)
+        if (watcher_pop_pending_event(w, changed_path, event_type)) then
+            got_event = .true.
+            return
+        end if
         call proc_watch_poll(w%fd, path, event_type, timeout_ms, got_event)
         if (.not. got_event) return
 
@@ -159,6 +168,9 @@ contains
         else if (event_type == WATCH_CREATE) then
             if (proc_path_is_dir(path)) then
                 call watcher_add(w, path, .true., ierr)
+                if (ierr == 0) then
+                    call watcher_queue_existing_files(w, path, ierr)
+                end if
             end if
         end if
     end subroutine watcher_poll
@@ -208,9 +220,12 @@ contains
         if (allocated(w%watch_paths)) deallocate(w%watch_paths)
         if (allocated(w%self_written)) deallocate(w%self_written)
         if (allocated(w%self_written_at)) deallocate(w%self_written_at)
+        if (allocated(w%pending_paths)) deallocate(w%pending_paths)
+        if (allocated(w%pending_types)) deallocate(w%pending_types)
         w%fd = -1
         w%n_watches = 0
         w%n_self_written = 0
+        w%n_pending = 0
     end subroutine watcher_reset
 
     subroutine watcher_store_watch(w, path, wd)
@@ -275,6 +290,138 @@ contains
         call move_alloc(new_watches, w%watches)
         call move_alloc(new_paths, w%watch_paths)
     end subroutine watcher_ensure_watch_capacity
+
+    subroutine watcher_queue_existing_files(w, path, ierr)
+        type(watcher_t), intent(inout) :: w
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: ierr
+
+        character(len=:), allocatable :: files(:)
+        integer :: n_files
+        integer :: i
+
+        ierr = 0
+        call proc_scan_files(path, files, n_files, ierr)
+        if (ierr /= 0) then
+            if (allocated(files)) deallocate(files)
+            return
+        end if
+
+        do i = 1, n_files
+            call watcher_store_pending_event(w, trim(files(i)), WATCH_CREATE)
+        end do
+
+        if (allocated(files)) deallocate(files)
+    end subroutine watcher_queue_existing_files
+
+    logical function watcher_pop_pending_event(w, changed_path, event_type) &
+            result(got_event)
+        type(watcher_t), intent(inout) :: w
+        character(len=WATCH_PATH_LEN), intent(out) :: changed_path
+        integer, intent(out) :: event_type
+
+        got_event = .false.
+        changed_path = ''
+        event_type = 0
+        if (w%n_pending <= 0) return
+
+        changed_path = trim(w%pending_paths(1))
+        event_type = w%pending_types(1)
+        call watcher_delete_pending_at(w, 1)
+        got_event = .true.
+    end function watcher_pop_pending_event
+
+    subroutine watcher_store_pending_event(w, path, event_type)
+        type(watcher_t), intent(inout) :: w
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: event_type
+
+        integer :: idx
+
+        idx = watcher_find_pending(w, path)
+        if (idx > 0) then
+            w%pending_paths(idx) = watcher_canonical_path(path)
+            w%pending_types(idx) = event_type
+            return
+        end if
+
+        call watcher_ensure_pending_capacity(w)
+        w%n_pending = w%n_pending + 1
+        w%pending_paths(w%n_pending) = watcher_canonical_path(path)
+        w%pending_types(w%n_pending) = event_type
+    end subroutine watcher_store_pending_event
+
+    subroutine watcher_remove_pending_tree(w, target)
+        type(watcher_t), intent(inout) :: w
+        character(len=*), intent(in) :: target
+        integer :: i
+
+        do i = w%n_pending, 1, -1
+            if (watcher_path_matches(w%pending_paths(i), target)) then
+                call watcher_delete_pending_at(w, i)
+            end if
+        end do
+    end subroutine watcher_remove_pending_tree
+
+    function watcher_find_pending(w, path) result(idx)
+        type(watcher_t), intent(in) :: w
+        character(len=*), intent(in) :: path
+        integer :: idx
+        integer :: i
+        character(len=WATCH_PATH_LEN) :: target
+
+        idx = 0
+        target = watcher_canonical_path(path)
+        do i = 1, w%n_pending
+            if (trim(w%pending_paths(i)) == trim(target)) then
+                idx = i
+                return
+            end if
+        end do
+    end function watcher_find_pending
+
+    subroutine watcher_delete_pending_at(w, idx)
+        type(watcher_t), intent(inout) :: w
+        integer, intent(in) :: idx
+        integer :: i
+
+        if (idx < 1 .or. idx > w%n_pending) return
+        do i = idx, w%n_pending - 1
+            w%pending_paths(i) = w%pending_paths(i + 1)
+            w%pending_types(i) = w%pending_types(i + 1)
+        end do
+        w%n_pending = w%n_pending - 1
+    end subroutine watcher_delete_pending_at
+
+    subroutine watcher_ensure_pending_capacity(w)
+        type(watcher_t), intent(inout) :: w
+
+        character(len=WATCH_PATH_LEN), allocatable :: new_paths(:)
+        integer, allocatable :: new_types(:)
+        integer :: new_cap
+
+        if (.not. allocated(w%pending_paths)) then
+            allocate(w%pending_paths(WATCH_INITIAL_PENDING_CAPACITY))
+            allocate(w%pending_types(WATCH_INITIAL_PENDING_CAPACITY))
+            w%pending_paths = ''
+            w%pending_types = 0
+            return
+        end if
+
+        if (w%n_pending < size(w%pending_paths)) return
+
+        new_cap = max(WATCH_INITIAL_PENDING_CAPACITY, size(w%pending_paths) * 2)
+        allocate(new_paths(new_cap))
+        allocate(new_types(new_cap))
+        new_paths = ''
+        new_types = 0
+        if (w%n_pending > 0) then
+            new_paths(1:w%n_pending) = w%pending_paths(1:w%n_pending)
+            new_types(1:w%n_pending) = w%pending_types(1:w%n_pending)
+        end if
+        call move_alloc(new_paths, w%pending_paths)
+        call move_alloc(new_types, w%pending_types)
+    end subroutine watcher_ensure_pending_capacity
 
     function watcher_find_watch(w, path) result(idx)
         type(watcher_t), intent(in) :: w

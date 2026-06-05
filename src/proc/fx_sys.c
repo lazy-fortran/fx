@@ -19,6 +19,8 @@
 #define PATH_MAX 4096
 #endif
 
+static int fx_inotify_force_enospc_once = 0;
+
 /*
  * fx_sys.c: C implementations for fx_proc.f90 Fortran interfaces.
  * Provides process execution, directory scanning, file I/O, and
@@ -102,6 +104,48 @@ int fx_c_pid(void)
 int fx_c_kill(int pid, int signal)
 {
     return kill((pid_t)pid, signal);
+}
+
+void fx_c_inotify_test_force_enospc_once(void)
+{
+    fx_inotify_force_enospc_once = 1;
+}
+
+int fx_c_stderr_redirect(const char *path)
+{
+    int target_fd;
+    int saved_fd;
+
+    fflush(stderr);
+    target_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (target_fd < 0) return -1;
+
+    saved_fd = dup(STDERR_FILENO);
+    if (saved_fd < 0) {
+        close(target_fd);
+        return -1;
+    }
+
+    if (dup2(target_fd, STDERR_FILENO) < 0) {
+        close(target_fd);
+        close(saved_fd);
+        return -1;
+    }
+
+    close(target_fd);
+    return saved_fd;
+}
+
+int fx_c_stderr_restore(int saved_fd)
+{
+    int rc;
+
+    if (saved_fd < 0) return 0;
+    fflush(stderr);
+    rc = dup2(saved_fd, STDERR_FILENO);
+    close(saved_fd);
+    fflush(stderr);
+    return (rc < 0) ? -1 : 0;
 }
 
 /* Framing state used for MCP input/output.
@@ -542,6 +586,140 @@ static int fx_dir_collect_rec(const char *path, char *dirs, int dir_len,
     return 0;
 }
 
+static int fx_file_count_rec(const char *path, int *count)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char child[PATH_MAX];
+    int is_dir;
+    int is_symlink_dir;
+    int status;
+
+    status = fx_path_kind(path, &is_dir, &is_symlink_dir);
+    if (status != 0) return -1;
+    if (!is_dir) {
+        (*count)++;
+        return 0;
+    }
+    if (is_symlink_dir) return 0;
+
+    dir = opendir(path);
+    if (dir == NULL) return -1;
+
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (fx_join_path(child, sizeof(child), path, entry->d_name) < 0) {
+            closedir(dir);
+            return -1;
+        }
+        status = fx_path_kind(child, &is_dir, &is_symlink_dir);
+        if (status != 0) {
+            closedir(dir);
+            return -1;
+        }
+        if (is_dir) {
+            if (is_symlink_dir) {
+                continue;
+            }
+            if (fx_file_count_rec(child, count) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        } else {
+            (*count)++;
+        }
+    }
+
+    if (errno != 0) {
+        closedir(dir);
+        return -1;
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+static int fx_file_collect_rec(const char *path, char *files, int file_len,
+                               int max_files, int *count)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char child[PATH_MAX];
+    int is_dir;
+    int is_symlink_dir;
+    int status;
+    char *slot;
+
+    if (*count >= max_files) return -1;
+    status = fx_path_kind(path, &is_dir, &is_symlink_dir);
+    if (status != 0) return -1;
+    if (!is_dir) {
+        slot = files + ((size_t) *count) * (size_t) file_len;
+        memset(slot, 0, (size_t) file_len);
+        if (snprintf(slot, (size_t) file_len, "%s", path) >= file_len) {
+            return -1;
+        }
+        (*count)++;
+        return 0;
+    }
+    if (is_symlink_dir) return 0;
+
+    dir = opendir(path);
+    if (dir == NULL) return -1;
+
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (fx_join_path(child, sizeof(child), path, entry->d_name) < 0) {
+            closedir(dir);
+            return -1;
+        }
+        status = fx_path_kind(child, &is_dir, &is_symlink_dir);
+        if (status != 0) {
+            closedir(dir);
+            return -1;
+        }
+        if (is_dir) {
+            if (is_symlink_dir) {
+                continue;
+            }
+            if (fx_file_collect_rec(child, files, file_len, max_files, count) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        } else {
+            if (*count >= max_files) {
+                closedir(dir);
+                return -1;
+            }
+            slot = files + ((size_t) *count) * (size_t) file_len;
+            memset(slot, 0, (size_t) file_len);
+            if (snprintf(slot, (size_t) file_len, "%s", child) >= file_len) {
+                closedir(dir);
+                return -1;
+            }
+            (*count)++;
+        }
+    }
+
+    if (errno != 0) {
+        closedir(dir);
+        return -1;
+    }
+
+    closedir(dir);
+    return 0;
+}
+
 int fx_c_inotify_init(void)
 {
     int fd;
@@ -584,6 +762,14 @@ int fx_c_inotify_add_watch(int fd, const char *path, int mask)
     if (state == NULL) return -1;
 
     fx_trim_path(path, clean, sizeof(clean));
+    if (fx_inotify_force_enospc_once) {
+        fx_inotify_force_enospc_once = 0;
+        errno = ENOSPC;
+        fprintf(stderr,
+                "fx_watch: inotify watch limit reached for %s\n",
+                clean);
+        return -1;
+    }
     effective_mask = mask;
     if (fx_path_kind(clean, &is_dir, &is_symlink_dir) == 0 &&
         is_symlink_dir && is_dir) {
@@ -755,6 +941,34 @@ int fx_c_collect_dirs(const char *root, char *dirs, int dir_len,
         return -1;
     }
     *n_dirs = count;
+    return 0;
+}
+
+int fx_c_count_files(const char *root, int *n_files)
+{
+    int count;
+
+    if (n_files == NULL) return -1;
+    count = 0;
+    if (fx_file_count_rec(root, &count) != 0) return -1;
+    *n_files = count;
+    return 0;
+}
+
+int fx_c_collect_files(const char *root, char *files, int file_len,
+                       int *n_files, int max_files)
+{
+    int count;
+
+    if (n_files == NULL || files == NULL || file_len <= 0 || max_files <= 0) {
+        return -1;
+    }
+
+    count = 0;
+    if (fx_file_collect_rec(root, files, file_len, max_files, &count) != 0) {
+        return -1;
+    }
+    *n_files = count;
     return 0;
 }
 

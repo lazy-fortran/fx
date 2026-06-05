@@ -1,4 +1,5 @@
 program test_watch
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
                        test_assert_equal_int, test_assert_equal_str, &
                        test_suite_summary, test_suite_exit
@@ -7,6 +8,21 @@ program test_watch
                         watcher_remove, watcher_poll, &
                         watcher_mark_self_written, watcher_close
     implicit none
+
+    interface
+        subroutine fx_c_inotify_test_force_enospc_once() bind(C)
+        end subroutine fx_c_inotify_test_force_enospc_once
+
+        integer(c_int) function fx_c_stderr_redirect(path) bind(C)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function fx_c_stderr_redirect
+
+        integer(c_int) function fx_c_stderr_restore(saved_fd) bind(C)
+            import :: c_int
+            integer(c_int), intent(in), value :: saved_fd
+        end function fx_c_stderr_restore
+    end interface
 
     type(test_suite_t) :: suite
 
@@ -18,6 +34,7 @@ program test_watch
     call test_watch_delete_and_close(suite)
     call test_watch_moved_to_is_create(suite)
     call test_watch_symlink_directory_limit(suite)
+    call test_watch_enospc_warning(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -80,7 +97,8 @@ contains
         type(watcher_t) :: w
         character(len=:), allocatable :: root
         character(len=:), allocatable :: new_dir
-        character(len=:), allocatable :: new_file
+        character(len=:), allocatable :: preexisting_file
+        character(len=:), allocatable :: later_file
         character(len=4096) :: changed_path
         integer :: event_type
         integer :: ierr
@@ -88,7 +106,8 @@ contains
 
         root = temp_root('newdir')
         new_dir = join_path(root, 'generated')
-        new_file = join_path(new_dir, 'later.f90')
+        preexisting_file = join_path(new_dir, 'preexisting.f90')
+        later_file = join_path(new_dir, 'later.f90')
 
         call run_cmd('mkdir -p -- ' // trim(root))
 
@@ -97,6 +116,7 @@ contains
         call test_assert_equal_int(suite, 0, ierr, 'new dir add ierr')
 
         call run_cmd('mkdir -p -- ' // trim(new_dir))
+        call write_file(preexisting_file, 'module preexisting')
         call watcher_poll(w, changed_path, event_type, 1000, got_event)
         call test_assert(suite, got_event, 'new dir create got event')
         call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
@@ -104,12 +124,20 @@ contains
         call test_assert_equal_str(suite, trim(new_dir), trim(changed_path), &
                                    'new dir create path')
 
-        call write_file(new_file, 'module later')
+        call watcher_poll(w, changed_path, event_type, 1000, got_event)
+        call test_assert(suite, got_event, 'preexisting file reported')
+        call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
+                                   'preexisting file event type')
+        call test_assert_equal_str(suite, trim(preexisting_file), &
+                                   trim(changed_path), &
+                                   'preexisting file path')
+
+        call write_file(later_file, 'module later')
         call watcher_poll(w, changed_path, event_type, 1000, got_event)
         call test_assert(suite, got_event, 'new dir child got event')
         call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
                                    'new dir child event type')
-        call test_assert_equal_str(suite, trim(new_file), trim(changed_path), &
+        call test_assert_equal_str(suite, trim(later_file), trim(changed_path), &
                                    'new dir child path')
 
         call watcher_close(w)
@@ -161,6 +189,7 @@ contains
         character(len=:), allocatable :: root
         character(len=:), allocatable :: child_dir
         character(len=:), allocatable :: child_file
+        character(len=:), allocatable :: sibling_file
         character(len=4096) :: changed_path
         integer :: event_type
         integer :: ierr
@@ -169,9 +198,11 @@ contains
         root = temp_root('delete')
         child_dir = join_path(root, 'gone')
         child_file = join_path(child_dir, 'gone.f90')
+        sibling_file = join_path(root, 'survivor.f90')
 
         call run_cmd('mkdir -p -- ' // trim(child_dir))
         call write_file(child_file, 'module gone')
+        call write_file(sibling_file, 'module survive')
 
         call watcher_init(w, ierr)
         call watcher_add(w, root, .true., ierr)
@@ -185,6 +216,16 @@ contains
                                    'delete event type')
         call test_assert_equal_str(suite, trim(child_dir), trim(changed_path), &
                                    'delete event path')
+
+        call append_file(sibling_file, '!')
+        call poll_until_match(w, sibling_file, WATCH_MODIFY, 1000, 10, &
+                              got_event, changed_path, event_type)
+        call test_assert(suite, got_event, 'sibling event after delete')
+        call test_assert_equal_int(suite, WATCH_MODIFY, event_type, &
+                                   'sibling event type after delete')
+        call test_assert_equal_str(suite, trim(sibling_file), &
+                                   trim(changed_path), &
+                                   'sibling event path after delete')
 
         call watcher_close(w)
         call test_assert_equal_int(suite, -1, w%fd, 'close after delete resets fd')
@@ -265,6 +306,46 @@ contains
         call cleanup_tree(root)
         call cleanup_tree(external_root)
     end subroutine test_watch_symlink_directory_limit
+
+    subroutine test_watch_enospc_warning(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(watcher_t) :: w
+        character(len=:), allocatable :: root
+        character(len=:), allocatable :: stderr_path
+        character(kind=c_char) :: c_stderr_path(4096)
+        character(len=4096) :: stderr_text
+        integer :: ierr
+        integer :: saved_fd
+        integer :: read_err
+
+        root = temp_root('enospc')
+        stderr_path = join_path(root, 'stderr.log')
+
+        call run_cmd('mkdir -p -- ' // trim(root))
+        call watcher_init(w, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'enospc init ierr')
+
+        call to_c_string(stderr_path, c_stderr_path)
+        saved_fd = fx_c_stderr_redirect(c_stderr_path)
+        call test_assert(suite, saved_fd >= 0, 'stderr redirect started')
+        if (saved_fd >= 0) then
+            call fx_c_inotify_test_force_enospc_once()
+            call watcher_add(w, root, .true., ierr)
+            call test_assert(suite, ierr /= 0, 'enospc add fails')
+            ierr = fx_c_stderr_restore(saved_fd)
+            call test_assert_equal_int(suite, 0, ierr, 'stderr redirect restored')
+            call read_text_file(stderr_path, stderr_text, read_err)
+            call test_assert_equal_int(suite, 0, read_err, 'enospc stderr read')
+            call test_assert(suite, index(stderr_text, &
+                               'fx_watch: inotify watch limit reached for') > 0, &
+                               'enospc warning emitted')
+            call test_assert(suite, index(stderr_text, trim(root)) > 0, &
+                               'enospc warning includes path')
+        end if
+
+        call watcher_close(w)
+        call cleanup_tree(root)
+    end subroutine test_watch_enospc_warning
 
     subroutine run_cmd(cmd)
         character(len=*), intent(in) :: cmd
@@ -358,6 +439,45 @@ contains
         if (len_trim(path) == 0) return
         call run_cmd('rm -rf -- ' // trim(path))
     end subroutine cleanup_tree
+
+    subroutine read_text_file(path, text, ierr)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: text
+        integer, intent(out) :: ierr
+
+        integer :: unit
+        integer :: ios
+
+        text = ''
+        ierr = 0
+        open(newunit=unit, file=trim(path), action='read', status='old', &
+             iostat=ios)
+        if (ios /= 0) then
+            ierr = 1
+            return
+        end if
+
+        read(unit, '(A)', iostat=ios) text
+        if (ios > 0) then
+            ierr = 1
+        end if
+        close(unit)
+    end subroutine read_text_file
+
+    subroutine to_c_string(text, c_text)
+        character(len=*), intent(in) :: text
+        character(kind=c_char), intent(out) :: c_text(:)
+
+        integer :: i
+        integer :: n
+
+        c_text = c_null_char
+        n = min(len_trim(text), size(c_text) - 1)
+        do i = 1, n
+            c_text(i) = char(iachar(text(i:i)), kind=c_char)
+        end do
+        c_text(n + 1) = c_null_char
+    end subroutine to_c_string
 
     subroutine poll_until_match(w, expected_path, expected_type, timeout_ms, &
                                 max_tries, matched, actual_path, actual_type)
