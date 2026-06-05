@@ -1,4 +1,5 @@
 module fx_json_parse
+    use, intrinsic :: iso_fortran_env, only: real64
     implicit none
     private
 
@@ -21,7 +22,7 @@ module fx_json_parse
         integer :: event_type = 0
         character(len=:), allocatable :: string_val
         integer :: int_val = 0
-        double precision :: real_val = 0.0d0
+        real(real64) :: real_val = 0.0_real64
         logical :: bool_val = .false.
     end type json_event_t
 
@@ -64,40 +65,9 @@ contains
         type(json_event_t), intent(out) :: event
         character(len=1) :: ch
 
-        event%event_type = JSON_ERROR
-        event%int_val = 0
-        event%real_val = 0.0d0
-        event%bool_val = .false.
-        if (allocated(event%string_val)) deallocate(event%string_val)
-
-        do
-            call skip_whitespace(p)
-            if (p%pos > len(p%input)) then
-                event%event_type = JSON_END_OF_INPUT
-                return
-            end if
-            ch = p%input(p%pos:p%pos)
-
-            ! Structural separators: skip and loop
-            if (ch == ',') then
-                p%pos = p%pos + 1
-                cycle
-            end if
-            if (ch == ':') then
-                p%pos = p%pos + 1
-                ! Colon separates key from value; next string is a value
-                if (p%depth > 0) p%expect_key(p%depth) = .false.
-                cycle
-            end if
-            exit
-        end do
-
-        if (p%pos > len(p%input)) then
-            event%event_type = JSON_END_OF_INPUT
-            return
-        end if
-
-        ch = p%input(p%pos:p%pos)
+        call json_event_init(event)
+        call skip_separators(p, ch, event%event_type)
+        if (event%event_type == JSON_END_OF_INPUT) return
 
         select case (ch)
         case ('{')
@@ -106,63 +76,91 @@ contains
             p%in_object(p%depth) = .true.
             p%expect_key(p%depth) = .true.
             event%event_type = JSON_OBJECT_START
-
         case ('}')
             p%pos = p%pos + 1
             p%depth = p%depth - 1
-            ! After closing a nested structure, parent object expects its next key
             if (p%depth > 0 .and. p%in_object(p%depth)) &
                 p%expect_key(p%depth) = .true.
             event%event_type = JSON_OBJECT_END
-
         case ('[')
             p%pos = p%pos + 1
             p%depth = p%depth + 1
             p%in_object(p%depth) = .false.
             p%expect_key(p%depth) = .false.
             event%event_type = JSON_ARRAY_START
-
         case (']')
             p%pos = p%pos + 1
             p%depth = p%depth - 1
             if (p%depth > 0 .and. p%in_object(p%depth)) &
                 p%expect_key(p%depth) = .true.
             event%event_type = JSON_ARRAY_END
-
         case ('"')
             call parse_string(p, event%string_val, event%event_type)
             if (event%event_type /= JSON_ERROR) then
                 if (p%depth > 0 .and. p%expect_key(p%depth)) then
                     event%event_type = JSON_KEY
-                    ! expect_key stays true until the colon clears it
                 else
                     event%event_type = JSON_STRING
-                    ! After a string value in an object, next is a key
-                    if (p%depth > 0 .and. p%in_object(p%depth)) &
-                        p%expect_key(p%depth) = .true.
+                    call mark_value_done(p)
                 end if
             end if
-
         case ('t', 'f')
             call parse_bool(p, event%bool_val, event%event_type)
-            if (p%depth > 0 .and. p%in_object(p%depth)) &
-                p%expect_key(p%depth) = .true.
-
+            call mark_value_done(p)
         case ('n')
             call parse_null(p, event%event_type)
-            if (p%depth > 0 .and. p%in_object(p%depth)) &
-                p%expect_key(p%depth) = .true.
-
+            call mark_value_done(p)
         case ('-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
             call parse_number(p, event%int_val, event%real_val, event%event_type)
-            if (p%depth > 0 .and. p%in_object(p%depth)) &
-                p%expect_key(p%depth) = .true.
-
+            call mark_value_done(p)
         case default
             event%event_type = JSON_ERROR
             p%pos = p%pos + 1
         end select
     end subroutine json_parser_next
+
+    subroutine json_event_init(event)
+        type(json_event_t), intent(inout) :: event
+        event%event_type = JSON_ERROR
+        event%int_val = 0
+        event%real_val = 0.0_real64
+        event%bool_val = .false.
+        if (allocated(event%string_val)) deallocate(event%string_val)
+    end subroutine json_event_init
+
+    ! Skip commas and colons; set expect_key on colon. Returns first non-separator char.
+    subroutine skip_separators(p, ch, event_type)
+        type(json_parser_t), intent(inout) :: p
+        character(len=1), intent(out) :: ch
+        integer, intent(out) :: event_type
+
+        ch = ' '
+        event_type = JSON_ERROR
+        do
+            call skip_whitespace(p)
+            if (p%pos > len(p%input)) then
+                event_type = JSON_END_OF_INPUT
+                return
+            end if
+            ch = p%input(p%pos:p%pos)
+            if (ch == ',') then
+                p%pos = p%pos + 1
+                cycle
+            end if
+            if (ch == ':') then
+                p%pos = p%pos + 1
+                if (p%depth > 0) p%expect_key(p%depth) = .false.
+                cycle
+            end if
+            return
+        end do
+    end subroutine skip_separators
+
+    subroutine mark_value_done(p)
+        type(json_parser_t), intent(inout) :: p
+        if (p%depth > 0 .and. p%in_object(p%depth)) &
+            p%expect_key(p%depth) = .true.
+    end subroutine mark_value_done
 
     ! Extract a string value at a dot/bracket path, e.g. "result.tools[1].name"
     subroutine json_extract_string(input, path, result, found)
@@ -508,7 +506,7 @@ contains
     subroutine parse_number(p, int_val, real_val, event_type)
         type(json_parser_t), intent(inout) :: p
         integer, intent(out) :: int_val
-        double precision, intent(out) :: real_val
+        real(real64), intent(out) :: real_val
         integer, intent(out) :: event_type
         integer :: start
         logical :: is_real

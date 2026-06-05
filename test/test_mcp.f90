@@ -68,7 +68,7 @@ contains
 
         call mcp_make_tool_text_response('13', 'line1"quoted"' // &
                                          char(10) // 'line2\backslash', .false., response)
-        call test_assert(suite, index(response, '"text":"line1\\"quoted\\"') > 0, &
+        call test_assert(suite, index(response, '"text":"line1\"quoted\"') > 0, &
                         'tool text response escapes quotes')
         call test_assert(suite, index(response, '"isError":false') > 0, &
                         'tool text response sets isError false')

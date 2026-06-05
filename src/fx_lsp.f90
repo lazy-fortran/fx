@@ -319,7 +319,7 @@ contains
     function lsp_escape_json(s) result(res)
         character(len=*), intent(in) :: s
         character(len=:), allocatable :: res
-        integer :: i, n
+        integer :: i, n, code
         character(len=1) :: c
         character(len=4) :: hex
 
@@ -343,9 +343,10 @@ contains
             case (achar(12))
                 res = res // '\f'
             case default
-                if (iachar(c) < 32) then
-                    write (hex, '(Z2.2)') iachar(c)
-                    res = res // '\u' // trim(hex)
+                code = iachar(c)
+                if (code < 32) then
+                    write(hex, '(Z4.4)') code
+                    res = res // '\u' // hex
                 else
                     res = res // c
                 end if
@@ -507,8 +508,6 @@ contains
 
         integer :: n
         integer :: cursor
-        integer :: depth
-        logical :: escape
 
         found = .false.
         value_str = ''
@@ -540,55 +539,17 @@ contains
 
         if (input(cursor:cursor) == '{') then
             value_type = JSON_VALUE_OBJECT
-            depth = 1
-            cursor = cursor + 1
-            escape = .false.
-            do while (cursor <= n)
-                if (escape) then
-                    escape = .false.
-                else if (input(cursor:cursor) == '\\') then
-                    escape = .true.
-                else if (input(cursor:cursor) == '"') then
-                    call lsp_skip_json_string(input, cursor, cursor)
-                else if (input(cursor:cursor) == '{') then
-                    depth = depth + 1
-                else if (input(cursor:cursor) == '}') then
-                    depth = depth - 1
-                    if (depth == 0) exit
-                end if
-                cursor = cursor + 1
-            end do
-            if (depth /= 0) return
-            value_end = cursor
-            next_pos = cursor + 1
-            found = .true.
+            call lsp_parse_nested_value(input, cursor, '{', '}', value_end, found)
+            if (.not. found) return
+            next_pos = value_end + 1
             return
         end if
 
         if (input(cursor:cursor) == '[') then
             value_type = JSON_VALUE_ARRAY
-            depth = 1
-            cursor = cursor + 1
-            escape = .false.
-            do while (cursor <= n)
-                if (escape) then
-                    escape = .false.
-                else if (input(cursor:cursor) == '\\') then
-                    escape = .true.
-                else if (input(cursor:cursor) == '"') then
-                    call lsp_skip_json_string(input, cursor, cursor)
-                else if (input(cursor:cursor) == '[') then
-                    depth = depth + 1
-                else if (input(cursor:cursor) == ']') then
-                    depth = depth - 1
-                    if (depth == 0) exit
-                end if
-                cursor = cursor + 1
-            end do
-            if (depth /= 0) return
-            value_end = cursor
-            next_pos = cursor + 1
-            found = .true.
+            call lsp_parse_nested_value(input, cursor, '[', ']', value_end, found)
+            if (.not. found) return
+            next_pos = value_end + 1
             return
         end if
 
@@ -601,6 +562,41 @@ contains
         next_pos = cursor
         found = .true.
     end subroutine lsp_parse_json_value
+
+    subroutine lsp_parse_nested_value(input, pos, open_ch, close_ch, value_end, found)
+        character(len=*), intent(in) :: input
+        integer, intent(in) :: pos
+        character(len=1), intent(in) :: open_ch, close_ch
+        integer, intent(out) :: value_end
+        logical, intent(out) :: found
+        integer :: cursor, depth, n
+        logical :: escape
+
+        found = .false.
+        n = len_trim(input)
+        depth = 1
+        cursor = pos + 1
+        escape = .false.
+        do while (cursor <= n)
+            if (escape) then
+                escape = .false.
+            else if (input(cursor:cursor) == '\') then
+                escape = .true.
+            else if (input(cursor:cursor) == '"') then
+                call lsp_skip_json_string(input, cursor, cursor)
+            else if (input(cursor:cursor) == open_ch) then
+                depth = depth + 1
+            else if (input(cursor:cursor) == close_ch) then
+                depth = depth - 1
+                if (depth == 0) then
+                    value_end = cursor
+                    found = .true.
+                    return
+                end if
+            end if
+            cursor = cursor + 1
+        end do
+    end subroutine lsp_parse_nested_value
 
     subroutine lsp_skip_value(input, pos, next_pos)
         character(len=*), intent(in) :: input

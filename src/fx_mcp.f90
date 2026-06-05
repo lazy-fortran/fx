@@ -169,23 +169,10 @@ contains
                 call mcp_make_tools_list_response(id_str, s, response)
                 call mcp_send_response(response, s%framing_mode)
             case ('tools/call')
-                call mcp_extract_param(line, 'params.arguments.action', action)
-                call mcp_extract_param(line, 'params', params)
-                if (len_trim(action) == 0) then
-                    if (len_trim(id_str) > 0) then
-                        call mcp_make_error_response(id_str, -32602, &
-                                                     'missing action', response)
-                        call mcp_send_response(response, s%framing_mode)
-                    end if
-                    cycle
-                end if
-
-                call handler(action, params, handler_result, is_error)
-                if (len_trim(id_str) > 0) then
-                    call mcp_make_tool_text_response(id_str, handler_result, &
-                                                    is_error, response)
+                call mcp_handle_tools_call(s, id_str, line, &
+                                           handler, response, is_error)
+                if (len_trim(response) > 0) &
                     call mcp_send_response(response, s%framing_mode)
-                end if
             case ('shutdown')
                 response = '{"jsonrpc":"2.0","id":'// &
                            mcp_format_id(id_str)//',"result":null}'
@@ -404,6 +391,28 @@ contains
         end if
     end subroutine mcp_extract_param
 
+    subroutine mcp_handle_tools_call(s, id_str, line, handler, response, is_error)
+        type(mcp_server_t), intent(in) :: s
+        character(len=*), intent(in) :: id_str, line
+        procedure(mcp_action_handler) :: handler
+        character(len=:), allocatable, intent(out) :: response
+        logical, intent(out) :: is_error
+        character(len=:), allocatable :: action, params, handler_result
+
+        response = ''
+        is_error = .false.
+        call mcp_extract_param(line, 'params.arguments.action', action)
+        call mcp_extract_param(line, 'params', params)
+        if (len_trim(action) == 0) then
+            if (len_trim(id_str) > 0) &
+                call mcp_make_error_response(id_str, -32602, 'missing action', response)
+            return
+        end if
+        call handler(action, params, handler_result, is_error)
+        if (len_trim(id_str) > 0) &
+            call mcp_make_tool_text_response(id_str, handler_result, is_error, response)
+    end subroutine mcp_handle_tools_call
+
     subroutine mcp_make_error_response(id_str, code, msg, response)
         character(len=*), intent(in) :: id_str
         integer, intent(in) :: code
@@ -464,8 +473,7 @@ contains
     function json_escape(s) result(out)
         character(len=*), intent(in) :: s
         character(len=:), allocatable :: out
-        integer :: i
-        integer :: len_s
+        integer :: i, len_s, code
         character(len=6) :: esc
         character :: c
 
@@ -475,21 +483,22 @@ contains
             c = s(i:i)
             select case (c)
             case ('"')
-                out = trim(out)//'\\"'
-            case ('\\')
-                out = trim(out)//'\\\\'
+                out = out // '\"'
+            case ('\')
+                out = out // '\\'
             case (achar(10))
-                out = trim(out)//'\\n'
+                out = out // '\n'
             case (achar(13))
-                out = trim(out)//'\\r'
+                out = out // '\r'
             case (achar(9))
-                out = trim(out)//'\\t'
+                out = out // '\t'
             case default
-                if (iachar(c) < 32) then
-                    write (esc, '("\\u",Z4.4)') iachar(c)
-                    out = trim(out)//trim(esc)
+                code = iachar(c)
+                if (code < 32) then
+                    write(esc, '(A2,Z4.4)') '\u', code
+                    out = out // esc
                 else
-                    out = trim(out)//c
+                    out = out // c
                 end if
             end select
         end do
@@ -619,14 +628,9 @@ contains
 
     subroutine parse_value_bounds(text, pos_in, end_idx, value_start, value_end, pos_out)
         character(len=*), intent(in) :: text
-        integer, intent(in) :: pos_in
-        integer, intent(in) :: end_idx
-        integer, intent(out) :: value_start
-        integer, intent(out) :: value_end
-        integer, intent(out) :: pos_out
-
-        integer :: depth, p
-        logical :: in_str, escaped
+        integer, intent(in) :: pos_in, end_idx
+        integer, intent(out) :: value_start, value_end, pos_out
+        integer :: p
 
         call skip_ws(text, pos_in, end_idx, p)
         if (p > end_idx) then
@@ -642,75 +646,13 @@ contains
             call parse_quoted_string(text, p, value_start, value_end, p)
             pos_out = p
         case ('{')
-            depth = 1
-            in_str = .false.
-            escaped = .false.
-            p = p + 1
-            do while (p <= end_idx)
-                if (in_str) then
-                    if (escaped) then
-                        escaped = .false.
-                    else if (text(p:p) == '\\') then
-                        escaped = .true.
-                    else if (text(p:p) == '"') then
-                        in_str = .false.
-                    end if
-                else
-                    if (text(p:p) == '"') then
-                        in_str = .true.
-                    else if (text(p:p) == '{') then
-                        depth = depth + 1
-                    else if (text(p:p) == '}') then
-                        depth = depth - 1
-                        if (depth == 0) then
-                            value_end = p
-                            pos_out = p
-                            return
-                        end if
-                    end if
-                end if
-                p = p + 1
-            end do
-            pos_out = p
+            call parse_nested_bounds(text, p, end_idx, '{', '}', value_end, pos_out)
         case ('[')
-            depth = 1
-            in_str = .false.
-            escaped = .false.
-            p = p + 1
-            do while (p <= end_idx)
-                if (in_str) then
-                    if (escaped) then
-                        escaped = .false.
-                    else if (text(p:p) == '\\') then
-                        escaped = .true.
-                    else if (text(p:p) == '"') then
-                        in_str = .false.
-                    end if
-                else
-                    if (text(p:p) == '"') then
-                        in_str = .true.
-                    else if (text(p:p) == '[') then
-                        depth = depth + 1
-                    else if (text(p:p) == ']') then
-                        depth = depth - 1
-                        if (depth == 0) then
-                            value_end = p
-                            pos_out = p
-                            return
-                        end if
-                    end if
-                end if
-                p = p + 1
-            end do
-            pos_out = p
+            call parse_nested_bounds(text, p, end_idx, '[', ']', value_end, pos_out)
         case default
             do while (p <= end_idx)
-                if (p < len(text) .and. is_json_ws(text(p:p))) then
-                    value_end = p - 1
-                    pos_out = p
-                    return
-                end if
-                if (text(p:p) == ',' .or. text(p:p) == '}' .or. text(p:p) == ']') then
+                if (is_json_ws(text(p:p)) .or. text(p:p) == ',' .or. &
+                    text(p:p) == '}' .or. text(p:p) == ']') then
                     value_end = p - 1
                     pos_out = p
                     return
@@ -721,6 +663,47 @@ contains
             pos_out = p
         end select
     end subroutine parse_value_bounds
+
+    subroutine parse_nested_bounds(text, p_in, end_idx, open_ch, close_ch, &
+                                   value_end, pos_out)
+        character(len=*), intent(in) :: text
+        integer, intent(in) :: p_in, end_idx
+        character(len=1), intent(in) :: open_ch, close_ch
+        integer, intent(out) :: value_end, pos_out
+        integer :: p, depth
+        logical :: in_str, escaped
+
+        depth = 1
+        in_str = .false.
+        escaped = .false.
+        p = p_in + 1
+        do while (p <= end_idx)
+            if (in_str) then
+                if (escaped) then
+                    escaped = .false.
+                else if (text(p:p) == '\') then
+                    escaped = .true.
+                else if (text(p:p) == '"') then
+                    in_str = .false.
+                end if
+            else
+                if (text(p:p) == '"') then
+                    in_str = .true.
+                else if (text(p:p) == open_ch) then
+                    depth = depth + 1
+                else if (text(p:p) == close_ch) then
+                    depth = depth - 1
+                    if (depth == 0) then
+                        value_end = p
+                        pos_out = p
+                        return
+                    end if
+                end if
+            end if
+            p = p + 1
+        end do
+        pos_out = p
+    end subroutine parse_nested_bounds
 
     subroutine json_find_member(json_text, start_idx, end_idx, key, value_start, &
                                value_end, found)
