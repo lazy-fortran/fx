@@ -218,7 +218,11 @@ contains
     pure logical function path_is_absolute(p)
         character(len=*), intent(in) :: p
 
-        path_is_absolute = len_trim(p) > 0 .and. p(1:1) == '/'
+        if (len_trim(p) == 0) then
+            path_is_absolute = .false.
+        else
+            path_is_absolute = p(1:1) == '/'
+        end if
     end function path_is_absolute
 
     pure function path_relative(base, target) result(res)
