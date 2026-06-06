@@ -1,6 +1,6 @@
 module fx_cache
     use, intrinsic :: iso_fortran_env, only: int64
-    use fx_cache_fs, only: cache_t, cache_entry_t, cache_ready, &
+    use fx_cache_fs, only: cache_t, cache_entry_t, cache_ready, CACHE_PATH_LEN, &
                            cache_prefix_path, cache_entry_path, &
                            cache_temp_path, cache_ensure_dir, cache_rename, &
                            cache_unlink, cache_collect_entries, &
@@ -76,15 +76,15 @@ contains
     logical function cache_has(c, key)
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: key
-        character(len=:), allocatable :: entry_path
+        character(len=CACHE_PATH_LEN) :: entry_path
 
         if (.not. cache_ready(c)) then
             cache_has = .false.
             return
         end if
 
-        entry_path = cache_entry_path(c, key)
-        cache_has = len_trim(entry_path) > 0 .and. path_exists(entry_path)
+        call cache_entry_path(c, key, entry_path)
+        cache_has = len_trim(entry_path) > 0 .and. path_exists(trim(entry_path))
     end function cache_has
 
     subroutine cache_store(c, key, source_path, ierr)
@@ -93,7 +93,7 @@ contains
         character(len=*), intent(in) :: source_path
         integer, intent(out) :: ierr
 
-        character(len=:), allocatable :: entry_path
+        character(len=CACHE_PATH_LEN) :: entry_path
         character(len=:), allocatable :: temp_path
         integer :: cleanup_ierr
 
@@ -103,7 +103,7 @@ contains
             return
         end if
 
-        entry_path = cache_entry_path(c, key)
+        call cache_entry_path(c, key, entry_path)
         if (len_trim(entry_path) == 0) then
             ierr = 1
             return
@@ -119,7 +119,7 @@ contains
             return
         end if
 
-        call cache_rename(temp_path, entry_path, ierr)
+        call cache_rename(temp_path, trim(entry_path), ierr)
         if (ierr /= 0) call cache_unlink(temp_path, cleanup_ierr)
     end subroutine cache_store
 
@@ -129,7 +129,7 @@ contains
         character(len=*), intent(in) :: dest_path
         integer, intent(out) :: ierr
 
-        character(len=:), allocatable :: entry_path
+        character(len=CACHE_PATH_LEN) :: entry_path
 
         ierr = 0
         if (.not. cache_ready(c)) then
@@ -137,13 +137,17 @@ contains
             return
         end if
 
-        entry_path = cache_entry_path(c, key)
-        if (len_trim(entry_path) == 0 .or. .not. path_exists(entry_path)) then
+        call cache_entry_path(c, key, entry_path)
+        if (len_trim(entry_path) == 0) then
+            ierr = 1
+            return
+        end if
+        if (.not. path_exists(trim(entry_path))) then
             ierr = 1
             return
         end if
 
-        call cache_copy_file(entry_path, dest_path, ierr)
+        call cache_copy_file(trim(entry_path), dest_path, ierr)
     end subroutine cache_restore
 
     subroutine cache_store_bytes(c, key, data, n_bytes, ierr)
@@ -153,7 +157,7 @@ contains
         character(len=1), intent(in) :: data(n_bytes)
         integer, intent(out) :: ierr
 
-        character(len=:), allocatable :: entry_path
+        character(len=CACHE_PATH_LEN) :: entry_path
         character(len=:), allocatable :: temp_path
         integer :: cleanup_ierr
 
@@ -167,7 +171,7 @@ contains
             return
         end if
 
-        entry_path = cache_entry_path(c, key)
+        call cache_entry_path(c, key, entry_path)
         if (len_trim(entry_path) == 0) then
             ierr = 1
             return
@@ -183,7 +187,7 @@ contains
             return
         end if
 
-        call cache_rename(temp_path, entry_path, ierr)
+        call cache_rename(temp_path, trim(entry_path), ierr)
         if (ierr /= 0) call cache_unlink(temp_path, cleanup_ierr)
     end subroutine cache_store_bytes
 
@@ -194,7 +198,7 @@ contains
         integer, intent(out) :: n_bytes
         integer, intent(out) :: ierr
 
-        character(len=:), allocatable :: entry_path
+        character(len=CACHE_PATH_LEN) :: entry_path
 
         ierr = 0
         n_bytes = 0
@@ -203,13 +207,17 @@ contains
             return
         end if
 
-        entry_path = cache_entry_path(c, key)
-        if (len_trim(entry_path) == 0 .or. .not. path_exists(entry_path)) then
+        call cache_entry_path(c, key, entry_path)
+        if (len_trim(entry_path) == 0) then
+            ierr = 1
+            return
+        end if
+        if (.not. path_exists(trim(entry_path))) then
             ierr = 1
             return
         end if
 
-        call cache_read_bytes_file(entry_path, data, n_bytes, ierr)
+        call cache_read_bytes_file(trim(entry_path), data, n_bytes, ierr)
     end subroutine cache_restore_bytes
 
     subroutine cache_evict(c, key, ierr)
@@ -217,7 +225,7 @@ contains
         character(len=*), intent(in) :: key
         integer, intent(out) :: ierr
 
-        character(len=:), allocatable :: entry_path
+        character(len=CACHE_PATH_LEN) :: entry_path
 
         ierr = 0
         if (.not. cache_ready(c)) then
@@ -225,10 +233,10 @@ contains
             return
         end if
 
-        entry_path = cache_entry_path(c, key)
+        call cache_entry_path(c, key, entry_path)
         if (len_trim(entry_path) == 0) return
 
-        call cache_unlink(entry_path, ierr)
+        call cache_unlink(trim(entry_path), ierr)
     end subroutine cache_evict
 
     subroutine cache_gc(c, max_size_mb, n_evicted)

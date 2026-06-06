@@ -65,6 +65,13 @@ module fx_cache_fs
         integer(c_long_long) function fx_c_unix_time() bind(C)
             import :: c_long_long
         end function fx_c_unix_time
+
+        integer(c_int) function fx_c_file_read(path, content, n_bytes) bind(C)
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: content(*)
+            integer(c_int), intent(inout) :: n_bytes
+        end function fx_c_file_read
     end interface
 
 contains
@@ -100,21 +107,25 @@ contains
         end if
     end function cache_prefix_path
 
-    function cache_entry_path(c, key) result(path)
+    subroutine cache_entry_path(c, key, path)
+        !! Build the on-disk entry path into a caller-provided fixed-length
+        !! buffer. Deliberately avoids deferred-length allocatable results:
+        !! gfortran miscompiles allocatable character function results inside
+        !! OpenMP regions (the descriptor length outruns its buffer), and
+        !! cache_has/cache_restore_bytes run from parallel cache_lookup. The
+        !! root dir is normalized (no trailing slash) at cache_init, so a plain
+        !! root/prefix/key join reproduces path_join's result here.
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: key
-        character(len=:), allocatable :: path
-        character(len=:), allocatable :: prefix
-        character(len=:), allocatable :: entry_key
+        character(len=*), intent(out) :: path
 
-        entry_key = trim(key)
-        prefix = cache_prefix(entry_key)
-        if (len_trim(prefix) == 0) then
-            path = ''
-        else
-            path = path_join(path_join(trim(c%root_dir), prefix), entry_key)
-        end if
-    end function cache_entry_path
+        integer :: kn
+
+        path = ''
+        kn = len_trim(key)
+        if (kn < 2) return
+        path = trim(c%root_dir)//'/'//key(1:2)//'/'//key(1:kn)
+    end subroutine cache_entry_path
 
     subroutine cache_temp_path(c, key, path)
         type(cache_t), intent(in) :: c
@@ -415,15 +426,23 @@ contains
         integer, intent(out) :: n_bytes
         integer, intent(out) :: ierr
 
-        integer :: unit
-        integer :: ios
         integer :: capacity
         logical :: exists
         integer(int64) :: file_size
+        character(kind=c_char), allocatable :: c_path(:)
+        character(kind=c_char), allocatable :: c_content(:)
+        integer(c_int) :: c_n, c_status
+        integer :: i
 
         ierr = 0
         n_bytes = 0
         capacity = size(data)
+        ! inquire is connection-free, so it is safe to call concurrently; the
+        ! actual read goes through POSIX fx_c_file_read rather than a Fortran
+        ! open. Fortran forbids connecting one file to two units, so concurrent
+        ! open(status='old') of the same cache entry from parallel cache_lookup
+        ! calls races and spuriously fails. A raw fd per reader has no such
+        ! restriction.
         inquire(file=trim(path), exist=exists, size=file_size)
         if (.not. exists) then
             ierr = 1
@@ -437,24 +456,21 @@ contains
             ierr = 1
             return
         end if
+        if (file_size == 0_int64) return
 
-        open(newunit=unit, file=trim(path), access='stream', &
-             form='unformatted', status='old', action='read', &
-             iostat=ios)
-        if (ios /= 0) then
+        allocate (c_path(len_trim(path) + 1))
+        call to_c_string(trim(path), c_path)
+        allocate (c_content(int(file_size)))
+        c_n = int(file_size, c_int)
+        c_status = fx_c_file_read(c_path, c_content, c_n)
+        if (c_status /= 0_c_int) then
             ierr = 1
             return
         end if
-
-        n_bytes = int(file_size)
-        if (n_bytes > 0) then
-            read(unit, iostat=ios) data(1:n_bytes)
-        end if
-        close(unit)
-        if (ios /= 0) then
-            ierr = 1
-            n_bytes = 0
-        end if
+        n_bytes = int(c_n)
+        do i = 1, n_bytes
+            data(i) = char(ichar(c_content(i)))
+        end do
     end subroutine cache_read_bytes_file
 
     subroutine to_c_string(text, c_text)

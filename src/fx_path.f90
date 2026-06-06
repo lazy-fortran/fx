@@ -167,15 +167,20 @@ contains
         do
             if (i > len_trim(p)) exit
 
-            ! Skip consecutive slashes
-            do while (i <= len_trim(p) .and. p(i:i) == '/')
+            ! Skip consecutive slashes. Test bounds and content in separate
+            ! statements: Fortran does not guarantee short-circuit evaluation,
+            ! so a combined `i <= len_trim(p) .and. p(i:i) == '/'` reads p(i:i)
+            ! one byte past the buffer when i has just passed the end.
+            do while (i <= len_trim(p))
+                if (p(i:i) /= '/') exit
                 i = i + 1
             end do
             if (i > len_trim(p)) exit
 
             ! Find end of segment
             start = i
-            do while (i <= len_trim(p) .and. p(i:i) /= '/')
+            do while (i <= len_trim(p))
+                if (p(i:i) == '/') exit
                 i = i + 1
             end do
             seg_end = i - 1
