@@ -9,6 +9,8 @@
 #include <sys/stat.h>
 #ifdef __linux__
 #include <sys/inotify.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
 #endif
 #include <dirent.h>
 #include <poll.h>
@@ -16,13 +18,15 @@
 #include <signal.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <time.h>
+#include <sys/time.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static int fx_inotify_force_enospc_once = 0;
 #endif
 
@@ -410,7 +414,7 @@ int fx_c_kill(int pid, int signal)
     return kill((pid_t)pid, signal);
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 void fx_c_inotify_test_force_enospc_once(void)
 {
     fx_inotify_force_enospc_once = 1;
@@ -719,6 +723,21 @@ int fx_c_file_stat(const char *path, long long *size_bytes, long long *mtime)
 long long fx_c_unix_time(void)
 {
     return (long long) time(NULL);
+}
+
+/* Set a file's access and modification time to mtime (unix seconds).
+   Portable across Linux and macOS via utimes(); BSD touch lacks GNU's
+   `-d "N hours ago"`, so tests set mtime directly through this. */
+int fx_c_set_mtime(const char *path, long long mtime)
+{
+    struct timeval times[2];
+
+    times[0].tv_sec = (time_t) mtime;
+    times[0].tv_usec = 0;
+    times[1].tv_sec = (time_t) mtime;
+    times[1].tv_usec = 0;
+    if (utimes(path, times) != 0) return -1;
+    return 0;
 }
 
 #ifdef __linux__
@@ -1302,7 +1321,414 @@ int fx_c_inotify_poll(int fd, char *path_buf, int path_len,
     }
 }
 
-#else /* !__linux__: stubs for platforms without inotify */
+#elif defined(__APPLE__)
+/* macOS/BSD file-watch backend via kqueue (EVFILT_VNODE).
+   Mirrors the inotify contract: one watch per directory, child events by
+   name, event types 1=modify 2=create 3=delete. Directory entry changes
+   (create/delete/rename) are detected by re-scanning and diffing a snapshot;
+   in-place file content writes are caught by a per-file O_EVTONLY fd, since a
+   content write does not change the parent directory's entry list. */
+
+typedef struct kq_child {
+    char name[256];
+    int is_dir;
+    int file_fd;            /* O_EVTONLY fd for regular files; -1 otherwise */
+    long long mtime;
+    long long ino;
+    int seen;
+} kq_child_t;
+
+typedef struct kq_watch {
+    int wd;
+    char *path;
+    int dir_fd;             /* O_EVTONLY (O_SYMLINK for symlink dirs) */
+    int is_symlink;
+    kq_child_t *children;
+    size_t n_children;
+    size_t cap_children;
+    struct kq_watch *next;
+} kq_watch_t;
+
+typedef struct kq_event {
+    char path[PATH_MAX];
+    int type;
+    struct kq_event *next;
+} kq_event_t;
+
+typedef struct kq_state {
+    int kq;
+    int next_wd;
+    kq_watch_t *watches;
+    kq_event_t *head;
+    kq_event_t *tail;
+    struct kq_state *next;
+} kq_state_t;
+
+static kq_state_t *fx_kq_states = NULL;
+
+static kq_state_t *fx_kq_find(int kq)
+{
+    kq_state_t *s;
+    for (s = fx_kq_states; s != NULL; s = s->next) {
+        if (s->kq == kq) return s;
+    }
+    return NULL;
+}
+
+static void fx_kq_enqueue(kq_state_t *s, const char *path, int type)
+{
+    kq_event_t *e = (kq_event_t *) calloc(1, sizeof(*e));
+    if (e == NULL) return;
+    snprintf(e->path, sizeof(e->path), "%s", path);
+    e->type = type;
+    e->next = NULL;
+    if (s->tail != NULL) s->tail->next = e; else s->head = e;
+    s->tail = e;
+}
+
+static int fx_kq_dequeue(kq_state_t *s, char *buf, int len, int *type)
+{
+    kq_event_t *e = s->head;
+    if (e == NULL) return 0;
+    s->head = e->next;
+    if (s->head == NULL) s->tail = NULL;
+    if (buf != NULL && len > 0) snprintf(buf, (size_t) len, "%s", e->path);
+    if (type != NULL) *type = e->type;
+    free(e);
+    return 1;
+}
+
+static kq_child_t *fx_kq_child_find(kq_watch_t *w, const char *name)
+{
+    size_t i;
+    for (i = 0; i < w->n_children; i++) {
+        if (strcmp(w->children[i].name, name) == 0) return &w->children[i];
+    }
+    return NULL;
+}
+
+static kq_child_t *fx_kq_child_add(kq_watch_t *w)
+{
+    kq_child_t *c;
+    if (w->n_children >= w->cap_children) {
+        size_t ncap = w->cap_children ? w->cap_children * 2 : 8;
+        kq_child_t *nc = (kq_child_t *) realloc(w->children, ncap * sizeof(*nc));
+        if (nc == NULL) return NULL;
+        w->children = nc;
+        w->cap_children = ncap;
+    }
+    c = &w->children[w->n_children++];
+    memset(c, 0, sizeof(*c));
+    c->file_fd = -1;
+    return c;
+}
+
+static void fx_kq_child_remove_at(kq_watch_t *w, size_t idx)
+{
+    if (idx >= w->n_children) return;
+    if (w->children[idx].file_fd >= 0) close(w->children[idx].file_fd);
+    w->children[idx] = w->children[w->n_children - 1];
+    w->n_children--;
+}
+
+static void fx_kq_register(int kq, int fd, void *udata)
+{
+    struct kevent kev;
+    EV_SET(&kev, (uintptr_t) fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+           NOTE_WRITE | NOTE_DELETE | NOTE_RENAME | NOTE_EXTEND, 0, udata);
+    kevent(kq, &kev, 1, NULL, 0, NULL);
+}
+
+/* Re-scan a watched directory and reconcile against its snapshot. When emit
+   is set, queue create/delete/modify events for the differences. */
+static void fx_kq_sync_children(kq_state_t *s, kq_watch_t *w, int emit)
+{
+    DIR *dir;
+    struct dirent *de;
+    char child_path[PATH_MAX];
+    struct stat st;
+    size_t i;
+
+    for (i = 0; i < w->n_children; i++) w->children[i].seen = 0;
+
+    dir = opendir(w->path);
+    if (dir != NULL) {
+        while ((de = readdir(dir)) != NULL) {
+            int is_dir;
+            int is_reg;
+            long long mtime;
+            long long ino;
+            kq_child_t *c;
+
+            if (strcmp(de->d_name, ".") == 0 ||
+                strcmp(de->d_name, "..") == 0) {
+                continue;
+            }
+            if (fx_join_path(child_path, sizeof(child_path), w->path,
+                             de->d_name) < 0) {
+                continue;
+            }
+            if (lstat(child_path, &st) != 0) continue;
+            is_dir = S_ISDIR(st.st_mode);
+            is_reg = S_ISREG(st.st_mode);
+            mtime = (long long) st.st_mtime;
+            ino = (long long) st.st_ino;
+
+            c = fx_kq_child_find(w, de->d_name);
+            if (c == NULL) {
+                c = fx_kq_child_add(w);
+                if (c == NULL) continue;
+                snprintf(c->name, sizeof(c->name), "%s", de->d_name);
+                c->is_dir = is_dir;
+                c->mtime = mtime;
+                c->ino = ino;
+                c->file_fd = -1;
+                c->seen = 1;
+                if (is_reg) {
+                    c->file_fd = open(child_path, O_EVTONLY);
+                    if (c->file_fd >= 0) fx_kq_register(s->kq, c->file_fd, w);
+                }
+                if (emit) fx_kq_enqueue(s, child_path, 2);
+            } else {
+                c->seen = 1;
+                if (is_reg && (mtime != c->mtime || ino != c->ino)) {
+                    if (ino != c->ino) {
+                        if (c->file_fd >= 0) close(c->file_fd);
+                        c->file_fd = open(child_path, O_EVTONLY);
+                        if (c->file_fd >= 0) {
+                            fx_kq_register(s->kq, c->file_fd, w);
+                        }
+                    }
+                    c->mtime = mtime;
+                    c->ino = ino;
+                    if (emit) fx_kq_enqueue(s, child_path, 1);
+                } else {
+                    c->mtime = mtime;
+                    c->ino = ino;
+                }
+            }
+        }
+        closedir(dir);
+    }
+
+    for (i = w->n_children; i > 0; i--) {
+        size_t idx = i - 1;
+        if (!w->children[idx].seen) {
+            if (emit) {
+                char gone[PATH_MAX];
+                if (fx_join_path(gone, sizeof(gone), w->path,
+                                 w->children[idx].name) >= 0) {
+                    fx_kq_enqueue(s, gone, 3);
+                }
+            }
+            fx_kq_child_remove_at(w, idx);
+        }
+    }
+}
+
+int fx_c_inotify_init(void)
+{
+    int kq;
+    int flags;
+    kq_state_t *s;
+
+    kq = kqueue();
+    if (kq < 0) return -1;
+
+    flags = fcntl(kq, F_GETFD, 0);
+    if (flags >= 0) fcntl(kq, F_SETFD, flags | FD_CLOEXEC);
+
+    s = (kq_state_t *) calloc(1, sizeof(*s));
+    if (s == NULL) {
+        close(kq);
+        return -1;
+    }
+    s->kq = kq;
+    s->next_wd = 1;
+    s->watches = NULL;
+    s->head = NULL;
+    s->tail = NULL;
+    s->next = fx_kq_states;
+    fx_kq_states = s;
+    return kq;
+}
+
+int fx_c_inotify_add_watch(int fd, const char *path, int mask)
+{
+    char clean[PATH_MAX];
+    kq_state_t *s;
+    kq_watch_t *w;
+    int is_dir;
+    int is_symlink_dir;
+
+    (void) mask;
+    s = fx_kq_find(fd);
+    if (s == NULL) return -1;
+
+    fx_trim_path(path, clean, sizeof(clean));
+
+    if (fx_inotify_force_enospc_once) {
+        fx_inotify_force_enospc_once = 0;
+        errno = ENOSPC;
+        fprintf(stderr,
+                "fx_watch: inotify watch limit reached for %s\n", clean);
+        return -1;
+    }
+
+    if (fx_path_kind(clean, &is_dir, &is_symlink_dir) != 0) return -1;
+    if (!is_dir) return -1;
+
+    w = (kq_watch_t *) calloc(1, sizeof(*w));
+    if (w == NULL) return -1;
+    w->path = strdup(clean);
+    if (w->path == NULL) {
+        free(w);
+        return -1;
+    }
+    w->wd = s->next_wd++;
+    w->dir_fd = -1;
+    w->is_symlink = is_symlink_dir;
+    w->children = NULL;
+    w->n_children = 0;
+    w->cap_children = 0;
+
+    if (is_symlink_dir) {
+        /* watch the symlink itself, never its target (matches IN_DONT_FOLLOW) */
+        w->dir_fd = open(clean, O_EVTONLY | O_SYMLINK);
+        if (w->dir_fd >= 0) fx_kq_register(s->kq, w->dir_fd, w);
+    } else {
+        w->dir_fd = open(clean, O_EVTONLY);
+        if (w->dir_fd < 0) {
+            free(w->path);
+            free(w);
+            return -1;
+        }
+        fx_kq_register(s->kq, w->dir_fd, w);
+        fx_kq_sync_children(s, w, 0);
+    }
+
+    w->next = s->watches;
+    s->watches = w;
+    return w->wd;
+}
+
+int fx_c_inotify_rm_watch(int fd, int wd)
+{
+    kq_state_t *s;
+    kq_watch_t *w;
+    kq_watch_t *prev;
+    size_t i;
+
+    s = fx_kq_find(fd);
+    if (s == NULL) return -1;
+
+    prev = NULL;
+    for (w = s->watches; w != NULL; prev = w, w = w->next) {
+        if (w->wd != wd) continue;
+        if (prev != NULL) prev->next = w->next; else s->watches = w->next;
+        for (i = 0; i < w->n_children; i++) {
+            if (w->children[i].file_fd >= 0) close(w->children[i].file_fd);
+        }
+        free(w->children);
+        if (w->dir_fd >= 0) close(w->dir_fd);
+        free(w->path);
+        free(w);
+        return 0;
+    }
+    return 0;
+}
+
+int fx_c_inotify_close(int fd)
+{
+    kq_state_t *s;
+    kq_state_t *prev;
+    kq_watch_t *w;
+    kq_watch_t *wn;
+    kq_event_t *e;
+    kq_event_t *en;
+    size_t i;
+
+    if (fd < 0) return 0;
+
+    prev = NULL;
+    for (s = fx_kq_states; s != NULL; prev = s, s = s->next) {
+        if (s->kq != fd) continue;
+        if (prev != NULL) prev->next = s->next; else fx_kq_states = s->next;
+        for (w = s->watches; w != NULL; w = wn) {
+            wn = w->next;
+            for (i = 0; i < w->n_children; i++) {
+                if (w->children[i].file_fd >= 0) close(w->children[i].file_fd);
+            }
+            free(w->children);
+            if (w->dir_fd >= 0) close(w->dir_fd);
+            free(w->path);
+            free(w);
+        }
+        for (e = s->head; e != NULL; e = en) {
+            en = e->next;
+            free(e);
+        }
+        close(s->kq);
+        free(s);
+        return 0;
+    }
+    return close(fd);
+}
+
+int fx_c_inotify_poll(int fd, char *path_buf, int path_len,
+                      int *event_type, int timeout_ms)
+{
+    kq_state_t *s;
+    struct kevent evs[64];
+    struct timespec ts;
+    int n;
+    int i;
+
+    if (event_type != NULL) *event_type = 0;
+    if (path_buf != NULL && path_len > 0) path_buf[0] = '\0';
+
+    s = fx_kq_find(fd);
+    if (s == NULL) return 0;
+
+    if (fx_kq_dequeue(s, path_buf, path_len, event_type)) return 1;
+
+    ts.tv_sec = timeout_ms / 1000;
+    ts.tv_nsec = (long) (timeout_ms % 1000) * 1000000L;
+
+    n = kevent(s->kq, NULL, 0, evs, 64, &ts);
+    if (n < 0) {
+        if (errno == EINTR) return 0;
+        return -1;
+    }
+    if (n == 0) return 0;
+
+    for (i = 0; i < n; i++) {
+        kq_watch_t *w = (kq_watch_t *) evs[i].udata;
+        if (w == NULL) continue;
+        if (evs[i].flags & EV_ERROR) continue;
+
+        if ((int) evs[i].ident == w->dir_fd) {
+            fx_kq_sync_children(s, w, 1);
+        } else if (evs[i].fflags & (NOTE_WRITE | NOTE_EXTEND)) {
+            size_t k;
+            for (k = 0; k < w->n_children; k++) {
+                if (w->children[k].file_fd == (int) evs[i].ident) {
+                    char p[PATH_MAX];
+                    if (fx_join_path(p, sizeof(p), w->path,
+                                     w->children[k].name) >= 0) {
+                        fx_kq_enqueue(s, p, 1);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if (fx_kq_dequeue(s, path_buf, path_len, event_type)) return 1;
+    return 0;
+}
+
+#else /* other platforms: stubs without a file-watch backend */
 void fx_c_inotify_test_force_enospc_once(void) { }
 int fx_c_inotify_init(void) { return -1; }
 int fx_c_inotify_add_watch(int fd, const char *path, int mask)
@@ -1310,8 +1736,9 @@ int fx_c_inotify_add_watch(int fd, const char *path, int mask)
 int fx_c_inotify_rm_watch(int fd, int wd) { (void)fd; (void)wd; return -1; }
 int fx_c_inotify_close(int fd) { (void)fd; return -1; }
 int fx_c_inotify_poll(int fd, char *path_buf, int path_len,
-    int *event_type)
-    { (void)fd; (void)path_buf; (void)path_len; (void)event_type; return -1; }
+    int *event_type, int timeout_ms)
+    { (void)fd; (void)path_buf; (void)path_len; (void)event_type;
+      (void)timeout_ms; return -1; }
 #endif /* __linux__ */
 
 int fx_c_count_dirs(const char *root, int *n_dirs)
