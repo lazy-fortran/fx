@@ -6,7 +6,21 @@ program test_cache
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
                        test_assert_equal_int, test_assert_equal_str, &
                        test_suite_summary, test_suite_exit
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
+                                           c_null_char
     implicit none
+
+    interface
+        integer(c_int) function fx_c_set_mtime(path, mtime) bind(C)
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), value :: mtime
+        end function fx_c_set_mtime
+
+        integer(c_long_long) function fx_c_unix_time() bind(C)
+            import :: c_long_long
+        end function fx_c_unix_time
+    end interface
 
     type(test_suite_t) :: suite
 
@@ -577,21 +591,12 @@ contains
         character(len=*), intent(in) :: path
         integer, intent(in) :: hours
         integer, intent(out) :: ierr
-        integer :: exitstat
-        integer :: cmdstat
-        character(len=256) :: cmdmsg
-        character(len=16) :: hours_text
+        integer(c_long_long) :: target_mtime
 
-        write(hours_text, '(I0)') hours
-        call execute_command_line('touch -d "' // trim(hours_text) // &
-                                  ' hours ago" -- ' // trim(path), &
-                                  exitstat=exitstat, cmdstat=cmdstat, &
-                                  cmdmsg=cmdmsg)
-        if (cmdstat == 0 .and. exitstat == 0) then
-            ierr = 0
-        else
-            ierr = 1
-        end if
+        ! Set mtime directly via utimes() for cross-platform behavior; BSD
+        ! touch on macOS does not accept GNU's `-d "N hours ago"`.
+        target_mtime = fx_c_unix_time() - int(hours, c_long_long) * 3600_c_long_long
+        ierr = int(fx_c_set_mtime(path // c_null_char, target_mtime))
     end subroutine touch_older
 
     function parent_dir(path) result(dir)

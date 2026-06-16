@@ -12,6 +12,12 @@ module fx_cache_fs
     integer(int64), parameter :: CACHE_TMP_AGE_SEC = 3600_int64
     integer(int64), parameter :: CACHE_MB_BYTES = 1048576_int64
 
+    ! Process-wide temp-name counter. PID makes temp names unique across
+    ! concurrent processes; this counter makes them unique across threads and
+    ! repeated calls within one process. Incremented atomically so the parallel
+    ! test/build loop never aliases two writers onto the same temp file.
+    integer(int64) :: g_temp_counter = 0_int64
+
     type, public :: cache_t
         character(len=CACHE_PATH_LEN) :: root_dir = ' '
         logical :: initialized = .false.
@@ -65,6 +71,10 @@ module fx_cache_fs
         integer(c_long_long) function fx_c_unix_time() bind(C)
             import :: c_long_long
         end function fx_c_unix_time
+
+        integer(c_int) function fx_c_pid() bind(C)
+            import :: c_int
+        end function fx_c_pid
 
         integer(c_int) function fx_c_file_read(path, content, n_bytes) bind(C)
             import :: c_int, c_char
@@ -135,17 +145,30 @@ contains
         character(len=:), allocatable :: prefix_path
         character(len=32) :: seq_text
         character(len=32) :: time_text
+        character(len=32) :: pid_text
+        character(len=32) :: ctr_text
         integer :: clock
         integer(int64) :: now_sec
+        integer(int64) :: ctr
 
         now_sec = fx_c_unix_time()
         call system_clock(clock)
+        !$omp atomic capture
+        g_temp_counter = g_temp_counter + 1_int64
+        ctr = g_temp_counter
+        !$omp end atomic
         write(seq_text, '(I0)') clock
         write(time_text, '(I0)') now_sec
+        write(pid_text, '(I0)') fx_c_pid()
+        write(ctr_text, '(I0)') ctr
 
+        ! .tmp.<pid>.<unix_sec>.<system_clock>.<counter> -- unique per writer.
+        ! Content-addressed final paths can still collide across processes, but
+        ! identical content makes the atomic rename idempotent and safe.
         prefix_path = cache_prefix_path(c, key)
-        path = path_join(prefix_path, '.tmp.' // trim(time_text) // '.' // &
-                         trim(seq_text))
+        path = path_join(prefix_path, '.tmp.' // trim(pid_text) // '.' // &
+                         trim(time_text) // '.' // trim(seq_text) // '.' // &
+                         trim(ctr_text))
     end subroutine cache_temp_path
 
     subroutine cache_ensure_dir(path, ierr)
