@@ -5,8 +5,8 @@ Shared Fortran infrastructure library for fo (build tool) and tx (LaTeX build to
 ## Build and Test
 
 ```bash
-fpm build
-fpm test
+fo build
+fo test
 ```
 
 No external dependencies except the C standard library via `src/proc/fx_sys.c`.
