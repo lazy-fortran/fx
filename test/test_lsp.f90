@@ -1,9 +1,9 @@
 program test_lsp
     use fx_diag, only: diag_t, DIAG_ERROR, DIAG_WARNING, DIAG_HINT
     use fx_lsp, only: lsp_make_diagnostic, lsp_make_initialize_response, &
-                       lsp_make_parse_error_response, lsp_make_shutdown_response, &
-                       lsp_parse_did_open, lsp_parse_did_save, lsp_path_to_uri, &
-                       lsp_uri_to_path
+        lsp_make_parse_error_response, lsp_make_shutdown_response, &
+        lsp_parse_did_open, lsp_parse_did_save, lsp_path_to_uri, &
+        lsp_uri_to_path
     implicit none
 
     integer :: failures
@@ -62,7 +62,7 @@ contains
         character(len=:), allocatable :: payload
 
         d = diag_t(file='file:///tmp/sample%20file.f90', line=3, col=12, &
-                    severity=DIAG_ERROR, message='bad "quote" and \\escape')
+            severity=DIAG_ERROR, message='bad "quote" and \\escape')
 
         payload = lsp_make_diagnostic(d)
 
@@ -76,7 +76,7 @@ contains
             'diagnostic escapes message', failures, passes)
 
         d = diag_t(file='file:///tmp/zero.f90', line=0, col=0, &
-                    severity=DIAG_WARNING, message='start of file')
+            severity=DIAG_WARNING, message='start of file')
         payload = lsp_make_diagnostic(d)
         call expect_true(index(payload, '"line":0') > 0, &
             'diagnostic keeps zero line as zero', failures, passes)
@@ -86,7 +86,7 @@ contains
             'diagnostic emits warning severity 2', failures, passes)
 
         d = diag_t(file='file:///tmp/info.f90', line=1, col=1, &
-                    severity=DIAG_HINT, message='info')
+            severity=DIAG_HINT, message='info')
         payload = lsp_make_diagnostic(d)
         call expect_true(index(payload, '"severity":4') > 0, &
             'diagnostic emits hint severity 4', failures, passes)

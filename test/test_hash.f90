@@ -1,17 +1,17 @@
 program test_hash
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_test, only: test_suite_t, test_suite_init, &
-                       test_suite_summary, test_suite_exit, &
-                       test_assert, test_assert_equal_str, &
-                       test_assert_equal_int
+        test_suite_summary, test_suite_exit, &
+        test_assert, test_assert_equal_str, &
+        test_assert_equal_int
     use fx_hash, only: fnv1a_string, fnv1a_file, xxhash64, &
-                       sha256, sha256_bytes, sha256_string, sha256_file, &
-                       sha256_init, sha256_update, sha256_final, &
-                       sha256_hardware_available, sha256_hardware_digest, &
-                       sha256_state_t, &
-                       hash_to_hex, hash_combine, &
-                       hash_state_init, hash_state_update, hash_state_final, &
-                       hash_state_t
+        sha256, sha256_bytes, sha256_string, sha256_file, &
+        sha256_init, sha256_update, sha256_final, &
+        sha256_hardware_available, sha256_hardware_digest, &
+        sha256_state_t, &
+        hash_to_hex, hash_combine, &
+        hash_state_init, hash_state_update, hash_state_final, &
+        hash_state_t
     implicit none
 
     type(test_suite_t) :: suite
@@ -36,19 +36,19 @@ contains
         ! Known FNV-1a 64-bit vectors (FNV offset basis = 14695981039346656037)
         h = fnv1a_string('')
         call test_assert_equal_str(suite, 'cbf29ce484222325', hash_to_hex(h), &
-                                   'fnv1a: empty string')
+            'fnv1a: empty string')
 
         h = fnv1a_string('a')
         call test_assert_equal_str(suite, 'af63dc4c8601ec8c', hash_to_hex(h), &
-                                   'fnv1a: "a"')
+            'fnv1a: "a"')
 
         h = fnv1a_string('foobar')
         call test_assert_equal_str(suite, '85944171f73967e8', hash_to_hex(h), &
-                                   'fnv1a: "foobar"')
+            'fnv1a: "foobar"')
 
         ! Two different strings produce different hashes
         call test_assert(suite, fnv1a_string('foo') /= fnv1a_string('bar'), &
-                         'fnv1a: collision avoidance')
+            'fnv1a: collision avoidance')
     end subroutine test_fnv1a_known_values
 
     subroutine test_fnv1a_file(suite)
@@ -58,7 +58,7 @@ contains
 
         ! Write known content to a temp file
         open (newunit=unit, file='/tmp/fx_test_hash_fnv1a.bin', &
-              access='stream', form='unformatted', status='replace')
+            access='stream', form='unformatted', status='replace')
         write (unit) 'foobar'
         close (unit)
 
@@ -81,7 +81,7 @@ contains
         allocate (data(0))
         h1 = xxhash64(data, 0, 0_int64)
         call test_assert_equal_str(suite, 'ef46db3751d8e999', hash_to_hex(h1), &
-                                   'xxhash64: empty seed 0')
+            'xxhash64: empty seed 0')
         deallocate (data)
 
         ! Different inputs produce different hashes
@@ -126,22 +126,22 @@ contains
         deallocate (data)
 
         call test_assert_equal_int(suite, 64, len(h_empty), &
-                                   'sha256: 64 hex chars')
+            'sha256: 64 hex chars')
         call test_assert_equal_str(suite, &
-                                   'e3b0c44298fc1c149afbf4c8996fb924'// &
-                                   '27ae41e4649b934ca495991b7852b855', &
-                                   h_empty, 'sha256: empty vector')
+            'e3b0c44298fc1c149afbf4c8996fb924'// &
+            '27ae41e4649b934ca495991b7852b855', &
+            h_empty, 'sha256: empty vector')
 
         h_foo = sha256_string('foo')
         call test_assert(suite, h_foo /= h_empty, &
-                         'sha256: distinct input differs')
+            'sha256: distinct input differs')
         chunk(1) = 'f'; chunk(2) = 'o'; chunk(3) = 'o'
         call test_assert_equal_str(suite, h_foo, sha256(chunk, 3), &
-                                   'sha256: compatibility wrapper')
+            'sha256: compatibility wrapper')
         call test_assert_equal_str(suite, &
-                                   '2c26b46b68ffc68ff99b453c1d304134'// &
-                                   '13422d706483bfa0f98a5e886266e7ae', &
-                                   h_foo, 'sha256: foo vector')
+            '2c26b46b68ffc68ff99b453c1d304134'// &
+            '13422d706483bfa0f98a5e886266e7ae', &
+            h_foo, 'sha256: foo vector')
 
         call sha256_init(state)
         chunk(1) = 'f'
@@ -150,24 +150,24 @@ contains
         call sha256_update(state, chunk, 2)
         h_stream = sha256_final(state)
         call test_assert_equal_str(suite, h_foo, h_stream, &
-                                   'sha256: streaming chunks match one-shot')
+            'sha256: streaming chunks match one-shot')
 
         open (newunit=unit, file='/tmp/fx_test_hash_wide.bin', &
-              access='stream', form='unformatted', status='replace')
+            access='stream', form='unformatted', status='replace')
         write (unit) 'foo'
         close (unit)
         call sha256_file('/tmp/fx_test_hash_wide.bin', h_file, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'sha256_file: no error')
         call test_assert_equal_str(suite, h_foo, h_file, &
-                                   'sha256_file: matches string hash')
+            'sha256_file: matches string hash')
 
         do i = 1, len(h_foo)
             call test_assert(suite, &
-                             (iachar(h_foo(i:i)) >= iachar('0') .and. &
-                              iachar(h_foo(i:i)) <= iachar('9')) .or. &
-                             (iachar(h_foo(i:i)) >= iachar('a') .and. &
-                              iachar(h_foo(i:i)) <= iachar('f')), &
-                             'sha256: lowercase hex chars')
+                (iachar(h_foo(i:i)) >= iachar('0') .and. &
+                iachar(h_foo(i:i)) <= iachar('9')) .or. &
+                (iachar(h_foo(i:i)) >= iachar('a') .and. &
+                iachar(h_foo(i:i)) <= iachar('f')), &
+                'sha256: lowercase hex chars')
         end do
 
         call sha256_file('/tmp/fx_missing_wide_hash.bin', h_file, ierr)
@@ -175,12 +175,12 @@ contains
         chunk(1) = 'f'; chunk(2) = 'o'; chunk(3) = 'o'
         if (sha256_hardware_available()) then
             call test_assert(suite, sha256_hardware_digest(chunk, 3, h_hw), &
-                             'sha256 hardware digest succeeds when available')
+                'sha256 hardware digest succeeds when available')
             call test_assert_equal_str(suite, h_foo, h_hw, &
-                                       'sha256 hardware digest matches scalar')
+                'sha256 hardware digest matches scalar')
         else
             call test_assert(suite, .not. sha256_hardware_digest(chunk, 3, h_hw), &
-                             'sha256 hardware digest disabled when unavailable')
+                'sha256 hardware digest disabled when unavailable')
         end if
     end subroutine test_sha256
 
@@ -194,7 +194,7 @@ contains
         ! Combine is deterministic
         hc = hash_combine(ha, hb)
         call test_assert(suite, hc == hash_combine(ha, hb), &
-                         'hash_combine: deterministic')
+            'hash_combine: deterministic')
 
         ! Combine differs from inputs
         call test_assert(suite, hc /= ha, 'hash_combine: differs from ha')
@@ -202,7 +202,7 @@ contains
 
         ! Order matters (not commutative in general)
         call test_assert(suite, hash_combine(ha, hb) /= hash_combine(hb, ha), &
-                         'hash_combine: order matters')
+            'hash_combine: order matters')
     end subroutine test_hash_combine
 
     subroutine test_hash_to_hex(suite)
@@ -210,17 +210,17 @@ contains
 
         ! All zeros
         call test_assert_equal_str(suite, '0000000000000000', &
-                                   hash_to_hex(0_int64), 'hash_to_hex: zero')
+            hash_to_hex(0_int64), 'hash_to_hex: zero')
 
         ! Known value: -1 = 0xFFFFFFFFFFFFFFFF
         call test_assert_equal_str(suite, 'ffffffffffffffff', &
-                                   hash_to_hex(-1_int64), &
-                                   'hash_to_hex: minus one')
+            hash_to_hex(-1_int64), &
+            'hash_to_hex: minus one')
 
         ! Length is always 16
         call test_assert_equal_int(suite, 16, &
-                                   len(hash_to_hex(fnv1a_string('test'))), &
-                                   'hash_to_hex: always 16 chars')
+            len(hash_to_hex(fnv1a_string('test'))), &
+            'hash_to_hex: always 16 chars')
 
         ! Output is lowercase hex
         block
@@ -229,11 +229,11 @@ contains
             h = hash_to_hex(fnv1a_string('foobar'))
             do i = 1, 16
                 call test_assert(suite, &
-                                 (iachar(h(i:i)) >= iachar('0') .and. &
-                                  iachar(h(i:i)) <= iachar('9')) .or. &
-                                 (iachar(h(i:i)) >= iachar('a') .and. &
-                                  iachar(h(i:i)) <= iachar('f')), &
-                                 'hash_to_hex: lowercase hex chars')
+                    (iachar(h(i:i)) >= iachar('0') .and. &
+                    iachar(h(i:i)) <= iachar('9')) .or. &
+                    (iachar(h(i:i)) >= iachar('a') .and. &
+                    iachar(h(i:i)) <= iachar('f')), &
+                    'hash_to_hex: lowercase hex chars')
             end do
         end block
     end subroutine test_hash_to_hex
@@ -258,14 +258,14 @@ contains
         h_full = fnv1a_string('foo')
 
         call test_assert(suite, h_incremental == h_full, &
-                         'incremental: matches full hash')
+            'incremental: matches full hash')
 
         ! Empty state returns offset basis
         call hash_state_init(state)
         h_incremental = hash_state_final(state)
         h_full = fnv1a_string('')
         call test_assert(suite, h_incremental == h_full, &
-                         'incremental: empty matches fnv1a empty')
+            'incremental: empty matches fnv1a empty')
     end subroutine test_incremental_hash
 
 end program test_hash

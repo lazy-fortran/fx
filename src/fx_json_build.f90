@@ -1,7 +1,7 @@
 module fx_json_build
     use, intrinsic :: iso_fortran_env, only: real64
     use fx_string, only: builder_t, builder_new, builder_append, &
-                         builder_to_string, builder_reset
+        builder_to_string, builder_reset
     implicit none
     private
 
@@ -204,21 +204,21 @@ contains
             c = s(i:i)
             code = iachar(c)
             select case (code)
-            case (34)   ! "
+            case (34) ! "
                 res = res // '\"'
-            case (92)   ! backslash
+            case (92) ! backslash
                 res = res // '\\'
-            case (8)    ! backspace
+            case (8) ! backspace
                 res = res // '\b'
-            case (12)   ! form feed
+            case (12) ! form feed
                 res = res // '\f'
-            case (10)   ! newline
+            case (10) ! newline
                 res = res // '\n'
-            case (13)   ! carriage return
+            case (13) ! carriage return
                 res = res // '\r'
-            case (9)    ! tab
+            case (9) ! tab
                 res = res // '\t'
-            case (0:7, 11, 14:31)   ! other control chars
+            case (0:7, 11, 14:31) ! other control chars
                 block
                     character(len=6) :: hex
                     write(hex, '(A,Z4.4)') '\u', code

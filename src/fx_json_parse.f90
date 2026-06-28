@@ -207,7 +207,7 @@ contains
             case (JSON_STRING)
                 if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
                 if (path_matches(key_stack, arr_idx, is_arr, depth, &
-                                 segments, n_segs)) then
+                    segments, n_segs)) then
                     if (allocated(ev%string_val)) result = ev%string_val
                     found = .true.
                     return
@@ -264,7 +264,7 @@ contains
             case (JSON_INTEGER)
                 if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
                 if (path_matches(key_stack, arr_idx, is_arr, depth, &
-                                 segments, n_segs)) then
+                    segments, n_segs)) then
                     result = ev%int_val
                     found = .true.
                     return
@@ -321,7 +321,7 @@ contains
             case (JSON_BOOL)
                 if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
                 if (path_matches(key_stack, arr_idx, is_arr, depth, &
-                                 segments, n_segs)) then
+                    segments, n_segs)) then
                     result = ev%bool_val
                     found = .true.
                     return
@@ -336,7 +336,7 @@ contains
 
     ! Check key_stack/arr_idx against path segments at given depth
     pure logical function path_matches(key_stack, arr_idx, is_arr, depth, &
-                                       segments, n_segs)
+            segments, n_segs)
         character(len=256), intent(in) :: key_stack(:)
         integer, intent(in) :: arr_idx(:)
         logical, intent(in) :: is_arr(:)
@@ -412,7 +412,7 @@ contains
         character(len=4) :: hex_buf
         integer :: code, ios
 
-        p%pos = p%pos + 1  ! skip opening "
+        p%pos = p%pos + 1 ! skip opening "
         val = ''
         event_type = JSON_STRING
 
@@ -421,7 +421,7 @@ contains
             if (ch == '"') then
                 p%pos = p%pos + 1
                 return
-            else if (iachar(ch) == 92) then   ! backslash
+            else if (iachar(ch) == 92) then ! backslash
                 p%pos = p%pos + 1
                 if (p%pos > len(p%input)) then
                     event_type = JSON_ERROR
@@ -429,30 +429,30 @@ contains
                 end if
                 ch = p%input(p%pos:p%pos)
                 select case (iachar(ch))
-                case (34)   ! "
+                case (34) ! "
                     val = val // '"'
-                case (92)   ! \
+                case (92) ! \
                     val = val // achar(92)
-                case (47)   ! /
+                case (47) ! /
                     val = val // '/'
-                case (98)   ! b
+                case (98) ! b
                     val = val // achar(8)
-                case (102)  ! f
+                case (102) ! f
                     val = val // achar(12)
-                case (110)  ! n
+                case (110) ! n
                     val = val // achar(10)
-                case (114)  ! r
+                case (114) ! r
                     val = val // achar(13)
-                case (116)  ! t
+                case (116) ! t
                     val = val // achar(9)
-                case (117)  ! u
+                case (117) ! u
                     p%pos = p%pos + 1
                     if (p%pos + 3 > len(p%input)) then
                         event_type = JSON_ERROR
                         return
                     end if
                     hex_buf = p%input(p%pos:p%pos + 3)
-                    p%pos = p%pos + 3  ! will be incremented below
+                    p%pos = p%pos + 3 ! will be incremented below
                     read(hex_buf, '(Z4)', iostat=ios) code
                     if (ios == 0 .and. code >= 0 .and. code < 128) then
                         val = val // achar(code)
@@ -465,7 +465,7 @@ contains
             end if
             p%pos = p%pos + 1
         end do
-        event_type = JSON_ERROR  ! unterminated string
+        event_type = JSON_ERROR ! unterminated string
     end subroutine parse_string
 
     subroutine parse_bool(p, bool_val, event_type)
@@ -479,7 +479,7 @@ contains
             p%pos = p%pos + 4
             event_type = JSON_BOOL
         else if (p%pos + 4 <= len(p%input) .and. &
-                 p%input(p%pos:p%pos + 4) == 'false') then
+                p%input(p%pos:p%pos + 4) == 'false') then
             bool_val = .false.
             p%pos = p%pos + 5
             event_type = JSON_BOOL
