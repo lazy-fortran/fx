@@ -27,7 +27,7 @@ module fx_lsp
     public :: lsp_read_message, lsp_send_message
     public :: lsp_make_initialize_response
     public :: lsp_publish_diagnostics, lsp_make_diagnostic
-    public :: lsp_parse_did_save, lsp_parse_did_open
+    public :: lsp_parse_did_save, lsp_parse_did_open, lsp_parse_did_change
     public :: lsp_make_parse_error_response, lsp_make_shutdown_response
     public :: lsp_path_to_uri, lsp_uri_to_path
 
@@ -42,9 +42,10 @@ contains
         s%shutdown_received = .false.
     end subroutine lsp_server_init
 
-    subroutine lsp_server_run(s, on_save_callback)
+    subroutine lsp_server_run(s, on_save_callback, on_change_callback)
         type(lsp_server_t), intent(inout) :: s
         procedure(lsp_save_callback) :: on_save_callback
+        procedure(lsp_save_callback), optional :: on_change_callback
 
         character(len=:), allocatable :: body
         integer :: content_len
@@ -92,6 +93,15 @@ contains
             else if (trim(method) == 'textDocument/didOpen') then
                 call lsp_parse_did_open(body, uri, text)
                 if (len(uri) > 0) call on_save_callback(uri, text)
+            else if (trim(method) == 'textDocument/didChange') then
+                call lsp_parse_did_change(body, uri, text)
+                if (len(uri) > 0) then
+                    if (present(on_change_callback)) then
+                        call on_change_callback(uri, text)
+                    else
+                        call on_save_callback(uri, text)
+                    end if
+                end if
             end if
         end do
     end subroutine lsp_server_run
@@ -188,7 +198,7 @@ contains
 
         normalized_id = lsp_normalize_id(id_str)
         response = '{"jsonrpc":"2.0","id":' // trim(normalized_id) // &
-            ',"result":{"capabilities":{"textDocumentSync":{"openClose":true,"save":{"includeText":false}},' // &
+            ',"result":{"capabilities":{"textDocumentSync":{"openClose":true,"change":1,"save":{"includeText":false}},' // &
             '"diagnosticProvider":{"interFileDependencies":true,"workspaceDiagnostics":false}},' // &
             '"serverInfo":{"name":"' // trim(server_name) // '","version":"0.1.0"}}}'
     end subroutine lsp_make_initialize_response
@@ -259,6 +269,32 @@ contains
         call lsp_extract_json_string(content, 'params.textDocument.text', text, found)
         if (.not. found) text = ''
     end subroutine lsp_parse_did_open
+
+    subroutine lsp_parse_did_change(content, uri, text)
+        character(len=*), intent(in) :: content
+        character(len=:), allocatable, intent(out) :: uri
+        character(len=:), allocatable, intent(out) :: text
+        logical :: found
+        integer :: pos, bracket_pos, brace_pos
+
+        call lsp_extract_json_string(content, 'params.textDocument.uri', uri, found)
+        if (.not. found) uri = ''
+
+        pos = index(content, '"contentChanges"')
+        if (pos > 0) then
+            bracket_pos = index(content(pos+16:), '[')
+            if (bracket_pos > 0) then
+                pos = pos + 16 + bracket_pos
+                brace_pos = index(content(pos:), '{')
+                if (brace_pos > 0) then
+                    call lsp_extract_json_string(content(pos+brace_pos-1:), 'text', text, found)
+                    if (.not. found) text = ''
+                    return
+                end if
+            end if
+        end if
+        text = ''
+    end subroutine lsp_parse_did_change
 
     subroutine lsp_make_shutdown_response(id_str, response)
         character(len=*), intent(in) :: id_str
