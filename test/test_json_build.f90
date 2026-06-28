@@ -1,14 +1,14 @@
 program test_json_build
     use fx_test, only: test_suite_t, test_suite_init, &
-                       test_suite_summary, test_suite_exit, &
-                       test_assert, test_assert_equal_str, &
-                       test_assert_equal_int
+        test_suite_summary, test_suite_exit, &
+        test_assert, test_assert_equal_str, &
+        test_assert_equal_int
     use fx_json_build, only: json_builder_t, json_new, json_object_start, &
-                             json_object_end, json_array_start, json_array_end, &
-                             json_key, json_value_string, json_value_int, &
-                             json_value_bool, json_value_null, &
-                             json_key_string, json_key_int, json_key_bool, &
-                             json_to_string, json_reset, json_escape_string
+        json_object_end, json_array_start, json_array_end, &
+        json_key, json_value_string, json_value_int, &
+        json_value_bool, json_value_null, &
+        json_key_string, json_key_int, json_key_bool, &
+        json_to_string, json_reset, json_escape_string
     implicit none
 
     type(test_suite_t) :: suite
@@ -33,13 +33,13 @@ contains
         call json_object_start(jb)
         call json_object_end(jb)
         call test_assert_equal_str(suite, '{}', json_to_string(jb), &
-                                   'empty object')
+            'empty object')
 
         call json_reset(jb)
         call json_array_start(jb)
         call json_array_end(jb)
         call test_assert_equal_str(suite, '[]', json_to_string(jb), &
-                                   'empty array')
+            'empty array')
     end subroutine test_json_empty_object
 
     subroutine test_json_nested_object(suite)
@@ -56,7 +56,7 @@ contains
         call json_object_end(jb)
         result = json_to_string(jb)
         call test_assert_equal_str(suite, '{"name":"Alice","age":30}', result, &
-                                   'object with string and int')
+            'object with string and int')
 
         call json_reset(jb)
         call json_object_start(jb)
@@ -68,7 +68,7 @@ contains
         call json_object_end(jb)
         result = json_to_string(jb)
         call test_assert_equal_str(suite, '{"inner":{"x":1}}', result, &
-                                   'nested object')
+            'nested object')
 
         ! Two keys — comma between them
         call json_reset(jb)
@@ -80,7 +80,7 @@ contains
         call json_object_end(jb)
         result = json_to_string(jb)
         call test_assert_equal_str(suite, '{"a":1,"b":2}', result, &
-                                   'two keys comma separated')
+            'two keys comma separated')
     end subroutine test_json_nested_object
 
     subroutine test_json_array(suite)
@@ -96,7 +96,7 @@ contains
         call json_array_end(jb)
         result = json_to_string(jb)
         call test_assert_equal_str(suite, '[1,2,3]', result, &
-                                   'int array')
+            'int array')
 
         call json_reset(jb)
         call json_array_start(jb)
@@ -105,7 +105,7 @@ contains
         call json_array_end(jb)
         result = json_to_string(jb)
         call test_assert_equal_str(suite, '["a","b"]', result, &
-                                   'string array')
+            'string array')
 
         call json_reset(jb)
         call json_object_start(jb)
@@ -117,7 +117,7 @@ contains
         call json_object_end(jb)
         result = json_to_string(jb)
         call test_assert_equal_str(suite, '{"items":[10,20]}', result, &
-                                   'object with array')
+            'object with array')
 
         ! bool and null in array
         call json_reset(jb)
@@ -128,26 +128,26 @@ contains
         call json_array_end(jb)
         result = json_to_string(jb)
         call test_assert_equal_str(suite, '[true,false,null]', result, &
-                                   'bool and null array')
+            'bool and null array')
     end subroutine test_json_array
 
     subroutine test_json_escape_special_chars(suite)
         type(test_suite_t), intent(inout) :: suite
 
         call test_assert_equal_str(suite, '\"', json_escape_string('"'), &
-                                   'escape: quote')
+            'escape: quote')
         call test_assert_equal_str(suite, '\\', json_escape_string('\'), &
-                                   'escape: backslash')
+            'escape: backslash')
         call test_assert_equal_str(suite, '\n', json_escape_string(achar(10)), &
-                                   'escape: newline')
+            'escape: newline')
         call test_assert_equal_str(suite, '\r', json_escape_string(achar(13)), &
-                                   'escape: carriage return')
+            'escape: carriage return')
         call test_assert_equal_str(suite, '\t', json_escape_string(achar(9)), &
-                                   'escape: tab')
+            'escape: tab')
         call test_assert_equal_str(suite, 'hello', json_escape_string('hello'), &
-                                   'escape: plain text unchanged')
+            'escape: plain text unchanged')
         call test_assert_equal_str(suite, '', json_escape_string(''), &
-                                   'escape: empty unchanged')
+            'escape: empty unchanged')
 
         ! Verify escaping in value context
         block
@@ -158,8 +158,8 @@ contains
             call json_value_string(jb, 'say "hi"')
             call json_object_end(jb)
             call test_assert_equal_str(suite, '{"msg":"say \"hi\""}', &
-                                       json_to_string(jb), &
-                                       'escape in value context')
+                json_to_string(jb), &
+                'escape in value context')
         end block
     end subroutine test_json_escape_special_chars
 
@@ -197,7 +197,7 @@ contains
         call test_assert(suite, len(result) > 60000, 'large: output length')
         call test_assert(suite, result(1:1) == '{', 'large: starts with {')
         call test_assert(suite, result(len(result):len(result)) == '}', &
-                         'large: ends with }')
+            'large: ends with }')
     end subroutine test_json_large_output
 
 end program test_json_build

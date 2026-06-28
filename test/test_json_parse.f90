@@ -1,17 +1,17 @@
 program test_json_parse
     use fx_test, only: test_suite_t, test_suite_init, &
-                       test_suite_summary, test_suite_exit, &
-                       test_assert, test_assert_equal_str, &
-                       test_assert_equal_int
+        test_suite_summary, test_suite_exit, &
+        test_assert, test_assert_equal_str, &
+        test_assert_equal_int
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, &
-                             json_parser_next, json_parser_reset, &
-                             json_extract_string, json_extract_int, &
-                             json_extract_bool, &
-                             JSON_OBJECT_START, JSON_OBJECT_END, &
-                             JSON_ARRAY_START, JSON_ARRAY_END, &
-                             JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, &
-                             JSON_BOOL, JSON_NULL_VAL, JSON_ERROR, &
-                             JSON_END_OF_INPUT
+        json_parser_next, json_parser_reset, &
+        json_extract_string, json_extract_int, &
+        json_extract_bool, &
+        JSON_OBJECT_START, JSON_OBJECT_END, &
+        JSON_ARRAY_START, JSON_ARRAY_END, &
+        JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, &
+        JSON_BOOL, JSON_NULL_VAL, JSON_ERROR, &
+        JSON_END_OF_INPUT
     implicit none
 
     type(test_suite_t) :: suite
@@ -39,24 +39,24 @@ contains
         call json_parser_init(p, '{}')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_OBJECT_START, ev%event_type, &
-                                   'empty object: start')
+            'empty object: start')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_OBJECT_END, ev%event_type, &
-                                   'empty object: end')
+            'empty object: end')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_END_OF_INPUT, ev%event_type, &
-                                   'empty object: eof')
+            'empty object: eof')
 
         call json_parser_init(p, '[]')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_ARRAY_START, ev%event_type, &
-                                   'empty array: start')
+            'empty array: start')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_ARRAY_END, ev%event_type, &
-                                   'empty array: end')
+            'empty array: end')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_END_OF_INPUT, ev%event_type, &
-                                   'empty array: eof')
+            'empty array: eof')
 
         ! reset then re-use
         call json_parser_reset(p)
@@ -73,52 +73,52 @@ contains
         call json_parser_init(p, '{"name":"Alice","age":30}')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_OBJECT_START, ev%event_type, &
-                                   'nested: start')
+            'nested: start')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_KEY, ev%event_type, &
-                                   'nested: key name type')
+            'nested: key name type')
         call test_assert_equal_str(suite, 'name', ev%string_val, &
-                                   'nested: key name val')
+            'nested: key name val')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_STRING, ev%event_type, &
-                                   'nested: string val type')
+            'nested: string val type')
         call test_assert_equal_str(suite, 'Alice', ev%string_val, &
-                                   'nested: string val')
+            'nested: string val')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_KEY, ev%event_type, &
-                                   'nested: key age type')
+            'nested: key age type')
         call test_assert_equal_str(suite, 'age', ev%string_val, &
-                                   'nested: key age val')
+            'nested: key age val')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_INTEGER, ev%event_type, &
-                                   'nested: int type')
+            'nested: int type')
         call test_assert_equal_int(suite, 30, ev%int_val, 'nested: int val')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_OBJECT_END, ev%event_type, &
-                                   'nested: end')
+            'nested: end')
 
         ! nested object: {"outer":{"inner":1}}
         call json_parser_init(p, '{"outer":{"inner":1}}')
-        call json_parser_next(p, ev)  ! outer start
-        call json_parser_next(p, ev)  ! key "outer"
+        call json_parser_next(p, ev) ! outer start
+        call json_parser_next(p, ev) ! key "outer"
         call test_assert_equal_int(suite, JSON_KEY, ev%event_type, &
-                                   'nested obj: outer key')
-        call json_parser_next(p, ev)  ! inner start
+            'nested obj: outer key')
+        call json_parser_next(p, ev) ! inner start
         call test_assert_equal_int(suite, JSON_OBJECT_START, ev%event_type, &
-                                   'nested obj: inner start')
-        call json_parser_next(p, ev)  ! key "inner"
+            'nested obj: inner start')
+        call json_parser_next(p, ev) ! key "inner"
         call test_assert_equal_int(suite, JSON_KEY, ev%event_type, &
-                                   'nested obj: inner key')
-        call json_parser_next(p, ev)  ! value 1
+            'nested obj: inner key')
+        call json_parser_next(p, ev) ! value 1
         call test_assert_equal_int(suite, JSON_INTEGER, ev%event_type, &
-                                   'nested obj: inner val type')
+            'nested obj: inner val type')
         call test_assert_equal_int(suite, 1, ev%int_val, 'nested obj: inner val')
-        call json_parser_next(p, ev)  ! inner end
+        call json_parser_next(p, ev) ! inner end
         call test_assert_equal_int(suite, JSON_OBJECT_END, ev%event_type, &
-                                   'nested obj: inner end')
-        call json_parser_next(p, ev)  ! outer end
+            'nested obj: inner end')
+        call json_parser_next(p, ev) ! outer end
         call test_assert_equal_int(suite, JSON_OBJECT_END, ev%event_type, &
-                                   'nested obj: outer end')
+            'nested obj: outer end')
     end subroutine test_parse_nested
 
     subroutine test_parse_array(suite)
@@ -130,10 +130,10 @@ contains
         call json_parser_init(p, '[1,2,3]')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_ARRAY_START, ev%event_type, &
-                                   'array: start')
+            'array: start')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_INTEGER, ev%event_type, &
-                                   'array: elem1 type')
+            'array: elem1 type')
         call test_assert_equal_int(suite, 1, ev%int_val, 'array: elem1')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, 2, ev%int_val, 'array: elem2')
@@ -141,37 +141,37 @@ contains
         call test_assert_equal_int(suite, 3, ev%int_val, 'array: elem3')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_ARRAY_END, ev%event_type, &
-                                   'array: end')
+            'array: end')
 
         ! ["a","b"]
         call json_parser_init(p, '["x","y"]')
-        call json_parser_next(p, ev)  ! array start
+        call json_parser_next(p, ev) ! array start
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, JSON_STRING, ev%event_type, &
-                                   'str array: type')
+            'str array: type')
         call test_assert_equal_str(suite, 'x', ev%string_val, 'str array: x')
         call json_parser_next(p, ev)
         call test_assert_equal_str(suite, 'y', ev%string_val, 'str array: y')
 
         ! array in object: {"items":[10,20]}
         call json_parser_init(p, '{"items":[10,20]}')
-        call json_parser_next(p, ev)  ! OBJECT_START
-        call json_parser_next(p, ev)  ! KEY "items"
+        call json_parser_next(p, ev) ! OBJECT_START
+        call json_parser_next(p, ev) ! KEY "items"
         call test_assert_equal_int(suite, JSON_KEY, ev%event_type, &
-                                   'arr in obj: key type')
-        call json_parser_next(p, ev)  ! ARRAY_START
+            'arr in obj: key type')
+        call json_parser_next(p, ev) ! ARRAY_START
         call test_assert_equal_int(suite, JSON_ARRAY_START, ev%event_type, &
-                                   'arr in obj: array start')
+            'arr in obj: array start')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, 10, ev%int_val, 'arr in obj: 10')
         call json_parser_next(p, ev)
         call test_assert_equal_int(suite, 20, ev%int_val, 'arr in obj: 20')
-        call json_parser_next(p, ev)  ! ARRAY_END
+        call json_parser_next(p, ev) ! ARRAY_END
         call test_assert_equal_int(suite, JSON_ARRAY_END, ev%event_type, &
-                                   'arr in obj: array end')
-        call json_parser_next(p, ev)  ! OBJECT_END
+            'arr in obj: array end')
+        call json_parser_next(p, ev) ! OBJECT_END
         call test_assert_equal_int(suite, JSON_OBJECT_END, ev%event_type, &
-                                   'arr in obj: obj end')
+            'arr in obj: obj end')
     end subroutine test_parse_array
 
     subroutine test_parse_escaped_strings(suite)
@@ -181,36 +181,36 @@ contains
 
         ! {"q":"say \"hi\""} → q = say "hi"
         call json_parser_init(p, '{"q":"say \"hi\""}')
-        call json_parser_next(p, ev)  ! OBJECT_START
-        call json_parser_next(p, ev)  ! KEY
-        call json_parser_next(p, ev)  ! STRING
+        call json_parser_next(p, ev) ! OBJECT_START
+        call json_parser_next(p, ev) ! KEY
+        call json_parser_next(p, ev) ! STRING
         call test_assert_equal_int(suite, JSON_STRING, ev%event_type, &
-                                   'escape: type')
+            'escape: type')
         call test_assert_equal_str(suite, 'say "hi"', ev%string_val, &
-                                   'escape: quote')
+            'escape: quote')
 
         ! tab, newline, backslash
         call json_parser_init(p, '["' // achar(92) // 't' // achar(92) // &
-                               'n' // achar(92) // achar(92) // '"]')
-        call json_parser_next(p, ev)  ! ARRAY_START
-        call json_parser_next(p, ev)  ! STRING
+            'n' // achar(92) // achar(92) // '"]')
+        call json_parser_next(p, ev) ! ARRAY_START
+        call json_parser_next(p, ev) ! STRING
         call test_assert(suite, ev%event_type == JSON_STRING, &
-                         'escape sequences: type')
+            'escape sequences: type')
         call test_assert(suite, len(ev%string_val) == 3, &
-                         'escape sequences: length 3')
+            'escape sequences: length 3')
         call test_assert(suite, iachar(ev%string_val(1:1)) == 9, &
-                         'escape: tab char')
+            'escape: tab char')
         call test_assert(suite, iachar(ev%string_val(2:2)) == 10, &
-                         'escape: newline char')
+            'escape: newline char')
         call test_assert(suite, iachar(ev%string_val(3:3)) == 92, &
-                         'escape: backslash char')
+            'escape: backslash char')
 
         ! A → 'A'
         call json_parser_init(p, '["A"]')
-        call json_parser_next(p, ev)  ! ARRAY_START
-        call json_parser_next(p, ev)  ! STRING
+        call json_parser_next(p, ev) ! ARRAY_START
+        call json_parser_next(p, ev) ! STRING
         call test_assert_equal_str(suite, 'A', ev%string_val, &
-                                   'escape: \\u0041 is A')
+            'escape: \\u0041 is A')
     end subroutine test_parse_escaped_strings
 
     subroutine test_parse_numbers(suite)
@@ -219,40 +219,40 @@ contains
         type(json_event_t) :: ev
 
         call json_parser_init(p, '{"i":42,"neg":-5}')
-        call json_parser_next(p, ev)  ! OBJECT_START
-        call json_parser_next(p, ev)  ! KEY i
-        call json_parser_next(p, ev)  ! INTEGER 42
+        call json_parser_next(p, ev) ! OBJECT_START
+        call json_parser_next(p, ev) ! KEY i
+        call json_parser_next(p, ev) ! INTEGER 42
         call test_assert_equal_int(suite, JSON_INTEGER, ev%event_type, &
-                                   'numbers: int type')
+            'numbers: int type')
         call test_assert_equal_int(suite, 42, ev%int_val, 'numbers: 42')
-        call json_parser_next(p, ev)  ! KEY neg
-        call json_parser_next(p, ev)  ! INTEGER -5
+        call json_parser_next(p, ev) ! KEY neg
+        call json_parser_next(p, ev) ! INTEGER -5
         call test_assert_equal_int(suite, -5, ev%int_val, 'numbers: -5')
 
         ! floating point
         call json_parser_init(p, '[3.14]')
-        call json_parser_next(p, ev)  ! ARRAY_START
-        call json_parser_next(p, ev)  ! REAL
+        call json_parser_next(p, ev) ! ARRAY_START
+        call json_parser_next(p, ev) ! REAL
         call test_assert_equal_int(suite, JSON_REAL, ev%event_type, &
-                                   'numbers: real type')
+            'numbers: real type')
         call test_assert(suite, abs(ev%real_val - 3.14d0) < 1.0d-10, &
-                         'numbers: 3.14')
+            'numbers: 3.14')
 
         ! scientific notation
         call json_parser_init(p, '[1.5e2]')
-        call json_parser_next(p, ev)  ! ARRAY_START
-        call json_parser_next(p, ev)  ! REAL
+        call json_parser_next(p, ev) ! ARRAY_START
+        call json_parser_next(p, ev) ! REAL
         call test_assert_equal_int(suite, JSON_REAL, ev%event_type, &
-                                   'numbers: sci type')
+            'numbers: sci type')
         call test_assert(suite, abs(ev%real_val - 150.0d0) < 1.0d-10, &
-                         'numbers: 1.5e2=150')
+            'numbers: 1.5e2=150')
 
         ! zero
         call json_parser_init(p, '[0]')
-        call json_parser_next(p, ev)  ! ARRAY_START
-        call json_parser_next(p, ev)  ! INTEGER 0
+        call json_parser_next(p, ev) ! ARRAY_START
+        call json_parser_next(p, ev) ! INTEGER 0
         call test_assert_equal_int(suite, JSON_INTEGER, ev%event_type, &
-                                   'numbers: zero type')
+            'numbers: zero type')
         call test_assert_equal_int(suite, 0, ev%int_val, 'numbers: zero')
     end subroutine test_parse_numbers
 
@@ -262,31 +262,31 @@ contains
         type(json_event_t) :: ev
 
         call json_parser_init(p, '[true,false,null]')
-        call json_parser_next(p, ev)  ! ARRAY_START
-        call json_parser_next(p, ev)  ! true
+        call json_parser_next(p, ev) ! ARRAY_START
+        call json_parser_next(p, ev) ! true
         call test_assert_equal_int(suite, JSON_BOOL, ev%event_type, &
-                                   'bool: true type')
+            'bool: true type')
         call test_assert(suite, ev%bool_val, 'bool: true val')
-        call json_parser_next(p, ev)  ! false
+        call json_parser_next(p, ev) ! false
         call test_assert_equal_int(suite, JSON_BOOL, ev%event_type, &
-                                   'bool: false type')
+            'bool: false type')
         call test_assert(suite, .not. ev%bool_val, 'bool: false val')
-        call json_parser_next(p, ev)  ! null
+        call json_parser_next(p, ev) ! null
         call test_assert_equal_int(suite, JSON_NULL_VAL, ev%event_type, &
-                                   'bool: null type')
+            'bool: null type')
 
         ! booleans as object values
         call json_parser_init(p, '{"a":true,"b":false}')
-        call json_parser_next(p, ev)  ! OBJECT_START
-        call json_parser_next(p, ev)  ! KEY a
+        call json_parser_next(p, ev) ! OBJECT_START
+        call json_parser_next(p, ev) ! KEY a
         call test_assert_equal_int(suite, JSON_KEY, ev%event_type, &
-                                   'bool obj: key a type')
-        call json_parser_next(p, ev)  ! BOOL true
+            'bool obj: key a type')
+        call json_parser_next(p, ev) ! BOOL true
         call test_assert(suite, ev%bool_val, 'bool obj: a=true')
-        call json_parser_next(p, ev)  ! KEY b
+        call json_parser_next(p, ev) ! KEY b
         call test_assert_equal_int(suite, JSON_KEY, ev%event_type, &
-                                   'bool obj: key b type')
-        call json_parser_next(p, ev)  ! BOOL false
+            'bool obj: key b type')
+        call json_parser_next(p, ev) ! BOOL false
         call test_assert(suite, .not. ev%bool_val, 'bool obj: b=false')
     end subroutine test_parse_booleans_null
 
@@ -316,7 +316,7 @@ contains
 
         ! string in array (1-based index)
         call json_extract_string('{"tags":["alpha","beta","gamma"]}', &
-                                 'tags[2]', result, found)
+            'tags[2]', result, found)
         call test_assert(suite, found, 'extract_str: array elem found')
         call test_assert_equal_str(suite, 'beta', result, 'extract_str: array elem val')
     end subroutine test_extract_string_path
@@ -359,31 +359,31 @@ contains
         call json_parser_init(p, 'invalid')
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_ERROR, &
-                         'malformed: invalid token')
+            'malformed: invalid token')
 
         ! Unterminated string
         call json_parser_init(p, '["unterminated')
-        call json_parser_next(p, ev)  ! ARRAY_START
-        call json_parser_next(p, ev)  ! ERROR (string not closed)
+        call json_parser_next(p, ev) ! ARRAY_START
+        call json_parser_next(p, ev) ! ERROR (string not closed)
         call test_assert(suite, ev%event_type == JSON_ERROR, &
-                         'malformed: unterminated string')
+            'malformed: unterminated string')
 
         ! Empty input
         call json_parser_init(p, '')
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_END_OF_INPUT, &
-                         'malformed: empty is end-of-input')
+            'malformed: empty is end-of-input')
 
         ! Whitespace only
         call json_parser_init(p, '   ')
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_END_OF_INPUT, &
-                         'malformed: whitespace only')
+            'malformed: whitespace only')
 
         ! Object with invalid interior
         call json_parser_init(p, '{xyz}')
-        call json_parser_next(p, ev)  ! OBJECT_START
-        call json_parser_next(p, ev)  ! ERROR (x is not valid key start)
+        call json_parser_next(p, ev) ! OBJECT_START
+        call json_parser_next(p, ev) ! ERROR (x is not valid key start)
         got_error = ev%event_type == JSON_ERROR
         call test_assert(suite, got_error, 'malformed: invalid object key')
     end subroutine test_parse_malformed

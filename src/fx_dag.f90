@@ -250,15 +250,15 @@ contains
         integer :: i, j
 
         output = 'digraph {' // achar(10) // &
-                 'rankdir=BT;' // achar(10) // &
-                 'node[shape=box];' // achar(10)
+            'rankdir=BT;' // achar(10) // &
+            'node[shape=box];' // achar(10)
 
         do i = 1, d%n_nodes
             do j = 1, d%nodes(i)%n_edges
                 output = output // '"' // trim(d%nodes(i)%label) // '"' // &
-                         ' -> "' // &
-                         trim(d%nodes(d%nodes(i)%edges(j))%label) // '"' // &
-                         ';' // achar(10)
+                    ' -> "' // &
+                    trim(d%nodes(d%nodes(i)%edges(j))%label) // '"' // &
+                    ';' // achar(10)
             end do
         end do
 

@@ -1,8 +1,8 @@
 module fx_watch
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_proc, only: proc_path_is_dir, proc_scan_dirs, proc_watch_add, &
-                       proc_scan_files, proc_watch_close, proc_watch_init, &
-                       proc_watch_poll, proc_watch_rm
+        proc_scan_files, proc_watch_close, proc_watch_init, &
+        proc_watch_poll, proc_watch_rm
     implicit none
     private
 
@@ -25,9 +25,9 @@ module fx_watch
     integer, parameter :: IN_MOVE_SELF_MASK = int(z'00000800')
 
     integer, parameter :: WATCH_MASK = ior(ior(ior(ior(ior(ior( &
-            IN_MODIFY_MASK, IN_CREATE_MASK), IN_DELETE_MASK), &
-            IN_MOVED_FROM_MASK), IN_MOVED_TO_MASK), IN_DELETE_SELF_MASK), &
-            IN_MOVE_SELF_MASK)
+        IN_MODIFY_MASK, IN_CREATE_MASK), IN_DELETE_MASK), &
+        IN_MOVED_FROM_MASK), IN_MOVED_TO_MASK), IN_DELETE_SELF_MASK), &
+        IN_MOVE_SELF_MASK)
 
     type, public :: watcher_t
         integer :: fd = -1

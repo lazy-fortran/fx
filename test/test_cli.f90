@@ -1,9 +1,9 @@
 program test_cli
     use fx_cli, only: cli_t, cli_init, cli_has_flag, cli_get_value, &
-                      cli_get_positional, cli_n_positional, cli_command
+        cli_get_positional, cli_n_positional, cli_command
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
-                       test_assert_equal_int, test_assert_equal_str, &
-                       test_suite_summary, test_suite_exit
+        test_assert_equal_int, test_assert_equal_str, &
+        test_suite_summary, test_suite_exit
     implicit none
 
     type(test_suite_t) :: suite
@@ -44,59 +44,59 @@ contains
         call load_cli(blocked_cli, blocked_args)
 
         call test_assert(suite, cli_has_flag(dot_cli, '--dot'), &
-                         'cli_has_flag exact match')
+            'cli_has_flag exact match')
         call test_assert(suite, .not. cli_has_flag(cli, '--json'), &
-                         'cli_has_flag ignores key=value')
+            'cli_has_flag ignores key=value')
         call test_assert_equal_str(suite, 'compact', &
-                                   cli_get_value(cli, 'json', 'fallback'), &
-                                   'cli_get_value key=value')
+            cli_get_value(cli, 'json', 'fallback'), &
+            'cli_get_value key=value')
         call test_assert_equal_str(suite, 'fallback', &
-                                   cli_get_value(cli, 'missing', 'fallback'), &
-                                   'cli_get_value default when missing')
+            cli_get_value(cli, 'missing', 'fallback'), &
+            'cli_get_value default when missing')
         call test_assert_equal_str(suite, 'full', &
-                                   cli_get_value(spaced_cli, 'json', &
-                                                 'fallback'), &
-                                   'cli_get_value spaced value')
+            cli_get_value(spaced_cli, 'json', &
+            'fallback'), &
+            'cli_get_value spaced value')
         call test_assert_equal_int(suite, 0, cli_n_positional(spaced_cli), &
-                                   'cli_n_positional skips consumed value')
+            'cli_n_positional skips consumed value')
         call test_assert_equal_str(suite, '', &
-                                   cli_get_positional(spaced_cli, 1), &
-                                   'cli_get_positional skips consumed value')
+            cli_get_positional(spaced_cli, 1), &
+            'cli_get_positional skips consumed value')
         call test_assert_equal_str(suite, 'fallback', &
-                                   cli_get_value(short_spaced_cli, 'json', &
-                                                 'fallback'), &
-                                   'cli_get_value leaves short token positional')
+            cli_get_value(short_spaced_cli, 'json', &
+            'fallback'), &
+            'cli_get_value leaves short token positional')
         call test_assert_equal_int(suite, 2, &
-                                   cli_n_positional(short_spaced_cli), &
-                                   'cli_n_positional keeps short token positional')
+            cli_n_positional(short_spaced_cli), &
+            'cli_n_positional keeps short token positional')
         call test_assert_equal_str(suite, '-s', &
-                                   cli_get_positional(short_spaced_cli, 1), &
-                                   'cli_get_positional keeps short token positional')
+            cli_get_positional(short_spaced_cli, 1), &
+            'cli_get_positional keeps short token positional')
         call test_assert_equal_str(suite, 'build', &
-                                   cli_get_positional(short_spaced_cli, 2), &
-                                   'cli_get_positional keeps trailing positional')
+            cli_get_positional(short_spaced_cli, 2), &
+            'cli_get_positional keeps trailing positional')
         call test_assert_equal_str(suite, '-s', cli_command(short_spaced_cli), &
-                                   'cli_command keeps short token positional')
+            'cli_command keeps short token positional')
         call test_assert_equal_str(suite, 'fallback', &
-                                   cli_get_value(blocked_cli, 'json', &
-                                                 'fallback'), &
-                                   'cli_get_value does not consume next flag')
+            cli_get_value(blocked_cli, 'json', &
+            'fallback'), &
+            'cli_get_value does not consume next flag')
         call test_assert(suite, cli_has_flag(blocked_cli, '--other'), &
-                         'cli_has_flag sees later flag')
+            'cli_has_flag sees later flag')
         call test_assert_equal_int(suite, 0, cli_n_positional(blocked_cli), &
-                                   'cli_n_positional skips bare flags')
+            'cli_n_positional skips bare flags')
         call test_assert_equal_str(suite, '', &
-                                   cli_get_positional(blocked_cli, 1), &
-                                   'cli_get_positional skips bare flags')
+            cli_get_positional(blocked_cli, 1), &
+            'cli_get_positional skips bare flags')
         call test_assert_equal_int(suite, 1, cli_n_positional(cli), &
-                                   'cli_n_positional counts one positional')
+            'cli_n_positional counts one positional')
         call test_assert_equal_str(suite, 'build', cli_command(cli), &
-                                   'cli_command first positional')
+            'cli_command first positional')
         call test_assert_equal_str(suite, 'build', &
-                                   cli_get_positional(cli, 1), &
-                                   'cli_get_positional 1-based index')
+            cli_get_positional(cli, 1), &
+            'cli_get_positional 1-based index')
         call test_assert_equal_str(suite, '', cli_get_positional(cli, 0), &
-                                   'cli_get_positional rejects zero index')
+            'cli_get_positional rejects zero index')
     end subroutine test_cli_flag_and_value_patterns
 
     subroutine test_cli_init_fallback(suite)
@@ -106,9 +106,9 @@ contains
         call cli_init(cli)
 
         call test_assert(suite, len_trim(cli%program_name) > 0, &
-                         'cli_init fallback sets program name')
+            'cli_init fallback sets program name')
         call test_assert_equal_int(suite, command_argument_count(), cli%n_args, &
-                                   'cli_init fallback reads command arguments')
+            'cli_init fallback reads command arguments')
     end subroutine test_cli_init_fallback
 
     subroutine test_cli_terminator_and_positionals(suite)
@@ -120,26 +120,26 @@ contains
         call load_cli(cli, args)
 
         call test_assert_equal_str(suite, 'fallback', &
-                                   cli_get_value(cli, 'check', 'fallback'), &
-                                   'cli_get_value ignores args after terminator')
+            cli_get_value(cli, 'check', 'fallback'), &
+            'cli_get_value ignores args after terminator')
         call test_assert(suite, .not. cli_has_flag(cli, '--check'), &
-                         'cli_has_flag ignores args after terminator')
+            'cli_has_flag ignores args after terminator')
         call test_assert(suite, .not. cli_has_flag(cli, '-s'), &
-                         'cli_has_flag rejects short flags')
+            'cli_has_flag rejects short flags')
         call test_assert_equal_int(suite, 4, cli_n_positional(cli), &
-                                   'cli_n_positional counts args after terminator')
+            'cli_n_positional counts args after terminator')
         call test_assert_equal_str(suite, 'build', cli_command(cli), &
-                                   'cli_command before terminator')
+            'cli_command before terminator')
         call test_assert_equal_str(suite, '--check', &
-                                   cli_get_positional(cli, 2), &
-                                   'cli_get_positional keeps post-terminator arg')
+            cli_get_positional(cli, 2), &
+            'cli_get_positional keeps post-terminator arg')
         call test_assert_equal_str(suite, '-s', cli_get_positional(cli, 3), &
-                                   'cli_get_positional keeps short flag literal')
+            'cli_get_positional keeps short flag literal')
         call test_assert_equal_str(suite, 'target', &
-                                   cli_get_positional(cli, 4), &
-                                   'cli_get_positional keeps trailing positional')
+            cli_get_positional(cli, 4), &
+            'cli_get_positional keeps trailing positional')
         call test_assert_equal_str(suite, '', cli_get_positional(cli, -1), &
-                                   'cli_get_positional rejects negative index')
+            'cli_get_positional rejects negative index')
     end subroutine test_cli_terminator_and_positionals
 
     subroutine test_cli_duplicates_and_empty_value(suite)
@@ -151,18 +151,18 @@ contains
         call load_cli(cli, args)
 
         call test_assert_equal_str(suite, '', &
-                                   cli_get_value(cli, 'json', 'fallback'), &
-                                   'cli_get_value preserves empty value')
+            cli_get_value(cli, 'json', 'fallback'), &
+            'cli_get_value preserves empty value')
         call test_assert(suite, cli_has_flag(cli, '--check'), &
-                         'cli_has_flag tolerates duplicates')
+            'cli_has_flag tolerates duplicates')
         call test_assert_equal_int(suite, 1, cli_n_positional(cli), &
-                                   'cli_n_positional ignores duplicate flags')
+            'cli_n_positional ignores duplicate flags')
         call test_assert_equal_str(suite, 'go', cli_command(cli), &
-                                   'cli_command with one positional')
+            'cli_command with one positional')
         call test_assert_equal_str(suite, 'go', cli_get_positional(cli, 1), &
-                                   'cli_get_positional with one positional')
+            'cli_get_positional with one positional')
         call test_assert_equal_str(suite, '', cli_get_positional(cli, 2), &
-                                   'cli_get_positional rejects out-of-range index')
+            'cli_get_positional rejects out-of-range index')
     end subroutine test_cli_duplicates_and_empty_value
 
     subroutine test_cli_empty_args(suite)
@@ -174,15 +174,15 @@ contains
         call load_cli(cli, args)
 
         call test_assert_equal_int(suite, 0, cli_n_positional(cli), &
-                                   'cli_n_positional zero for empty args')
+            'cli_n_positional zero for empty args')
         call test_assert_equal_str(suite, '', cli_command(cli), &
-                                   'cli_command empty for empty args')
+            'cli_command empty for empty args')
         call test_assert_equal_str(suite, '', cli_get_positional(cli, 1), &
-                                   'cli_get_positional empty for empty args')
+            'cli_get_positional empty for empty args')
         call test_assert_equal_str(suite, '', cli_get_value(cli, 'json', ''), &
-                                   'cli_get_value default for empty args')
+            'cli_get_value default for empty args')
         call test_assert(suite, .not. cli_has_flag(cli, '--json'), &
-                         'cli_has_flag false for empty args')
+            'cli_has_flag false for empty args')
     end subroutine test_cli_empty_args
 
     subroutine load_cli(cli, args)
