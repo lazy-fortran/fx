@@ -1,7 +1,7 @@
 module fx_diag
     use fx_json_build, only: json_builder_t, json_object_start, json_object_end, &
-                             json_array_start, json_array_end, &
-                             json_key_string, json_key_int
+        json_array_start, json_array_end, &
+        json_key_string, json_key_int
     implicit none
     private
 
@@ -67,7 +67,7 @@ contains
         end select
 
         res = trim(d%file) // ':' // trim(lbuf) // ':' // trim(cbuf) // &
-              ': ' // trim(sev_str) // ': ' // trim(d%message)
+            ': ' // trim(sev_str) // ': ' // trim(d%message)
     end function diag_to_string
 
     subroutine diag_to_json(d, jb)

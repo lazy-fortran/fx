@@ -193,7 +193,7 @@ contains
         out_len = int(MAX_STDOUT, c_int)
         err_len = int(MAX_STDERR, c_int)
         result%exit_code = int(fx_c_exec(c_argv, int(n_argv, c_int), &
-                                          c_out, out_len, c_err, err_len))
+            c_out, out_len, c_err, err_len))
         result%stdout_text = chars_to_string(c_out, int(out_len))
         result%stderr_text = chars_to_string(c_err, int(err_len))
 
@@ -272,7 +272,7 @@ contains
         c_n_files = 0_c_int
 
         c_status = fx_c_scan_dir(c_root, c_ext, int(n_ext, c_int), &
-                                  c_files, c_n_files, int(max_files, c_int))
+            c_files, c_n_files, int(max_files, c_int))
 
         n_files = int(c_n_files)
         do i = 1, n_files
@@ -395,7 +395,7 @@ contains
 
         call to_c_string(path, c_path)
         c_wd = fx_c_inotify_add_watch(int(fd, c_int), c_path, &
-                                      int(mask, c_int))
+            int(mask, c_int))
         wd = int(c_wd)
         if (wd >= 0) then
             ierr = 0
@@ -434,8 +434,8 @@ contains
         event_type = 0
         c_event_type = 0_c_int
         c_got = fx_c_inotify_poll(int(fd, c_int), c_path, &
-                                  int(PATH_MAX_LEN, c_int), c_event_type, &
-                                  int(timeout_ms, c_int))
+            int(PATH_MAX_LEN, c_int), c_event_type, &
+            int(timeout_ms, c_int))
         got_event = (c_got > 0_c_int)
         if (got_event) then
             path = c_string_from_chars(c_path)
@@ -491,8 +491,8 @@ contains
         allocate(c_dirs(n_dirs * PATH_MAX_LEN))
         c_dirs = c_null_char
         c_status = fx_c_collect_dirs(c_root, c_dirs, &
-                                     int(PATH_MAX_LEN, c_int), c_count, &
-                                     int(n_dirs, c_int))
+            int(PATH_MAX_LEN, c_int), c_count, &
+            int(n_dirs, c_int))
         if (c_status /= 0_c_int) then
             ierr = 1
             deallocate(c_dirs)
@@ -544,8 +544,8 @@ contains
         allocate(c_files(n_files * PATH_MAX_LEN))
         c_files = c_null_char
         c_status = fx_c_collect_files(c_root, c_files, &
-                                      int(PATH_MAX_LEN, c_int), c_count, &
-                                      int(n_files, c_int))
+            int(PATH_MAX_LEN, c_int), c_count, &
+            int(n_files, c_int))
         if (c_status /= 0_c_int) then
             ierr = 1
             deallocate(c_files)

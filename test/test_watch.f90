@@ -1,12 +1,12 @@
 program test_watch
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
-                       test_assert_equal_int, test_assert_equal_str, &
-                       test_suite_summary, test_suite_exit
+        test_assert_equal_int, test_assert_equal_str, &
+        test_suite_summary, test_suite_exit
     use fx_watch, only: WATCH_CREATE, WATCH_DELETE, WATCH_MODIFY, &
-                        watcher_t, watcher_init, watcher_add, &
-                        watcher_remove, watcher_poll, &
-                        watcher_mark_self_written, watcher_close
+        watcher_t, watcher_init, watcher_add, &
+        watcher_remove, watcher_poll, &
+        watcher_mark_self_written, watcher_close
     implicit none
 
     interface
@@ -52,9 +52,9 @@ contains
         call watcher_close(w)
         call test_assert_equal_int(suite, -1, w%fd, 'watcher_close resets fd')
         call test_assert_equal_int(suite, 0, w%n_watches, &
-                                   'watcher_close clears watches')
+            'watcher_close clears watches')
         call test_assert_equal_int(suite, 0, w%n_self_written, &
-                                   'watcher_close clears self writes')
+            'watcher_close clears self writes')
     end subroutine test_watch_init_close
 
     subroutine test_watch_recursive_existing_dir(suite)
@@ -84,9 +84,9 @@ contains
 
         call test_assert(suite, got_event, 'recursive existing dir got event')
         call test_assert_equal_int(suite, WATCH_MODIFY, event_type, &
-                                   'recursive existing dir event type')
+            'recursive existing dir event type')
         call test_assert_equal_str(suite, trim(file_path), trim(changed_path), &
-                                   'recursive existing dir path')
+            'recursive existing dir path')
 
         call watcher_close(w)
         call cleanup_tree(root)
@@ -120,25 +120,25 @@ contains
         call watcher_poll(w, changed_path, event_type, 1000, got_event)
         call test_assert(suite, got_event, 'new dir create got event')
         call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
-                                   'new dir create event type')
+            'new dir create event type')
         call test_assert_equal_str(suite, trim(new_dir), trim(changed_path), &
-                                   'new dir create path')
+            'new dir create path')
 
         call watcher_poll(w, changed_path, event_type, 1000, got_event)
         call test_assert(suite, got_event, 'preexisting file reported')
         call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
-                                   'preexisting file event type')
+            'preexisting file event type')
         call test_assert_equal_str(suite, trim(preexisting_file), &
-                                   trim(changed_path), &
-                                   'preexisting file path')
+            trim(changed_path), &
+            'preexisting file path')
 
         call write_file(later_file, 'module later')
         call watcher_poll(w, changed_path, event_type, 1000, got_event)
         call test_assert(suite, got_event, 'new dir child got event')
         call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
-                                   'new dir child event type')
+            'new dir child event type')
         call test_assert_equal_str(suite, trim(later_file), trim(changed_path), &
-                                   'new dir child path')
+            'new dir child path')
 
         call watcher_close(w)
         call cleanup_tree(root)
@@ -175,9 +175,9 @@ contains
         call watcher_poll(w, changed_path, event_type, 1000, got_event)
         call test_assert(suite, got_event, 'expired self write reported')
         call test_assert_equal_int(suite, WATCH_MODIFY, event_type, &
-                                   'expired self write event type')
+            'expired self write event type')
         call test_assert_equal_str(suite, trim(file_path), trim(changed_path), &
-                                   'expired self write path')
+            'expired self write path')
 
         call watcher_close(w)
         call cleanup_tree(root)
@@ -210,22 +210,22 @@ contains
 
         call run_cmd('rm -rf -- ' // trim(child_dir))
         call poll_until_match(w, child_dir, WATCH_DELETE, 200, 10, &
-                              got_event, changed_path, event_type)
+            got_event, changed_path, event_type)
         call test_assert(suite, got_event, 'delete event received')
         call test_assert_equal_int(suite, WATCH_DELETE, event_type, &
-                                   'delete event type')
+            'delete event type')
         call test_assert_equal_str(suite, trim(child_dir), trim(changed_path), &
-                                   'delete event path')
+            'delete event path')
 
         call append_file(sibling_file, '!')
         call poll_until_match(w, sibling_file, WATCH_MODIFY, 1000, 10, &
-                              got_event, changed_path, event_type)
+            got_event, changed_path, event_type)
         call test_assert(suite, got_event, 'sibling event after delete')
         call test_assert_equal_int(suite, WATCH_MODIFY, event_type, &
-                                   'sibling event type after delete')
+            'sibling event type after delete')
         call test_assert_equal_str(suite, trim(sibling_file), &
-                                   trim(changed_path), &
-                                   'sibling event path after delete')
+            trim(changed_path), &
+            'sibling event path after delete')
 
         call watcher_close(w)
         call test_assert_equal_int(suite, -1, w%fd, 'close after delete resets fd')
@@ -259,12 +259,12 @@ contains
 
         call run_cmd('mv -- ' // trim(source_file) // ' ' // trim(moved_file))
         call poll_until_match(w, moved_file, WATCH_CREATE, 200, 10, &
-                              got_event, changed_path, event_type)
+            got_event, changed_path, event_type)
         call test_assert(suite, got_event, 'moved-to event received')
         call test_assert_equal_int(suite, WATCH_CREATE, event_type, &
-                                   'moved-to maps to create')
+            'moved-to maps to create')
         call test_assert_equal_str(suite, trim(moved_file), trim(changed_path), &
-                                   'moved-to path')
+            'moved-to path')
 
         call watcher_close(w)
         call cleanup_tree(root)
@@ -337,10 +337,10 @@ contains
             call read_text_file(stderr_path, stderr_text, read_err)
             call test_assert_equal_int(suite, 0, read_err, 'enospc stderr read')
             call test_assert(suite, index(stderr_text, &
-                               'fx_watch: inotify watch limit reached for') > 0, &
-                               'enospc warning emitted')
+                'fx_watch: inotify watch limit reached for') > 0, &
+                'enospc warning emitted')
             call test_assert(suite, index(stderr_text, trim(root)) > 0, &
-                               'enospc warning includes path')
+                'enospc warning includes path')
         end if
 
         call watcher_close(w)
@@ -353,7 +353,7 @@ contains
         integer :: cmdstat
 
         call execute_command_line(trim(cmd), exitstat=exitstat, cmdstat=cmdstat, &
-                                  wait=.true.)
+            wait=.true.)
         if (cmdstat /= 0 .or. exitstat /= 0) then
             error stop 'command failed: ' // trim(cmd)
         end if
@@ -366,7 +366,7 @@ contains
         integer :: ios
 
         open(newunit=unit, file=trim(path), status='replace', action='write', &
-             iostat=ios)
+            iostat=ios)
         if (ios /= 0) error stop 'write_file open failed: ' // trim(path)
         write(unit, '(A)', iostat=ios) trim(text)
         if (ios /= 0) error stop 'write_file write failed: ' // trim(path)
@@ -380,7 +380,7 @@ contains
         integer :: ios
 
         open(newunit=unit, file=trim(path), status='old', action='write', &
-             position='append', iostat=ios)
+            position='append', iostat=ios)
         if (ios /= 0) error stop 'append_file open failed: ' // trim(path)
         write(unit, '(A)', iostat=ios) trim(text)
         if (ios /= 0) error stop 'append_file write failed: ' // trim(path)
@@ -451,7 +451,7 @@ contains
         text = ''
         ierr = 0
         open(newunit=unit, file=trim(path), action='read', status='old', &
-             iostat=ios)
+            iostat=ios)
         if (ios /= 0) then
             ierr = 1
             return
@@ -480,7 +480,7 @@ contains
     end subroutine to_c_string
 
     subroutine poll_until_match(w, expected_path, expected_type, timeout_ms, &
-                                max_tries, matched, actual_path, actual_type)
+            max_tries, matched, actual_path, actual_type)
         type(watcher_t), intent(inout) :: w
         character(len=*), intent(in) :: expected_path
         integer, intent(in) :: expected_type

@@ -115,7 +115,7 @@ contains
             end do
 
             hash = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + &
-                   rotl64(v4, 18)
+                rotl64(v4, 18)
             hash = xxh64_merge_round(hash, v1)
             hash = xxh64_merge_round(hash, v2)
             hash = xxh64_merge_round(hash, v3)
@@ -136,7 +136,7 @@ contains
 
         if (idx <= n - 3) then
             hash = ieor(hash, int(xxh64_read_u32(data, idx), int64)* &
-                        XXH_PRIME64_1)
+                XXH_PRIME64_1)
             hash = rotl64(hash, 23)*XXH_PRIME64_2 + XXH_PRIME64_3
             idx = idx + 4
         end if
@@ -194,8 +194,8 @@ contains
         integer :: offset
 
         h = [int(z'6a09e667'), int(z'bb67ae85'), int(z'3c6ef372'), &
-             int(z'a54ff53a'), int(z'510e527f'), int(z'9b05688c'), &
-             int(z'1f83d9ab'), int(z'5be0cd19')]
+            int(z'a54ff53a'), int(z'510e527f'), int(z'9b05688c'), &
+            int(z'1f83d9ab'), int(z'5be0cd19')]
 
         padded_len = ((n + 9 + 63)/64)*64
         allocate (msg(padded_len))
@@ -327,22 +327,22 @@ contains
         character(len=1), intent(in) :: block(64)
         integer, intent(inout) :: h(8)
         integer, parameter :: k(64) = [ &
-               int(z'428a2f98'), int(z'71374491'), int(z'b5c0fbcf'), int(z'e9b5dba5'), &
-               int(z'3956c25b'), int(z'59f111f1'), int(z'923f82a4'), int(z'ab1c5ed5'), &
-               int(z'd807aa98'), int(z'12835b01'), int(z'243185be'), int(z'550c7dc3'), &
-               int(z'72be5d74'), int(z'80deb1fe'), int(z'9bdc06a7'), int(z'c19bf174'), &
-               int(z'e49b69c1'), int(z'efbe4786'), int(z'0fc19dc6'), int(z'240ca1cc'), &
-               int(z'2de92c6f'), int(z'4a7484aa'), int(z'5cb0a9dc'), int(z'76f988da'), &
-               int(z'983e5152'), int(z'a831c66d'), int(z'b00327c8'), int(z'bf597fc7'), &
-               int(z'c6e00bf3'), int(z'd5a79147'), int(z'06ca6351'), int(z'14292967'), &
-               int(z'27b70a85'), int(z'2e1b2138'), int(z'4d2c6dfc'), int(z'53380d13'), &
-               int(z'650a7354'), int(z'766a0abb'), int(z'81c2c92e'), int(z'92722c85'), &
-               int(z'a2bfe8a1'), int(z'a81a664b'), int(z'c24b8b70'), int(z'c76c51a3'), &
-               int(z'd192e819'), int(z'd6990624'), int(z'f40e3585'), int(z'106aa070'), &
-               int(z'19a4c116'), int(z'1e376c08'), int(z'2748774c'), int(z'34b0bcb5'), &
-               int(z'391c0cb3'), int(z'4ed8aa4a'), int(z'5b9cca4f'), int(z'682e6ff3'), &
-               int(z'748f82ee'), int(z'78a5636f'), int(z'84c87814'), int(z'8cc70208'), &
-                 int(z'90befffa'), int(z'a4506ceb'), int(z'bef9a3f7'), int(z'c67178f2')]
+            int(z'428a2f98'), int(z'71374491'), int(z'b5c0fbcf'), int(z'e9b5dba5'), &
+            int(z'3956c25b'), int(z'59f111f1'), int(z'923f82a4'), int(z'ab1c5ed5'), &
+            int(z'd807aa98'), int(z'12835b01'), int(z'243185be'), int(z'550c7dc3'), &
+            int(z'72be5d74'), int(z'80deb1fe'), int(z'9bdc06a7'), int(z'c19bf174'), &
+            int(z'e49b69c1'), int(z'efbe4786'), int(z'0fc19dc6'), int(z'240ca1cc'), &
+            int(z'2de92c6f'), int(z'4a7484aa'), int(z'5cb0a9dc'), int(z'76f988da'), &
+            int(z'983e5152'), int(z'a831c66d'), int(z'b00327c8'), int(z'bf597fc7'), &
+            int(z'c6e00bf3'), int(z'd5a79147'), int(z'06ca6351'), int(z'14292967'), &
+            int(z'27b70a85'), int(z'2e1b2138'), int(z'4d2c6dfc'), int(z'53380d13'), &
+            int(z'650a7354'), int(z'766a0abb'), int(z'81c2c92e'), int(z'92722c85'), &
+            int(z'a2bfe8a1'), int(z'a81a664b'), int(z'c24b8b70'), int(z'c76c51a3'), &
+            int(z'd192e819'), int(z'd6990624'), int(z'f40e3585'), int(z'106aa070'), &
+            int(z'19a4c116'), int(z'1e376c08'), int(z'2748774c'), int(z'34b0bcb5'), &
+            int(z'391c0cb3'), int(z'4ed8aa4a'), int(z'5b9cca4f'), int(z'682e6ff3'), &
+            int(z'748f82ee'), int(z'78a5636f'), int(z'84c87814'), int(z'8cc70208'), &
+            int(z'90befffa'), int(z'a4506ceb'), int(z'bef9a3f7'), int(z'c67178f2')]
         integer :: w(64), a, b, c, d, e, f, g, hh, i, t1, t2
 
         do i = 1, 16
@@ -418,9 +418,9 @@ contains
         character(len=1), intent(in) :: data(:)
         integer, intent(in) :: idx
         value = ior(ior(ishft(iachar(data(idx)), 24), &
-                        ishft(iachar(data(idx + 1)), 16)), &
-                    ior(ishft(iachar(data(idx + 2)), 8), &
-                        iachar(data(idx + 3))))
+            ishft(iachar(data(idx + 1)), 16)), &
+            ior(ishft(iachar(data(idx + 2)), 8), &
+            iachar(data(idx + 3))))
     end function read_u32_be
 
     pure subroutine put_u32_be(data, idx, value)
@@ -449,7 +449,7 @@ contains
         integer(int64) :: combined
 
         combined = ieor(h1, h2 + 2654435769_int64 + ishft(h1, 6) + &
-                        ishft(h1, -2))
+            ishft(h1, -2))
     end function hash_combine
 
     subroutine hash_state_init(state)
@@ -585,8 +585,8 @@ contains
 
         allocate (bytes(max(n_bytes, 0)))
         open (newunit=unit, file=trim(path), access='stream', &
-              form='unformatted', status='old', action='read', &
-              iostat=ios)
+            form='unformatted', status='old', action='read', &
+            iostat=ios)
         if (ios /= 0) then
             ierr = 1
             if (allocated(bytes)) deallocate (bytes)

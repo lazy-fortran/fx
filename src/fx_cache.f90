@@ -1,12 +1,12 @@
 module fx_cache
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_cache_fs, only: cache_t, cache_entry_t, cache_ready, CACHE_PATH_LEN, &
-                           cache_prefix_path, cache_entry_path, &
-                           cache_temp_path, cache_ensure_dir, cache_rename, &
-                           cache_unlink, cache_collect_entries, &
-                           cache_sort_entries, cache_clean_empty_dirs, &
-                           cache_copy_file, cache_write_bytes_file, &
-                           cache_read_bytes_file
+        cache_prefix_path, cache_entry_path, &
+        cache_temp_path, cache_ensure_dir, cache_rename, &
+        cache_unlink, cache_collect_entries, &
+        cache_sort_entries, cache_clean_empty_dirs, &
+        cache_copy_file, cache_write_bytes_file, &
+        cache_read_bytes_file
     use fx_hash, only: xxhash64, hash_to_hex
     use fx_path, only: path_exists, path_normalize
     implicit none
@@ -256,7 +256,7 @@ contains
         if (.not. cache_ready(c)) return
 
         call cache_collect_entries(c, entries, n_entries, total_size_bytes, &
-                                   n_temp_evicted, .true.)
+            n_temp_evicted, .true.)
         n_evicted = n_temp_evicted
 
         if (max_size_mb < 0) then
@@ -294,7 +294,7 @@ contains
         if (.not. cache_ready(c)) return
 
         call cache_collect_entries(c, entries, n_entries, total_size_bytes, &
-                                   n_temp_evicted, .false.)
+            n_temp_evicted, .false.)
         total_size_mb = int(total_size_bytes / CACHE_MB_BYTES)
     end subroutine cache_stats
 

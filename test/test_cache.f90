@@ -1,13 +1,13 @@
 program test_cache
     use fx_cache, only: cache_t, cache_init, cache_key, cache_has, &
-                        cache_store, cache_restore, cache_store_bytes, &
-                        cache_restore_bytes, cache_evict, cache_gc, &
-                        cache_stats
+        cache_store, cache_restore, cache_store_bytes, &
+        cache_restore_bytes, cache_evict, cache_gc, &
+        cache_stats
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
-                       test_assert_equal_int, test_assert_equal_str, &
-                       test_suite_summary, test_suite_exit
+        test_assert_equal_int, test_assert_equal_str, &
+        test_suite_summary, test_suite_exit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
-                                           c_null_char
+        c_null_char
     implicit none
 
     interface
@@ -52,9 +52,9 @@ contains
         inquire(file=trim(root), exist=exists)
         call test_assert(suite, exists, 'cache_init creates root dir')
         call test_assert(suite, cache%initialized, &
-                         'cache_init marks initialized')
+            'cache_init marks initialized')
         call test_assert_equal_str(suite, trim(root), trim(cache%root_dir), &
-                                   'cache_init stores root path')
+            'cache_init stores root path')
 
         call cleanup_tree(root)
     end subroutine test_cache_init
@@ -76,16 +76,16 @@ contains
         key_single = cache_key(parts_single, 1)
 
         call test_assert(suite, len_trim(key_a) == 16, &
-                         'cache_key emits 16 hex digits')
+            'cache_key emits 16 hex digits')
         call test_assert(suite, is_hex_string(trim(key_a)), &
-                         'cache_key returns hex')
+            'cache_key returns hex')
         call test_assert(suite, trim(key_a) /= trim(key_b), &
-                         'cache_key separates adjacent parts')
+            'cache_key separates adjacent parts')
         call test_assert(suite, trim(key_empty) /= trim(key_single), &
-                         'cache_key keeps empty part distinct')
+            'cache_key keeps empty part distinct')
         call test_assert_equal_str(suite, trim(key_a), &
-                                   trim(cache_key(parts_a, 2)), &
-                                   'cache_key deterministic')
+            trim(cache_key(parts_a, 2)), &
+            'cache_key deterministic')
     end subroutine test_cache_key_separator
 
     subroutine test_cache_key_empty_input(suite)
@@ -97,9 +97,9 @@ contains
         key = cache_key(parts, 0)
 
         call test_assert(suite, len_trim(key) == 16, &
-                         'cache_key zero parts length')
+            'cache_key zero parts length')
         call test_assert(suite, is_hex_string(trim(key)), &
-                         'cache_key zero parts hex')
+            'cache_key zero parts hex')
     end subroutine test_cache_key_empty_input
 
     subroutine test_cache_store_restore(suite)
@@ -121,8 +121,8 @@ contains
         source_path = join_path(root, 'src/input.f90')
         dest_path = join_path(root, 'out/restored.f90')
         source_text = 'module cache_roundtrip' // new_line('a') // &
-                      'contains' // new_line('a') // &
-                      'end module cache_roundtrip' // new_line('a')
+            'contains' // new_line('a') // &
+            'end module cache_roundtrip' // new_line('a')
         key = 'aa0123456789abcd'
 
         call write_text_file(source_path, source_text, ierr)
@@ -135,16 +135,16 @@ contains
         call test_assert_equal_int(suite, 0, ierr, 'cache_store ierr')
         call test_assert(suite, cache_has(cache, key), 'cache_has after store')
         call test_assert(suite, path_exists(join_path(root, 'aa')), &
-                         'cache_store creates prefix dir')
+            'cache_store creates prefix dir')
         call test_assert(suite, path_exists(cache_entry_path(root, key)), &
-                         'cache_store writes cache entry')
+            'cache_store writes cache entry')
 
         call cache_restore(cache, key, dest_path, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_restore ierr')
         call read_text_file(dest_path, restored, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_restore read back')
         call test_assert_equal_str(suite, source_text, restored, &
-                                   'cache_restore copies exact content')
+            'cache_restore copies exact content')
 
         call cleanup_tree(root)
     end subroutine test_cache_store_restore
@@ -179,9 +179,9 @@ contains
         call cache_restore_bytes(cache, key, roundtrip, n_bytes, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_restore_bytes ierr')
         call test_assert_equal_int(suite, 4, n_bytes, &
-                                   'cache_restore_bytes size')
+            'cache_restore_bytes size')
         call test_assert(suite, bytes_equal(payload, roundtrip, 4), &
-                         'cache_store_bytes roundtrip')
+            'cache_store_bytes roundtrip')
 
         allocate(empty_in(0))
         allocate(empty_out(0))
@@ -190,9 +190,9 @@ contains
         call test_assert_equal_int(suite, 0, ierr, 'cache_store_bytes empty')
         call cache_restore_bytes(cache, key, empty_out, n_bytes, ierr)
         call test_assert_equal_int(suite, 0, ierr, &
-                                   'cache_restore_bytes empty ierr')
+            'cache_restore_bytes empty ierr')
         call test_assert_equal_int(suite, 0, n_bytes, &
-                                   'cache_restore_bytes empty size')
+            'cache_restore_bytes empty size')
 
         call cleanup_tree(root)
     end subroutine test_cache_store_bytes_restore_bytes
@@ -221,9 +221,9 @@ contains
         call cache_evict(cache, key, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_evict ierr')
         call test_assert(suite, .not. cache_has(cache, key), &
-                         'cache_evict removes entry')
+            'cache_evict removes entry')
         call test_assert(suite, .not. path_exists(cache_entry_path(root, key)), &
-                         'cache_evict deletes file')
+            'cache_evict deletes file')
 
         call cache_evict(cache, key, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_evict missing ok')
@@ -269,23 +269,23 @@ contains
         call cache_stats(cache, n_entries, total_size_mb)
         call test_assert_equal_int(suite, 3, n_entries, 'cache_stats count pre')
         call test_assert_equal_int(suite, 1, total_size_mb, &
-                                   'cache_stats size pre')
+            'cache_stats size pre')
 
         call cache_gc(cache, 1, n_evicted)
         call test_assert_equal_int(suite, 1, n_evicted, 'cache_gc evicted one')
         call test_assert(suite, .not. cache_has(cache, oldest_key), &
-                         'cache_gc evicts oldest')
+            'cache_gc evicts oldest')
         call test_assert(suite, cache_has(cache, middle_key), &
-                         'cache_gc keeps middle')
+            'cache_gc keeps middle')
         call test_assert(suite, cache_has(cache, newest_key), &
-                         'cache_gc keeps newest')
+            'cache_gc keeps newest')
         call test_assert(suite, .not. path_exists(join_path(root, 'aa')), &
-                         'cache_gc removes empty prefix dir')
+            'cache_gc removes empty prefix dir')
 
         call cache_stats(cache, n_entries, total_size_mb)
         call test_assert_equal_int(suite, 2, n_entries, 'cache_stats count post')
         call test_assert_equal_int(suite, 0, total_size_mb, &
-                                   'cache_stats size post')
+            'cache_stats size post')
 
         call cleanup_tree(root)
     end subroutine test_cache_gc_lru_and_stats
@@ -325,19 +325,19 @@ contains
 
         call cache_gc(cache, 100, n_evicted)
         call test_assert_equal_int(suite, 1, n_evicted, &
-                                   'cache_gc temp evicts stale tmp file')
+            'cache_gc temp evicts stale tmp file')
         call test_assert(suite, cache_has(cache, real_key), &
-                         'cache_gc temp keeps real entry')
+            'cache_gc temp keeps real entry')
         call test_assert(suite, .not. path_exists(temp_path), &
-                         'cache_gc temp removes stale tmp file')
+            'cache_gc temp removes stale tmp file')
         call test_assert(suite, .not. path_exists(temp_dir), &
-                         'cache_gc temp removes empty temp dir')
+            'cache_gc temp removes empty temp dir')
 
         call cache_stats(cache, n_entries, total_size_mb)
         call test_assert_equal_int(suite, 1, n_entries, &
-                                   'cache_gc temp stats count')
+            'cache_gc temp stats count')
         call test_assert_equal_int(suite, 0, total_size_mb, &
-                                   'cache_gc temp stats size')
+            'cache_gc temp stats size')
 
         call cleanup_tree(root)
     end subroutine test_cache_gc_temp_cleanup
@@ -388,8 +388,8 @@ contains
         character(len=256) :: cmdmsg
 
         call execute_command_line('mkdir -p -- ' // trim(path), &
-                                  exitstat=exitstat, cmdstat=cmdstat, &
-                                  cmdmsg=cmdmsg)
+            exitstat=exitstat, cmdstat=cmdstat, &
+            cmdmsg=cmdmsg)
         if (cmdstat == 0 .and. exitstat == 0) then
             ierr = 0
         else
@@ -430,8 +430,8 @@ contains
         end if
 
         open(newunit=unit, file=trim(path), access='stream', &
-             form='unformatted', status='replace', action='write', &
-             iostat=ios)
+            form='unformatted', status='replace', action='write', &
+            iostat=ios)
         if (ios /= 0) then
             ierr = 1
             return
@@ -486,8 +486,8 @@ contains
 
         allocate(bytes(max(n_bytes, 0)))
         open(newunit=unit, file=trim(path), access='stream', &
-             form='unformatted', status='old', action='read', &
-             iostat=ios)
+            form='unformatted', status='old', action='read', &
+            iostat=ios)
         if (ios /= 0) then
             ierr = 1
             if (allocated(bytes)) deallocate(bytes)
@@ -578,8 +578,8 @@ contains
 
         write(seconds_text, '(I0)') seconds
         call execute_command_line('sleep ' // trim(seconds_text), &
-                                  exitstat=exitstat, cmdstat=cmdstat, &
-                                  cmdmsg=cmdmsg)
+            exitstat=exitstat, cmdstat=cmdstat, &
+            cmdmsg=cmdmsg)
         if (cmdstat == 0 .and. exitstat == 0) then
             ierr = 0
         else

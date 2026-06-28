@@ -1,11 +1,11 @@
 program test_dag
     use fx_test, only: test_suite_t, test_suite_init, &
-                       test_suite_summary, test_suite_exit, &
-                       test_assert, test_assert_equal_int
+        test_suite_summary, test_suite_exit, &
+        test_assert, test_assert_equal_int
     use fx_dag, only: dag_t, dag_init, dag_add_node, &
-                      dag_find_node, dag_add_edge, dag_topo_sort, &
-                      dag_reverse_deps, dag_affected_set, dag_to_dot, &
-                      dag_levels, MAX_NODES
+        dag_find_node, dag_add_edge, dag_topo_sort, &
+        dag_reverse_deps, dag_affected_set, dag_to_dot, &
+        dag_levels, MAX_NODES
     implicit none
 
     type(test_suite_t) :: suite
@@ -90,9 +90,9 @@ contains
         id_a = dag_add_node(d, 'a')
         id_b = dag_add_node(d, 'b')
         id_c = dag_add_node(d, 'c')
-        call dag_add_edge(d, id_b, id_a)   ! b depends on a
-        call dag_add_edge(d, id_c, id_b)   ! c depends on b
-        call dag_add_edge(d, id_c, id_a)   ! c also depends on a directly
+        call dag_add_edge(d, id_b, id_a) ! b depends on a
+        call dag_add_edge(d, id_c, id_b) ! c depends on b
+        call dag_add_edge(d, id_c, id_a) ! c also depends on a directly
 
         call dag_topo_sort(d, order, n_order, has_cycle)
         call test_assert_equal_int(suite, 3, n_order, 'topo_sort: n_order=3')
@@ -100,11 +100,11 @@ contains
 
         ! a must come before b and c; b must come before c
         call test_assert(suite, pos_of(order, n_order, id_a) < pos_of(order, n_order, id_b), &
-                         'topo_sort: a before b')
+            'topo_sort: a before b')
         call test_assert(suite, pos_of(order, n_order, id_a) < pos_of(order, n_order, id_c), &
-                         'topo_sort: a before c')
+            'topo_sort: a before c')
         call test_assert(suite, pos_of(order, n_order, id_b) < pos_of(order, n_order, id_c), &
-                         'topo_sort: b before c')
+            'topo_sort: b before c')
 
         ! Single node: no edges
         call dag_init(d, 4)
@@ -119,7 +119,7 @@ contains
         id_a = dag_add_node(d, 'p')
         id_b = dag_add_node(d, 'q')
         call dag_add_edge(d, id_b, id_a)
-        call dag_add_edge(d, id_b, id_a)   ! duplicate: should be ignored
+        call dag_add_edge(d, id_b, id_a) ! duplicate: should be ignored
         call dag_topo_sort(d, order, n_order, has_cycle)
         call test_assert_equal_int(suite, 2, n_order, 'topo_sort dup edge: n_order=2')
         call test_assert(suite, .not. has_cycle, 'topo_sort dup edge: no cycle')
