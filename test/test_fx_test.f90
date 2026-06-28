@@ -2,10 +2,10 @@ program test_fx_test
     use, intrinsic :: iso_fortran_env, only: real64
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use fx_test, only: test_suite_t, test_suite_init, &
-                       test_assert, test_assert_equal_int, &
-                       test_assert_equal_str, test_assert_equal_real, &
-                       test_suite_summary, test_suite_exit, &
-                       test_suite_to_json, initial_test_capacity
+        test_assert, test_assert_equal_int, &
+        test_assert_equal_str, test_assert_equal_real, &
+        test_suite_summary, test_suite_exit, &
+        test_suite_to_json, initial_test_capacity
     implicit none
 
     character(len=256) :: mode
@@ -84,9 +84,9 @@ contains
         call test_assert(suite, .true., 'assert_pass')
 
         call test_assert(suite, suite%n_pass == pass_before + 1, &
-                         'n_pass incremented on true')
+            'n_pass incremented on true')
         call test_assert(suite, suite%n_fail == fail_before, &
-                         'n_fail not incremented on true')
+            'n_fail not incremented on true')
     end subroutine test_assert_pass
 
     subroutine test_assert_fail(suite)
@@ -99,9 +99,9 @@ contains
         call test_assert(suite, .false., 'assert_fail')
 
         call test_assert(suite, suite%n_pass == pass_before, &
-                         'n_pass not incremented on false')
+            'n_pass not incremented on false')
         call test_assert(suite, suite%n_fail == fail_before + 1, &
-                         'n_fail incremented on false')
+            'n_fail incremented on false')
     end subroutine test_assert_fail
 
     subroutine test_assert_equal_int_match(suite)
@@ -124,7 +124,7 @@ contains
         call test_assert_equal_int(suite, -1, -1, 'int_negative_match')
         call test_assert_equal_int(suite, -42, -43, 'int_negative_mismatch')
         call test_assert_equal_int(suite, -1000000, -999999, &
-                                   'int_large_negative_mismatch')
+            'int_large_negative_mismatch')
     end subroutine test_assert_equal_int_negative
 
     subroutine test_assert_equal_int_zero(suite)
@@ -143,10 +143,10 @@ contains
         call test_assert_equal_int(s, 42, 43, 'int_mismatch')
 
         expected_message = 'expected: 42' // new_line('a') // &
-                           'actual:   43'
+            'actual:   43'
         call test_assert(suite, s%n_tests == 1, 'int_message_recorded')
         call test_assert(suite, s%tests(1)%message == expected_message, &
-                         'int_message_exact')
+            'int_message_exact')
     end subroutine test_assert_equal_int_message_format
 
     subroutine test_assert_equal_str_match(suite)
@@ -161,16 +161,16 @@ contains
 
         call test_assert_equal_str(suite, 'foo', 'bar', 'str_mismatch')
         call test_assert_equal_str(suite, 'hello world', 'hello there', &
-                                   'str_mismatch_partial')
+            'str_mismatch_partial')
     end subroutine test_assert_equal_str_mismatch
 
     subroutine test_assert_equal_str_trailing_space(suite)
         type(test_suite_t), intent(inout) :: suite
 
         call test_assert_equal_str(suite, 'hello', 'hello   ', &
-                                   'str_trailing_space_pass')
+            'str_trailing_space_pass')
         call test_assert_equal_str(suite, 'hello   ', 'hello', &
-                                   'str_trailing_space_pass_rev')
+            'str_trailing_space_pass_rev')
     end subroutine test_assert_equal_str_trailing_space
 
     subroutine test_assert_equal_str_empty(suite)
@@ -189,43 +189,43 @@ contains
         call test_assert_equal_str(s, 'foo', 'bar', 'str_mismatch')
 
         expected_message = 'expected: "foo"' // new_line('a') // &
-                           'actual:   "bar"'
+            'actual:   "bar"'
         call test_assert(suite, s%n_tests == 1, 'str_message_recorded')
         call test_assert(suite, s%tests(1)%message == expected_message, &
-                         'str_message_exact')
+            'str_message_exact')
     end subroutine test_assert_equal_str_message_format
 
     subroutine test_assert_equal_real_match(suite)
         type(test_suite_t), intent(inout) :: suite
 
         call test_assert_equal_real(suite, 1.0_real64, 1.0_real64, &
-                                   'real_match', 1.0e-10_real64)
+            'real_match', 1.0e-10_real64)
         call test_assert_equal_real(suite, 0.0_real64, 0.0_real64, &
-                                   'real_match_zero', 1.0e-10_real64)
+            'real_match_zero', 1.0e-10_real64)
         call test_assert_equal_real(suite, -3.14_real64, -3.14_real64, &
-                                   'real_match_negative', 1.0e-10_real64)
+            'real_match_negative', 1.0e-10_real64)
     end subroutine test_assert_equal_real_match
 
     subroutine test_assert_equal_real_default_tol(suite)
         type(test_suite_t), intent(inout) :: suite
 
         call test_assert_equal_real(suite, 1.0_real64, &
-                                   1.0_real64 + 1.0e-11_real64, &
-                                   'real_default_tol_pass')
+            1.0_real64 + 1.0e-11_real64, &
+            'real_default_tol_pass')
         call test_assert_equal_real(suite, 1.0_real64, &
-                                   1.0_real64 + 1.0e-9_real64, &
-                                   'real_default_tol_fail')
+            1.0_real64 + 1.0e-9_real64, &
+            'real_default_tol_fail')
     end subroutine test_assert_equal_real_default_tol
 
     subroutine test_assert_equal_real_custom_tol(suite)
         type(test_suite_t), intent(inout) :: suite
 
         call test_assert_equal_real(suite, 1.0_real64, &
-                                   1.0_real64 + 1.0e-8_real64, &
-                                   'real_custom_tol_pass', 1.0e-7_real64)
+            1.0_real64 + 1.0e-8_real64, &
+            'real_custom_tol_pass', 1.0e-7_real64)
         call test_assert_equal_real(suite, 1.0_real64, &
-                                   1.0_real64 + 1.0e-7_real64, &
-                                   'real_custom_tol_fail', 1.0e-8_real64)
+            1.0_real64 + 1.0e-7_real64, &
+            'real_custom_tol_fail', 1.0e-8_real64)
     end subroutine test_assert_equal_real_custom_tol
 
     subroutine test_assert_equal_real_nan_expected(suite)
@@ -234,7 +234,7 @@ contains
 
         nan_val = ieee_value(nan_val, ieee_quiet_nan)
         call test_assert_equal_real(suite, nan_val, 1.0_real64, &
-                                   'real_nan_expected')
+            'real_nan_expected')
     end subroutine test_assert_equal_real_nan_expected
 
     subroutine test_assert_equal_real_nan_actual(suite)
@@ -243,7 +243,7 @@ contains
 
         nan_val = ieee_value(nan_val, ieee_quiet_nan)
         call test_assert_equal_real(suite, 1.0_real64, nan_val, &
-                                   'real_nan_actual')
+            'real_nan_actual')
     end subroutine test_assert_equal_real_nan_actual
 
     subroutine test_assert_equal_real_nan_both(suite)
@@ -252,16 +252,16 @@ contains
 
         nan_val = ieee_value(nan_val, ieee_quiet_nan)
         call test_assert_equal_real(suite, nan_val, nan_val, &
-                                   'real_nan_both')
+            'real_nan_both')
     end subroutine test_assert_equal_real_nan_both
 
     subroutine test_assert_equal_real_negative(suite)
         type(test_suite_t), intent(inout) :: suite
 
         call test_assert_equal_real(suite, -1.0_real64, -1.0_real64, &
-                                   'real_negative_match', 1.0e-10_real64)
+            'real_negative_match', 1.0e-10_real64)
         call test_assert_equal_real(suite, -1.0_real64, -2.0_real64, &
-                                   'real_negative_mismatch', 1.0e-10_real64)
+            'real_negative_mismatch', 1.0e-10_real64)
     end subroutine test_assert_equal_real_negative
 
     subroutine test_assert_equal_real_message_format(suite)
@@ -271,14 +271,14 @@ contains
 
         call test_suite_init(s, 'real_message')
         call test_assert_equal_real(s, 1.5_real64, 1.25_real64, &
-                                    'real_mismatch')
+            'real_mismatch')
 
         expected_message = 'expected: 1.50000000000000' // new_line('a') // &
-                           'actual:   1.25000000000000' // new_line('a') // &
-                           'diff:     2.50E-01 (tol: 1.00E-10)'
+            'actual:   1.25000000000000' // new_line('a') // &
+            'diff:     2.50E-01 (tol: 1.00E-10)'
         call test_assert(suite, s%n_tests == 1, 'real_message_recorded')
         call test_assert(suite, s%tests(1)%message == expected_message, &
-                         'real_message_exact')
+            'real_message_exact')
     end subroutine test_assert_equal_real_message_format
 
     subroutine test_suite_to_json_valid(suite)
@@ -292,7 +292,7 @@ contains
         call test_suite_to_json(suite, json)
 
         call test_assert(suite, index(json, '"suite":"json_test"') > 0, &
-                         'json_contains_suite')
+            'json_contains_suite')
     end subroutine test_suite_to_json_valid
 
     subroutine test_suite_to_json_empty(suite)
@@ -303,7 +303,7 @@ contains
         call test_suite_to_json(suite, json)
 
         call test_assert(suite, index(json, '""') > 0, &
-                         'json_empty_name_valid')
+            'json_empty_name_valid')
     end subroutine test_suite_to_json_empty
 
     subroutine test_suite_to_json_format(suite)
@@ -316,15 +316,15 @@ contains
         call test_suite_to_json(suite, json)
 
         call test_assert(suite, index(json, '"pass":') > 0, &
-                         'json_has_pass_key')
+            'json_has_pass_key')
         call test_assert(suite, index(json, '"fail":') > 0, &
-                         'json_has_fail_key')
+            'json_has_fail_key')
         call test_assert(suite, index(json, '"total":') > 0, &
-                         'json_has_total_key')
+            'json_has_total_key')
         call test_assert(suite, index(json, '"passed"') == 0, &
-                         'json_no_passed_key')
+            'json_no_passed_key')
         call test_assert(suite, index(json, '"failed"') == 0, &
-                         'json_no_failed_key')
+            'json_no_failed_key')
     end subroutine test_suite_to_json_format
 
     subroutine test_suite_to_json_records_tests(suite)
@@ -340,16 +340,16 @@ contains
 
         call test_assert(suite, s%n_tests == 3, 'json_records_test_count')
         call test_assert(suite, index(json, '"tests":[') > 0, &
-                         'json_has_tests_array')
+            'json_has_tests_array')
         call test_assert(suite, index(json, &
-                         '"name":"json_pass","status":"pass"') > 0, &
-                         'json_records_pass_case')
+            '"name":"json_pass","status":"pass"') > 0, &
+            'json_records_pass_case')
         call test_assert(suite, index(json, &
-                         '"name":"json_fail","status":"fail"') > 0, &
-                         'json_records_fail_case')
+            '"name":"json_fail","status":"fail"') > 0, &
+            'json_records_fail_case')
         call test_assert(suite, index(json, &
-                         '"message":"expected: 5\nactual:   3"') > 0, &
-                         'json_records_int_message')
+            '"message":"expected: 5\nactual:   3"') > 0, &
+            'json_records_int_message')
     end subroutine test_suite_to_json_records_tests
 
     subroutine test_suite_to_json_long_message(suite)
@@ -369,13 +369,13 @@ contains
 
         call test_assert(suite, s%n_tests == 1, 'long_message_recorded')
         call test_assert(suite, len_trim(s%tests(1)%message) > 256, &
-                         'long_message_not_truncated')
+            'long_message_not_truncated')
         call test_assert(suite, index(json, '\"') > 0, &
-                         'json_escapes_quotes')
+            'json_escapes_quotes')
         call test_assert(suite, index(json, '\\') > 0, &
-                         'json_escapes_backslashes')
+            'json_escapes_backslashes')
         call test_assert(suite, index(json, '\n') > 0, &
-                         'json_escapes_newlines')
+            'json_escapes_newlines')
     end subroutine test_suite_to_json_long_message
 
     subroutine test_suite_to_json_nan_message(suite)
@@ -387,11 +387,11 @@ contains
         nan_val = ieee_value(nan_val, ieee_quiet_nan)
         call test_suite_init(s, 'nan_message')
         call test_assert_equal_real(s, nan_val, 1.0_real64, &
-                                   'nan_message_case')
+            'nan_message_case')
         call test_suite_to_json(s, json)
 
         call test_assert(suite, index(json, 'NaN') > 0, &
-                         'json_records_nan_literal')
+            'json_records_nan_literal')
     end subroutine test_suite_to_json_nan_message
 
     subroutine test_suite_record_growth(suite)
@@ -407,13 +407,13 @@ contains
         end do
 
         call test_assert(suite, s%n_tests == initial_test_capacity + 6, &
-                         'record_growth_count')
+            'record_growth_count')
         call test_assert(suite, size(s%tests) >= s%n_tests, &
-                         'record_growth_capacity')
+            'record_growth_capacity')
         call test_assert(suite, s%tests(1)%name == 'grow_1', &
-                         'record_growth_first_name')
+            'record_growth_first_name')
         call test_assert(suite, s%tests(initial_test_capacity + 6)%name == &
-                         'grow_70', 'record_growth_last_name')
+            'grow_70', 'record_growth_last_name')
     end subroutine test_suite_record_growth
 
     subroutine test_no_assertions(suite)
@@ -440,10 +440,10 @@ contains
         exe = ''
         call get_command_argument(0, exe)
         call execute_command_line(trim(exe) // ' --exit-fail', &
-                                  exitstat=exit_code, cmdstat=cmdstat, &
-                                  cmdmsg=cmdmsg)
+            exitstat=exit_code, cmdstat=cmdstat, &
+            cmdmsg=cmdmsg)
         call test_assert(suite, cmdstat == 0, 'exit_failure_spawn_command', &
-                         trim(cmdmsg))
+            trim(cmdmsg))
         if (cmdstat == 0) then
             call test_assert(suite, exit_code == 1, 'exit_failure_exit_code')
         end if

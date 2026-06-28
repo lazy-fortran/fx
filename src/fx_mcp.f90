@@ -47,7 +47,7 @@ module fx_mcp
     public :: mcp_make_tool_json_response
     public :: mcp_extract_action, mcp_extract_id
     public :: mcp_extract_param
-    
+
     interface
         integer(c_int) function fx_c_get_mcp_framing() bind(C)
             import :: c_int
@@ -155,14 +155,14 @@ contains
                 call mcp_extract_param(line, 'params.protocolVersion', protocol_ver)
                 if (len_trim(protocol_ver) == 0) protocol_ver = s%protocol_version
                 call mcp_make_initialize_response(id_str, trim(protocol_ver), &
-                                                  s%tool%name, response)
+                    s%tool%name, response)
                 call mcp_send_response(response, s%framing_mode)
             case ('notifications/initialized')
                 cycle
             case ('ping')
                 if (len_trim(id_str) == 0) cycle
                 response = '{"jsonrpc":"2.0","id":'// &
-                           mcp_format_id(id_str)//',"result":{}}'
+                    mcp_format_id(id_str)//',"result":{}}'
                 call mcp_send_response(response, s%framing_mode)
             case ('tools/list')
                 if (len_trim(id_str) == 0) cycle
@@ -170,12 +170,12 @@ contains
                 call mcp_send_response(response, s%framing_mode)
             case ('tools/call')
                 call mcp_handle_tools_call(s, id_str, line, &
-                                           handler, response, is_error)
+                    handler, response, is_error)
                 if (len_trim(response) > 0) &
                     call mcp_send_response(response, s%framing_mode)
             case ('shutdown')
                 response = '{"jsonrpc":"2.0","id":'// &
-                           mcp_format_id(id_str)//',"result":null}'
+                    mcp_format_id(id_str)//',"result":null}'
                 if (len_trim(id_str) > 0) then
                     call mcp_send_response(response, s%framing_mode)
                 end if
@@ -183,7 +183,7 @@ contains
             case default
                 if (len_trim(id_str) > 0) then
                     call mcp_make_error_response(id_str, -32601, &
-                                                'method not found', response)
+                        'method not found', response)
                     call mcp_send_response(response, s%framing_mode)
                 end if
             end select
@@ -269,9 +269,9 @@ contains
         character(len=:), allocatable, intent(out) :: response
 
         response = '{"jsonrpc":"2.0","id":'//mcp_format_id(id_str)//','// &
-                   '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
-                   '"capabilities":{"tools":{"listChanged":false}},'// &
-                   '"serverInfo":{"name":"'//trim(server_name)//'","version":"0.1.0"}}}'
+            '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
+            '"capabilities":{"tools":{"listChanged":false}},'// &
+            '"serverInfo":{"name":"'//trim(server_name)//'","version":"0.1.0"}}}'
     end subroutine mcp_make_initialize_response
 
     subroutine mcp_make_tools_list_response(id_str, s, response)
@@ -290,12 +290,12 @@ contains
         end if
 
         response = '{"jsonrpc":"2.0","id":'//mcp_format_id(id_str)//','// &
-                   '"result":{"tools":[{"name":"'//trim(s%tool%name)//'",'// &
-                   '"description":"'//trim(s%tool%description)//'",'// &
-                   '"inputSchema":{"type":"object","properties":{'// &
-                   '"action":{"type":"string","enum":['//trim(enum_json)//'],'// &
-                   '"description":"Action to run"}},'// &
-                   '"required":["action"]}}]}}'
+            '"result":{"tools":[{"name":"'//trim(s%tool%name)//'",'// &
+            '"description":"'//trim(s%tool%description)//'",'// &
+            '"inputSchema":{"type":"object","properties":{'// &
+            '"action":{"type":"string","enum":['//trim(enum_json)//'],'// &
+            '"description":"Action to run"}},'// &
+            '"required":["action"]}}]}}'
     end subroutine mcp_make_tools_list_response
 
     subroutine mcp_make_tool_text_response(id_str, text, is_error, &
@@ -308,9 +308,9 @@ contains
 
         escaped = json_escape(text)
         response = '{"jsonrpc":"2.0","id":'//mcp_format_id(id_str)// &
-                   ',"result":{"content":[{"type":"text","text":"'// &
-                   trim(escaped)//'"}],"isError":'// &
-                   mcp_bool_to_json(is_error)//'}}'
+            ',"result":{"content":[{"type":"text","text":"'// &
+            trim(escaped)//'"}],"isError":'// &
+            mcp_bool_to_json(is_error)//'}}'
     end subroutine mcp_make_tool_text_response
 
     subroutine mcp_make_tool_json_response(id_str, jb, is_error, &
@@ -324,9 +324,9 @@ contains
         json_text = jb%buf%buf
         if (len_trim(json_text) == 0) json_text = '{}'
         response = '{"jsonrpc":"2.0","id":'//mcp_format_id(id_str)// &
-                   ',"result":{"content":[{"type":"text","text":'// &
-                   trim(json_text)//'}],"isError":'// &
-                   mcp_bool_to_json(is_error)//'}}'
+            ',"result":{"content":[{"type":"text","text":'// &
+            trim(json_text)//'}],"isError":'// &
+            mcp_bool_to_json(is_error)//'}}'
     end subroutine mcp_make_tool_json_response
 
     subroutine mcp_extract_action(line, action)
@@ -419,9 +419,9 @@ contains
         character(len=*), intent(in) :: msg
         character(len=:), allocatable, intent(out) :: response
         response = '{"jsonrpc":"2.0","id":'// &
-                   mcp_format_id(id_str)//',"error":{'// &
-                   '"code":'//mcp_int_to_string(code)//','// &
-                   '"message":"'//trim(msg)//'"}}'
+            mcp_format_id(id_str)//',"error":{'// &
+            '"code":'//mcp_int_to_string(code)//','// &
+            '"message":"'//trim(msg)//'"}}'
     end subroutine mcp_make_error_response
 
     function mcp_bool_to_json(v) result(json_bool)
@@ -580,7 +580,7 @@ contains
     logical function is_json_ws(c)
         character(len=1), intent(in) :: c
         is_json_ws = (c == ' ' .or. c == achar(9) .or. &
-                      c == achar(10) .or. c == achar(13))
+            c == achar(10) .or. c == achar(13))
     end function is_json_ws
 
     subroutine skip_ws(text, pos_in, end_idx, pos_out)
@@ -665,7 +665,7 @@ contains
     end subroutine parse_value_bounds
 
     subroutine parse_nested_bounds(text, p_in, end_idx, open_ch, close_ch, &
-                                   value_end, pos_out)
+            value_end, pos_out)
         character(len=*), intent(in) :: text
         integer, intent(in) :: p_in, end_idx
         character(len=1), intent(in) :: open_ch, close_ch
@@ -706,7 +706,7 @@ contains
     end subroutine parse_nested_bounds
 
     subroutine json_find_member(json_text, start_idx, end_idx, key, value_start, &
-                               value_end, found)
+            value_end, found)
         character(len=*), intent(in) :: json_text
         integer, intent(in) :: start_idx, end_idx
         character(len=*), intent(in) :: key
@@ -780,7 +780,7 @@ contains
             segment = path(segment_start:i-1)
 
             call json_find_member(json_text, search_start, search_end, &
-                                 trim(segment), value_start, value_end, found)
+                trim(segment), value_start, value_end, found)
             if (.not. found) return
 
             if (i > len_trim(path)) then

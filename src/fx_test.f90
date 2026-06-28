@@ -1,11 +1,11 @@
 module fx_test
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, &
-                                             real64
+        real64
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     implicit none
     private :: json_escape, int_to_string, real_to_string, &
-               real_scientific_to_string, location_suffix, &
-               write_prefixed_lines
+        real_scientific_to_string, location_suffix, &
+        write_prefixed_lines
 
     integer, public, parameter :: initial_test_capacity = 64
 
@@ -87,7 +87,7 @@ contains
         character(len=:), allocatable :: msg
 
         msg = 'expected: ' // int_to_string(expected) // new_line('a') // &
-              'actual:   ' // int_to_string(actual)
+            'actual:   ' // int_to_string(actual)
         call test_assert(s, expected == actual, trim(label), msg, file, line)
     end subroutine test_assert_equal_int
 
@@ -101,13 +101,13 @@ contains
         character(len=:), allocatable :: msg
 
         msg = 'expected: "' // trim(expected) // '"' // new_line('a') // &
-              'actual:   "' // trim(actual) // '"'
+            'actual:   "' // trim(actual) // '"'
         call test_assert(s, trim(expected) == trim(actual), trim(label), msg, &
-                         file, line)
+            file, line)
     end subroutine test_assert_equal_str
 
     subroutine test_assert_equal_real(s, expected, actual, label, tol, file, &
-                                      line)
+            line)
         type(test_suite_t), intent(inout) :: s
         real(real64), intent(in) :: expected
         real(real64), intent(in) :: actual
@@ -138,8 +138,8 @@ contains
         diff_str = real_scientific_to_string(diff)
         tol_str = real_scientific_to_string(tolerance)
         msg = 'expected: ' // exp_str // new_line('a') // &
-              'actual:   ' // act_str // new_line('a') // &
-              'diff:     ' // diff_str // ' (tol: ' // tol_str // ')'
+            'actual:   ' // act_str // new_line('a') // &
+            'diff:     ' // diff_str // ' (tol: ' // tol_str // ')'
         call test_assert(s, pass, trim(label), msg, file, line)
     end subroutine test_assert_equal_real
 
@@ -259,12 +259,12 @@ contains
             escaped_name = json_escape(trim(s%tests(i)%name))
             if (trim(s%tests(i)%message) == '') then
                 test_json = '{"name":"' // escaped_name // '","status":"' // &
-                            test_status // '"}'
+                    test_status // '"}'
             else
                 escaped_msg = json_escape( &
                     trim(s%tests(i)%message))
                 test_json = '{"name":"' // escaped_name // '","status":"' // &
-                            test_status // '","message":"' // escaped_msg // '"}'
+                    test_status // '","message":"' // escaped_msg // '"}'
             end if
 
             output = output // test_json

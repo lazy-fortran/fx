@@ -1,6 +1,6 @@
 program fx_mcp_server
     use fx_mcp, only: mcp_server_t, mcp_server_init, mcp_server_add_action, &
-                      mcp_server_run
+        mcp_server_run
     implicit none
 
     type(mcp_server_t) :: server

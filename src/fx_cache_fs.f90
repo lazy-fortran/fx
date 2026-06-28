@@ -1,6 +1,6 @@
 module fx_cache_fs
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
-                                           c_null_char
+        c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_path, only: path_basename, path_dirname, path_join
     use fx_proc, only: proc_scan_dirs, proc_scan_files
@@ -167,8 +167,8 @@ contains
         ! identical content makes the atomic rename idempotent and safe.
         prefix_path = cache_prefix_path(c, key)
         path = path_join(prefix_path, '.tmp.' // trim(pid_text) // '.' // &
-                         trim(time_text) // '.' // trim(seq_text) // '.' // &
-                         trim(ctr_text))
+            trim(time_text) // '.' // trim(seq_text) // '.' // &
+            trim(ctr_text))
     end subroutine cache_temp_path
 
     subroutine cache_ensure_dir(path, ierr)
@@ -248,7 +248,7 @@ contains
     end function cache_is_temp_name
 
     subroutine cache_collect_entries(c, entries, n_entries, total_size_bytes, &
-                                     n_temp_evicted, prune_temp)
+            n_temp_evicted, prune_temp)
         type(cache_t), intent(in) :: c
         type(cache_entry_t), allocatable, intent(out) :: entries(:)
         integer, intent(out) :: n_entries
@@ -372,15 +372,15 @@ contains
         if (ierr /= 0) return
 
         open(newunit=src_unit, file=trim(source_path), access='stream', &
-             form='unformatted', status='old', action='read', iostat=ios)
+            form='unformatted', status='old', action='read', iostat=ios)
         if (ios /= 0) then
             ierr = 1
             return
         end if
 
         open(newunit=dst_unit, file=trim(dest_path), access='stream', &
-             form='unformatted', status='replace', action='write', &
-             iostat=ios)
+            form='unformatted', status='replace', action='write', &
+            iostat=ios)
         if (ios /= 0) then
             close(src_unit)
             ierr = 1
@@ -426,8 +426,8 @@ contains
         if (ierr /= 0) return
 
         open(newunit=unit, file=trim(path), access='stream', &
-             form='unformatted', status='replace', action='write', &
-             iostat=ios)
+            form='unformatted', status='replace', action='write', &
+            iostat=ios)
         if (ios /= 0) then
             ierr = 1
             return
