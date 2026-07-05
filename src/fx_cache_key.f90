@@ -10,8 +10,45 @@ module fx_cache_key
     public :: cache_key_for, cache_source_tree_hash
     public :: cache_digest, cache_file_digest, hash_mod_file
     public :: cache_file_content_key
+    public :: cache_set_file_hash_hook, cache_clear_file_hash_hook
+
+    abstract interface
+        subroutine file_hash_i(path, hex, ierr)
+            character(len=*), intent(in) :: path
+            character(len=64), intent(out) :: hex
+            integer, intent(out) :: ierr
+        end subroutine file_hash_i
+    end interface
+
+    procedure(file_hash_i), pointer :: file_hash_hook => null()
 
 contains
+
+    subroutine cache_set_file_hash_hook(hook)
+        !! Install a memoizing hash (e.g. fo's stat-memo) for all source and
+        !! payload content keys, replacing the default sha256_file. The hook must
+        !! return the same sha256 hex as sha256_file for unchanged content; it
+        !! only avoids re-reading files whose (mtime, size) are unchanged.
+        procedure(file_hash_i) :: hook
+
+        file_hash_hook => hook
+    end subroutine cache_set_file_hash_hook
+
+    subroutine cache_clear_file_hash_hook()
+        file_hash_hook => null()
+    end subroutine cache_clear_file_hash_hook
+
+    subroutine hash_file(path, hex, ierr)
+        character(len=*), intent(in) :: path
+        character(len=64), intent(out) :: hex
+        integer, intent(out) :: ierr
+
+        if (associated(file_hash_hook)) then
+            call file_hash_hook(path, hex, ierr)
+        else
+            call sha256_file(path, hex, ierr)
+        end if
+    end subroutine hash_file
 
     function cache_key_for(filename, compiler, flags, dep_keys, &
             n_dep_keys) result(key)
@@ -70,7 +107,7 @@ contains
 
         if (depth > MAX_INCLUDE_DEPTH .or. n_parts >= size(parts)) return
 
-        call sha256_file(filename, fh, ierr)
+        call hash_file(filename, fh, ierr)
         if (ierr == 0) then
             n_parts = n_parts + 1
             parts(n_parts) = fh
@@ -169,7 +206,7 @@ contains
         character(len=HASH_LEN) :: hex
         character(len=512) :: parts(3)
 
-        call sha256_file(path, hex, ierr)
+        call hash_file(path, hex, ierr)
         if (ierr /= 0) then
             key = ''
             size_bytes = 0

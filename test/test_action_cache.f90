@@ -1,18 +1,22 @@
 program test_action_cache
     use fx_action_cache, only: cache_t, HASH_LEN, action_cache_root, &
         cache_store_action, cache_restore_action, cache_lookup, &
-        cache_action_mod_key, cache_store_binary, cache_binary_matches
+        cache_action_mod_key, cache_store_binary, cache_binary_matches, &
+        cache_source_tree_hash, cache_set_file_hash_hook, &
+        cache_clear_file_hash_hook
     use fx_cache, only: cache_init
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_str, test_suite_summary, test_suite_exit
     implicit none
 
     type(test_suite_t) :: suite
+    integer :: hook_calls = 0
 
     call test_suite_init(suite, 'fx_action_cache')
     call test_root_resolution(suite)
     call test_action_round_trip(suite)
     call test_binary_fingerprint(suite)
+    call test_file_hash_hook(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -165,5 +169,43 @@ contains
         close (ua)
         close (ub)
     end function files_equal
+
+    subroutine test_file_hash_hook(suite)
+        !! Installing a file-hash hook must route source keying through it, and
+        !! clearing it must restore the default sha256 keying.
+        type(test_suite_t), intent(inout) :: suite
+        character(len=:), allocatable :: root, path
+        character(len=HASH_LEN) :: h_default, h_hook, h_restored
+
+        root = temp_root('hook')
+        call make_dir(root)
+        path = root//'/unit.f90'
+        call write_file(path, 'program p; end program p')
+
+        call cache_source_tree_hash(path, h_default)
+
+        hook_calls = 0
+        call cache_set_file_hash_hook(counting_hash)
+        call cache_source_tree_hash(path, h_hook)
+        call test_assert(suite, hook_calls > 0, 'installed hook is invoked')
+        call test_assert(suite, h_hook /= h_default, &
+            'hook changes the source-tree key')
+
+        call cache_clear_file_hash_hook()
+        call cache_source_tree_hash(path, h_restored)
+        call test_assert(suite, h_restored == h_default, &
+            'clearing the hook restores default keying')
+    end subroutine test_file_hash_hook
+
+    subroutine counting_hash(path, hex, ierr)
+        character(len=*), intent(in) :: path
+        character(len=64), intent(out) :: hex
+        integer, intent(out) :: ierr
+
+        hook_calls = hook_calls + 1
+        hex = repeat('a', 64)
+        if (len_trim(path) == 0) hex = repeat('b', 64)
+        ierr = 0
+    end subroutine counting_hash
 
 end program test_action_cache
