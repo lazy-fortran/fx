@@ -27,3 +27,7 @@ main = "test_cache.f90"
 [[test]]
 name = "test_lsp_did_change"
 main = "test_lsp_did_change.f90"
+
+[[test]]
+name = "test_action_cache"
+main = "test_action_cache.f90"

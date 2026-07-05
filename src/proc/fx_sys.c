@@ -720,6 +720,28 @@ int fx_c_file_stat(const char *path, long long *size_bytes, long long *mtime)
     return 0;
 }
 
+int fx_c_file_fingerprint(const char *path, long long *size_bytes,
+                          long long *mtime_ns)
+{
+    struct stat st;
+
+    if (size_bytes != NULL) *size_bytes = 0;
+    if (mtime_ns != NULL) *mtime_ns = 0;
+
+    if (stat(path, &st) != 0) return -1;
+    if (size_bytes != NULL) *size_bytes = (long long) st.st_size;
+#if defined(__APPLE__)
+    if (mtime_ns != NULL) *mtime_ns = (long long) st.st_mtimespec.tv_sec *
+                                          1000000000LL +
+                                      (long long) st.st_mtimespec.tv_nsec;
+#else
+    if (mtime_ns != NULL) *mtime_ns = (long long) st.st_mtim.tv_sec *
+                                          1000000000LL +
+                                      (long long) st.st_mtim.tv_nsec;
+#endif
+    return 0;
+}
+
 long long fx_c_unix_time(void)
 {
     return (long long) time(NULL);

@@ -33,7 +33,7 @@ module fx_cache_fs
 
     public :: cache_ready, cache_prefix_path, cache_entry_path, cache_temp_path
     public :: cache_ensure_dir, cache_rename, cache_unlink, cache_rmdir
-    public :: cache_file_stat, cache_is_temp_name
+    public :: cache_file_stat, cache_file_fingerprint, cache_is_temp_name
     public :: cache_collect_entries, cache_sort_entries, cache_clean_empty_dirs
     public :: cache_copy_file, cache_write_bytes_file, cache_read_bytes_file
     public :: to_c_string
@@ -67,6 +67,14 @@ module fx_cache_fs
             integer(c_long_long), intent(out) :: size_bytes
             integer(c_long_long), intent(out) :: mtime
         end function fx_c_file_stat
+
+        integer(c_int) function fx_c_file_fingerprint(path, size_bytes, &
+                mtime_ns) bind(C)
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: size_bytes
+            integer(c_long_long), intent(out) :: mtime_ns
+        end function fx_c_file_fingerprint
 
         integer(c_long_long) function fx_c_unix_time() bind(C)
             import :: c_long_long
@@ -240,6 +248,32 @@ contains
             ierr = 1
         end if
     end subroutine cache_file_stat
+
+    subroutine cache_file_fingerprint(path, size_bytes, mtime_ns, ierr)
+        !! Byte size and nanosecond mtime of path. Finer than cache_file_stat's
+        !! second-resolution mtime: used to fingerprint linked binaries so an
+        !! output rewritten within the same wall-clock second is still detected.
+        character(len=*), intent(in) :: path
+        integer(int64), intent(out) :: size_bytes
+        integer(int64), intent(out) :: mtime_ns
+        integer, intent(out) :: ierr
+        character(kind=c_char) :: c_path(CACHE_PATH_LEN)
+        integer(c_int) :: status
+        integer(c_long_long) :: c_size
+        integer(c_long_long) :: c_mtime
+
+        call to_c_string(path, c_path)
+        status = fx_c_file_fingerprint(c_path, c_size, c_mtime)
+        if (status == 0_c_int) then
+            size_bytes = int(c_size, int64)
+            mtime_ns = int(c_mtime, int64)
+            ierr = 0
+        else
+            size_bytes = 0_int64
+            mtime_ns = 0_int64
+            ierr = 1
+        end if
+    end subroutine cache_file_fingerprint
 
     logical function cache_is_temp_name(name)
         character(len=*), intent(in) :: name
