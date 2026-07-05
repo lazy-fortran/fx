@@ -5,7 +5,8 @@ module fx_action_cache
     use fx_cache_fs, only: cache_file_fingerprint
     use fx_cache_key, only: HASH_LEN, cache_key_for, cache_source_tree_hash, &
         cache_digest, cache_file_digest, hash_mod_file, &
-        cache_file_content_key
+        cache_file_content_key, cache_set_file_hash_hook, &
+        cache_clear_file_hash_hook
     use fx_string, only: to_lower
     implicit none
     private
@@ -19,6 +20,7 @@ module fx_action_cache
     public :: cache_store_binary, cache_restore_binary, &
         cache_binary_matches
     public :: cache_debug_write_action_record, cache_debug_corrupt_object_payload
+    public :: cache_set_file_hash_hook, cache_clear_file_hash_hook
 
     integer, parameter :: MAX_MOD_NAME = 132
     integer, parameter :: CACHE_SCHEMA_VERSION = 1
