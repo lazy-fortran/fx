@@ -21,27 +21,36 @@ module fx_test
         integer :: n_fail = 0
         integer :: n_tests = 0
         integer :: max_tests = initial_test_capacity
+        logical :: is_fixture = .false.
         type(test_result_t), allocatable, public :: tests(:)
     end type test_suite_t
 
     public :: test_suite_init, test_assert
     public :: test_assert_equal_int, test_assert_equal_str
     public :: test_assert_equal_real
-    public :: test_suite_summary, test_suite_exit
+    public :: test_suite_summary, test_suite_summary_line, test_suite_exit
     public :: test_suite_to_json
     public :: test_record
 
 contains
 
-    subroutine test_suite_init(s, name)
+    subroutine test_suite_init(s, name, fixture)
+        !! A fixture suite is one driven by a test as data, not one whose
+        !! outcome is the test's own. It records results exactly like a normal
+        !! suite so the caller can inspect them, but emits no failure lines and
+        !! no summary line, so its deliberate failures stay out of the reported
+        !! counts that tooling parses.
         type(test_suite_t), intent(inout) :: s
         character(len=*), intent(in) :: name
+        logical, intent(in), optional :: fixture
 
         s%name = trim(name)
         s%n_pass = 0
         s%n_fail = 0
         s%n_tests = 0
         s%max_tests = initial_test_capacity
+        s%is_fixture = .false.
+        if (present(fixture)) s%is_fixture = fixture
         if (allocated(s%tests)) deallocate(s%tests)
         allocate(s%tests(initial_test_capacity))
     end subroutine test_suite_init
@@ -67,10 +76,12 @@ contains
             call test_record(s, name, '', .true.)
         else
             s%n_fail = s%n_fail + 1
-            location = location_suffix(file, line)
-            write(error_unit, '(A)') 'FAIL: ' // trim(name) // location
-            if (len_trim(message) > 0) then
-                call write_prefixed_lines(error_unit, message)
+            if (.not. s%is_fixture) then
+                location = location_suffix(file, line)
+                write(error_unit, '(A)') 'FAIL: ' // trim(name) // location
+                if (len_trim(message) > 0) then
+                    call write_prefixed_lines(error_unit, message)
+                end if
             end if
             call test_record(s, name, message, .false.)
         end if
@@ -145,11 +156,23 @@ contains
 
     subroutine test_suite_summary(s)
         type(test_suite_t), intent(in) :: s
+        character(len=:), allocatable :: line
 
-        write(output_unit, '(A,I0,A,I0,A,I0,A)') &
-            trim(s%name) // ': ', s%n_pass, ' pass, ', &
-            s%n_fail, ' fail, ', s%n_pass + s%n_fail, ' total'
+        if (s%is_fixture) return
+        call test_suite_summary_line(s, line)
+        write(output_unit, '(A)') line
     end subroutine test_suite_summary
+
+    subroutine test_suite_summary_line(s, line)
+        !! Render the summary line without emitting it, so the exact text that
+        !! downstream tooling parses can be asserted on in a test.
+        type(test_suite_t), intent(in) :: s
+        character(len=:), allocatable, intent(out) :: line
+
+        line = trim(s%name) // ': ' // int_to_string(s%n_pass) // ' pass, ' // &
+            int_to_string(s%n_fail) // ' fail, ' // &
+            int_to_string(s%n_pass + s%n_fail) // ' total'
+    end subroutine test_suite_summary_line
 
     subroutine test_suite_exit(s)
         type(test_suite_t), intent(in) :: s
