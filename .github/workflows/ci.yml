@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build + fpm test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fx
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran-14 gcc-14 curl
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/gfortran gfortran /usr/bin/gfortran-14 100
+          gcc --version | head -1
+          gfortran --version | head -1
+
+      - name: Install fpm
+        run: |
+          sudo curl -L -o /usr/local/bin/fpm \
+            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
+          sudo chmod +x /usr/local/bin/fpm
+          fpm --version
+
+      # fx declares no [dependencies] in fpm.toml: pure Fortran plus the C
+      # sources under src/proc, built by fpm with the system gcc. Nothing is
+      # fetched at build time, so no dependency cache is needed.
+      - name: Build fx
+        run: fpm build
+
+      # fpm runs every program under test/ (auto-discovery stays on alongside
+      # the explicit [[test]] entries). A failing suite calls test_suite_exit,
+      # which issues `stop 1`; fpm reports the non-zero exit and itself exits 1,
+      # so this step fails the job.
+      - name: Run fx tests
+        run: fpm test
