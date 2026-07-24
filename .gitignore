@@ -2,3 +2,11 @@
 *.mod
 *.o
 *.smod
+
+# Compiled binaries carry no extension here, so they are easy to commit by
+# accident. test_fx_test was committed once and had to be purged from history;
+# these rules keep that from recurring.
+/test_*
+!/test_*.f90
+/fx
+/fx-mcp-server
