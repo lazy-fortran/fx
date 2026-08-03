@@ -5,7 +5,8 @@ stable fo/FortFront diagnostic contract; it does not define compiler lowering.
 
 ## Current handoff (2026-08-03)
 
-- `main` is `7681949` (implementation baseline `9e16f11`).
+- The implementation baseline is `9e16f11`; the roadmap commits are pushed on
+  current `main`.
 - [#36](https://github.com/lazy-fortran/fx/issues/36) is open: concurrent
   cache digest reallocation can segfault. Treat it as a correctness blocker
   for concurrent editor use, not as an ffc conformance issue.
