@@ -19,8 +19,16 @@ module fx_hash
     end type hash_state_t
 
     type, public :: sha256_state_t
-        character(len=1), allocatable :: bytes(:)
-        integer :: n_bytes = 0
+        !! Block-buffered SHA-256 streaming state. Holds only the 64-byte
+        !! pending block plus the running digest state, never the whole
+        !! message, so feeding a digest never grows or reallocates a buffer.
+        !! The digest path runs from OpenMP parallel regions (fo's link /
+        !! compile loops), where a growing shared allocatable is the classic
+        !! realloc data race; a fixed-size state has no allocation to race on.
+        integer :: h(8) = 0
+        character(len=1) :: buf(64) = ''
+        integer :: nbuf = 0
+        integer(int64) :: total = 0_int64
         logical :: initialized = .false.
     end type sha256_state_t
 
@@ -46,6 +54,7 @@ module fx_hash
     end interface
 
     integer, save :: sha256_backend = -1
+    !$omp threadprivate (sha256_backend)
 
 contains
 
@@ -250,8 +259,12 @@ contains
     subroutine sha256_init(state)
         type(sha256_state_t), intent(out) :: state
 
-        allocate (state%bytes(0))
-        state%n_bytes = 0
+        state%h = [int(z'6a09e667'), int(z'bb67ae85'), int(z'3c6ef372'), &
+            int(z'a54ff53a'), int(z'510e527f'), int(z'9b05688c'), &
+            int(z'1f83d9ab'), int(z'5be0cd19')]
+        state%buf = ''
+        state%nbuf = 0
+        state%total = 0_int64
         state%initialized = .true.
     end subroutine sha256_init
 
@@ -260,27 +273,62 @@ contains
         integer, intent(in) :: n
         character(len=1), intent(in) :: data(n)
 
-        character(len=1), allocatable :: merged(:)
+        integer :: i, take
 
         if (.not. state%initialized) call sha256_init(state)
         if (n <= 0) return
 
-        allocate (merged(state%n_bytes + n))
-        if (state%n_bytes > 0) merged(1:state%n_bytes) = state%bytes(1:state%n_bytes)
-        merged(state%n_bytes + 1:state%n_bytes + n) = data(1:n)
-        call move_alloc(merged, state%bytes)
-        state%n_bytes = state%n_bytes + n
+        state%total = state%total + int(n, int64)
+        i = 1
+        do while (i <= n)
+            take = min(64 - state%nbuf, n - i + 1)
+            state%buf(state%nbuf + 1:state%nbuf + take) = data(i:i + take - 1)
+            state%nbuf = state%nbuf + take
+            i = i + take
+            if (state%nbuf == 64) then
+                call sha256_block(state%buf, state%h)
+                state%nbuf = 0
+            end if
+        end do
     end subroutine sha256_update
 
     function sha256_final(state) result(hex)
         type(sha256_state_t), intent(in) :: state
         character(len=64) :: hex
 
-        if (state%initialized) then
-            hex = sha256_bytes(state%bytes, state%n_bytes)
-        else
+        type(sha256_state_t) :: s
+        integer :: i
+        integer(int64) :: bit_len
+
+        if (.not. state%initialized) then
             hex = sha256_string('')
+            return
         end if
+
+        s = state
+        bit_len = s%total*8_int64
+        s%nbuf = s%nbuf + 1
+        s%buf(s%nbuf) = achar(128)
+        if (s%nbuf > 56) then
+            do i = s%nbuf + 1, 64
+                s%buf(i) = achar(0)
+            end do
+            call sha256_block(s%buf, s%h)
+            s%nbuf = 0
+        end if
+        do i = s%nbuf + 1, 56
+            s%buf(i) = achar(0)
+        end do
+        do i = 1, 8
+            s%buf(56 + i) = &
+                achar(int(iand(ishft(bit_len, -8*(8 - i)), 255_int64)))
+        end do
+        call sha256_block(s%buf, s%h)
+
+        hex = ''
+        do i = 1, 8
+            hex((i - 1)*8 + 1:i*8) = u32_to_hex(s%h(i))
+        end do
     end function sha256_final
 
     logical function sha256_hardware_available() result(available)
