@@ -1,5 +1,6 @@
 module fx_cache_key
-    use fx_hash, only: sha256_string, sha256_file
+    use fx_hash, only: sha256_string, sha256_file, sha256_state_t, &
+        sha256_init, sha256_update, sha256_final
     implicit none
     private
 
@@ -220,20 +221,31 @@ contains
     end subroutine cache_file_content_key
 
     function digest_parts(parts, n_parts) result(key)
+        !! Digest over length-prefixed parts. Feeds each part directly into a
+        !! block-buffered incremental SHA-256, so the digest is computed without
+        !! growing or reallocating any buffer. digest_parts is reached from
+        !! OpenMP parallel regions (fo's link_binary), where a growing shared
+        !! allocatable `text = text // ...` is the classic realloc data race;
+        !! streaming keeps every byte the caller passes on the caller's own
+        !! thread and leaves the parallel worker with no shared allocation.
         character(len=*), intent(in) :: parts(:)
         integer, intent(in) :: n_parts
         character(len=HASH_LEN) :: key
 
-        character(len=:), allocatable :: text
+        type(sha256_state_t) :: state
         character(len=32) :: len_text
-        integer :: i
+        integer :: i, ln
 
-        text = ''
+        call sha256_init(state)
         do i = 1, n_parts
             write (len_text, '(i0)') len_trim(parts(i))
-            text = text//trim(len_text)//':'//trim(parts(i))//achar(10)
+            ln = len_trim(len_text)
+            call sha256_update(state, len_text(:ln), ln)
+            call sha256_update(state, ':', 1)
+            call sha256_update(state, trim(parts(i)), len_trim(parts(i)))
+            call sha256_update(state, achar(10), 1)
         end do
-        key = sha256_string(text)
+        key = sha256_final(state)
     end function digest_parts
 
     subroutine file_size(path, size_bytes)

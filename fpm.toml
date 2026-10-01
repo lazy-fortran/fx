@@ -31,3 +31,7 @@ main = "test_lsp_did_change.f90"
 [[test]]
 name = "test_action_cache"
 main = "test_action_cache.f90"
+
+[[test]]
+name = "test_cache_key_concurrent"
+main = "test_cache_key_concurrent.f90"
