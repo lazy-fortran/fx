@@ -8,6 +8,8 @@ module fx_action_cache
         cache_file_content_key, cache_set_file_hash_hook, &
         cache_clear_file_hash_hook
     use fx_string, only: to_lower
+    use fx_action_cache_record, only: MAX_MOD_NAME, store_action_record, &
+        restore_action_record, valid_smod_name
     implicit none
     private
 
@@ -21,10 +23,6 @@ module fx_action_cache
         cache_binary_matches
     public :: cache_debug_write_action_record, cache_debug_corrupt_object_payload
     public :: cache_set_file_hash_hook, cache_clear_file_hash_hook
-
-    integer, parameter :: MAX_MOD_NAME = 132
-    integer, parameter :: CACHE_SCHEMA_VERSION = 1
-    integer, parameter :: MAX_RECORD_BYTES = 8192
 
 contains
 
@@ -60,7 +58,7 @@ contains
     subroutine action_cache_schema(schema)
         character(len=*), intent(out) :: schema
 
-        schema = 'action-output-v1'
+        schema = 'action-output-v2'
     end subroutine action_cache_schema
 
     subroutine action_cache_init(c, env_var, subdir, ierr)
@@ -81,44 +79,57 @@ contains
         character(len=*), intent(in) :: key
         logical :: hit
 
-        character(len=HASH_LEN) :: out_id, object_key, mod_key
-        character(len=MAX_MOD_NAME) :: mod_label
-        integer :: ierr, obj_size, mod_size
-        logical :: has_mod
+        character(len=HASH_LEN) :: out_id, object_key, mod_key, smod_key
+        character(len=MAX_MOD_NAME) :: mod_label, smod_label
+        integer :: ierr, obj_size, mod_size, smod_size
+        logical :: has_mod, has_smod
 
         hit = .false.
         call restore_action_record(c, key, out_id, object_key, obj_size, &
-            mod_label, mod_key, mod_size, has_mod, ierr)
+            mod_label, mod_key, mod_size, has_mod, smod_label, smod_key, &
+            smod_size, has_smod, ierr)
         if (ierr /= 0) return
         hit = cache_has(c, trim(out_id)//'-d') .and. &
             cache_has(c, trim(object_key)//'-d')
         if (hit .and. has_mod) hit = cache_has(c, trim(mod_key)//'-d')
+        if (hit .and. has_smod) hit = cache_has(c, trim(smod_key)//'-d')
     end function cache_lookup
 
     subroutine cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
-            output_id)
+            output_id, required_smod_name)
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: action_id, obj_path, mod_dir
         logical, intent(out) :: restored
         character(len=HASH_LEN), intent(out), optional :: output_id
+        character(len=*), intent(in), optional :: required_smod_name
 
-        character(len=HASH_LEN) :: out_id, object_key, mod_key
-        character(len=MAX_MOD_NAME) :: mod_label
-        integer :: ierr, obj_size, mod_size
-        logical :: has_mod, local_ok
+        character(len=HASH_LEN) :: out_id, object_key, mod_key, smod_key
+        character(len=MAX_MOD_NAME) :: mod_label, smod_label
+        integer :: ierr, obj_size, mod_size, smod_size
+        logical :: has_mod, has_smod, local_ok
 
         restored = .false.
         if (present(output_id)) output_id = ''
         if (.not. c%initialized) return
 
         call restore_action_record(c, action_id, out_id, object_key, obj_size, &
-            mod_label, mod_key, mod_size, has_mod, ierr)
+            mod_label, mod_key, mod_size, has_mod, smod_label, smod_key, &
+            smod_size, has_smod, ierr)
         if (ierr /= 0) return
+        if (present(required_smod_name)) then
+            if (len_trim(required_smod_name) > 0) then
+                if (.not. has_smod) return
+                if (trim(smod_label) /= to_lower(trim(required_smod_name))) return
+            end if
+        end if
         if (present(output_id)) output_id = out_id
         if (.not. cache_has(c, trim(out_id)//'-d')) return
+        if (has_smod) then
+            if (.not. cache_has(c, trim(smod_key)//'-d')) return
+        end if
 
         local_ok = local_outputs_match(obj_path, mod_dir, mod_label, object_key, &
-            mod_key, has_mod)
+            mod_key, has_mod, smod_label, smod_key, has_smod)
         if (local_ok) then
             restored = .true.
             return
@@ -131,24 +142,30 @@ contains
                 trim(mod_dir)//'/'//trim(mod_label)//'.mod', ierr)
             if (ierr /= 0) return
         end if
+        if (has_smod) then
+            call cache_restore(c, trim(smod_key)//'-d', &
+                trim(mod_dir)//'/'//trim(smod_label)//'.smod', ierr)
+            if (ierr /= 0) return
+        end if
 
         restored = local_outputs_match(obj_path, mod_dir, mod_label, object_key, &
-            mod_key, has_mod)
+            mod_key, has_mod, smod_label, smod_key, has_smod)
     end subroutine cache_restore_action
 
     subroutine cache_store_action(c, action_id, obj_path, mod_dir, mod_name, &
-            output_id, ierr)
+            output_id, ierr, smod_name)
         type(cache_t), intent(inout) :: c
         character(len=*), intent(in) :: action_id, obj_path, mod_dir, mod_name
         character(len=HASH_LEN), intent(out) :: output_id
         integer, intent(out) :: ierr
+        character(len=*), intent(in), optional :: smod_name
 
-        character(len=HASH_LEN) :: object_key, mod_key
-        character(len=512) :: parts(4)
-        character(len=:), allocatable :: lower_name, mod_path
+        character(len=HASH_LEN) :: object_key, mod_key, smod_key
+        character(len=512) :: parts(6)
+        character(len=:), allocatable :: lower_name, mod_path, smod_label, smod_path
         character(len=1) :: marker(1)
-        integer :: obj_size, mod_size, store_ierr
-        logical :: has_mod
+        integer :: obj_size, mod_size, smod_size, store_ierr
+        logical :: has_mod, has_smod
 
         output_id = ''
         ierr = 0
@@ -161,6 +178,10 @@ contains
         if (ierr /= 0) return
 
         lower_name = to_lower(trim(mod_name))
+        if (len(lower_name) > MAX_MOD_NAME) then
+            ierr = 1
+            return
+        end if
         mod_path = trim(mod_dir)//'/'//lower_name//'.mod'
         inquire (file=mod_path, exist=has_mod)
         mod_key = ''
@@ -169,12 +190,29 @@ contains
             call cache_file_content_key(mod_path, 'mod', mod_key, mod_size, ierr)
             if (ierr /= 0) return
         end if
+        smod_label = ''
+        if (present(smod_name)) smod_label = to_lower(trim(smod_name))
+        has_smod = len(smod_label) > 0
+        smod_key = ''
+        smod_size = 0
+        if (has_smod) then
+            if (.not. valid_smod_name(smod_label)) then
+                ierr = 1
+                return
+            end if
+            smod_path = trim(mod_dir)//'/'//smod_label//'.smod'
+            call cache_file_content_key(smod_path, 'smod', smod_key, smod_size, ierr)
+            if (ierr /= 0) return
+        end if
 
-        parts(1) = 'fx-output-schema-1'
+        parts(1) = 'fx-output-schema-2'
         parts(2) = object_key
         parts(3) = mod_key
-        parts(4) = lower_name
-        output_id = cache_digest(parts, 4)
+        parts(4) = ''
+        if (has_mod) parts(4) = lower_name
+        parts(5) = smod_key
+        parts(6) = smod_label
+        output_id = cache_digest(parts, 6)
 
         call cache_store(c, trim(object_key)//'-d', obj_path, store_ierr)
         if (store_ierr /= 0) then
@@ -188,13 +226,21 @@ contains
                 return
             end if
         end if
+        if (has_smod) then
+            call cache_store(c, trim(smod_key)//'-d', smod_path, store_ierr)
+            if (store_ierr /= 0) then
+                ierr = store_ierr
+                return
+            end if
+        end if
 
         marker(1) = '1'
         call cache_store_bytes(c, trim(output_id)//'-d', marker, 1, ierr)
         if (ierr /= 0) return
 
         call store_action_record(c, action_id, output_id, object_key, obj_size, &
-            lower_name, mod_key, mod_size, has_mod, ierr)
+            lower_name, mod_key, mod_size, has_mod, smod_label, smod_key, &
+            smod_size, has_smod, ierr)
     end subroutine cache_store_action
 
     subroutine cache_action_mod_key(c, action_id, mod_key, found)
@@ -203,17 +249,18 @@ contains
         character(len=HASH_LEN), intent(out) :: mod_key
         logical, intent(out) :: found
 
-        character(len=HASH_LEN) :: out_id, object_key
-        character(len=MAX_MOD_NAME) :: mod_label
-        integer :: ierr, obj_size, mod_size
-        logical :: has_mod
+        character(len=HASH_LEN) :: out_id, object_key, smod_key
+        character(len=MAX_MOD_NAME) :: mod_label, smod_label
+        integer :: ierr, obj_size, mod_size, smod_size
+        logical :: has_mod, has_smod
 
         mod_key = ''
         found = .false.
         if (.not. c%initialized) return
 
         call restore_action_record(c, action_id, out_id, object_key, obj_size, &
-            mod_label, mod_key, mod_size, has_mod, ierr)
+            mod_label, mod_key, mod_size, has_mod, smod_label, smod_key, &
+            smod_size, has_smod, ierr)
         if (ierr /= 0 .or. .not. has_mod) then
             mod_key = ''
             return
@@ -322,144 +369,21 @@ contains
         character(len=*), intent(in) :: action_id
         integer, intent(out) :: ierr
 
-        character(len=HASH_LEN) :: out_id, object_key, mod_key
-        character(len=MAX_MOD_NAME) :: mod_label
+        character(len=HASH_LEN) :: out_id, object_key, mod_key, smod_key
+        character(len=MAX_MOD_NAME) :: mod_label, smod_label
         character(len=1) :: bad(7)
-        integer :: obj_size, mod_size, i
-        logical :: has_mod
+        integer :: obj_size, mod_size, smod_size, i
+        logical :: has_mod, has_smod
 
         call restore_action_record(c, action_id, out_id, object_key, obj_size, &
-            mod_label, mod_key, mod_size, has_mod, ierr)
+            mod_label, mod_key, mod_size, has_mod, smod_label, smod_key, &
+            smod_size, has_smod, ierr)
         if (ierr /= 0) return
         do i = 1, size(bad)
             bad(i) = achar(iachar('0') + modulo(i, 10))
         end do
         call cache_store_bytes(c, trim(object_key)//'-d', bad, size(bad), ierr)
     end subroutine cache_debug_corrupt_object_payload
-
-    subroutine store_action_record(c, action_id, output_id, object_key, obj_size, &
-            mod_name, mod_key, mod_size, has_mod, ierr)
-        type(cache_t), intent(inout) :: c
-        character(len=*), intent(in) :: action_id, output_id, object_key, mod_name
-        character(len=*), intent(in) :: mod_key
-        integer, intent(in) :: obj_size, mod_size
-        logical, intent(in) :: has_mod
-        integer, intent(out) :: ierr
-
-        character(len=:), allocatable :: text
-        character(len=1), allocatable :: bytes(:)
-        character(len=32) :: num
-        integer :: i, n
-
-        write (num, '(i0)') CACHE_SCHEMA_VERSION
-        text = 'schema '//trim(num)//achar(10)//'kind compile'//achar(10)
-        text = text//'output '//trim(output_id)//achar(10)
-        write (num, '(i0)') obj_size
-        text = text//'object '//trim(object_key)//' '//trim(num)//achar(10)
-        if (has_mod) then
-            write (num, '(i0)') mod_size
-            text = text//'mod '//trim(mod_name)//' '//trim(mod_key)//' '// &
-                trim(num)//achar(10)
-        end if
-
-        n = len(text)
-        allocate (bytes(n))
-        do i = 1, n
-            bytes(i) = text(i:i)
-        end do
-        call cache_store_bytes(c, trim(action_id)//'-a', bytes, n, ierr)
-        deallocate (bytes)
-    end subroutine store_action_record
-
-    subroutine restore_action_record(c, action_id, output_id, object_key, &
-            obj_size, mod_name, mod_key, mod_size, has_mod, ierr)
-        type(cache_t), intent(in) :: c
-        character(len=*), intent(in) :: action_id
-        character(len=HASH_LEN), intent(out) :: output_id, object_key, mod_key
-        character(len=*), intent(out) :: mod_name
-        integer, intent(out) :: obj_size, mod_size, ierr
-        logical, intent(out) :: has_mod
-
-        character(len=1) :: rec_bytes(MAX_RECORD_BYTES)
-        character(len=MAX_RECORD_BYTES) :: rec_text
-        integer :: n_rec, i
-
-        output_id = ''
-        object_key = ''
-        mod_key = ''
-        mod_name = ''
-        obj_size = 0
-        mod_size = 0
-        has_mod = .false.
-        ierr = 1
-        if (.not. c%initialized) return
-        if (.not. cache_has(c, trim(action_id)//'-a')) return
-
-        call cache_restore_bytes(c, trim(action_id)//'-a', rec_bytes, n_rec, ierr)
-        if (ierr /= 0 .or. n_rec <= 0 .or. n_rec > MAX_RECORD_BYTES) then
-            ierr = 1
-            return
-        end if
-        rec_text = ''
-        do i = 1, n_rec
-            rec_text(i:i) = rec_bytes(i)
-        end do
-        call parse_action_record(rec_text(1:n_rec), output_id, object_key, &
-            obj_size, mod_name, mod_key, mod_size, has_mod, ierr)
-    end subroutine restore_action_record
-
-    subroutine parse_action_record(text, output_id, object_key, obj_size, &
-            mod_name, mod_key, mod_size, has_mod, ierr)
-        character(len=*), intent(in) :: text
-        character(len=HASH_LEN), intent(out) :: output_id, object_key, mod_key
-        character(len=*), intent(out) :: mod_name
-        integer, intent(out) :: obj_size, mod_size, ierr
-        logical, intent(out) :: has_mod
-
-        character(len=512) :: line, tag
-        integer :: ios, schema, p, q, n
-
-        output_id = ''
-        object_key = ''
-        mod_key = ''
-        mod_name = ''
-        obj_size = 0
-        mod_size = 0
-        has_mod = .false.
-        ierr = 1
-        schema = -1
-
-        n = len(text)
-        p = 1
-        do while (p <= n)
-            q = index(text(p:n), achar(10))
-            if (q == 0) then
-                line = text(p:n)
-                p = n + 1
-            else
-                line = text(p:p + q - 2)
-                p = p + q
-            end if
-            if (len_trim(line) == 0) cycle
-            read (line, *, iostat=ios) tag
-            if (ios /= 0) cycle
-            select case (trim(tag))
-            case ('schema')
-                read (line, *, iostat=ios) tag, schema
-            case ('output')
-                read (line, *, iostat=ios) tag, output_id
-            case ('object')
-                read (line, *, iostat=ios) tag, object_key, obj_size
-            case ('mod')
-                read (line, *, iostat=ios) tag, mod_name, mod_key, mod_size
-                if (ios == 0) has_mod = .true.
-            end select
-        end do
-
-        if (schema /= CACHE_SCHEMA_VERSION) return
-        if (len_trim(output_id) == 0 .or. len_trim(object_key) == 0) return
-        ierr = 0
-    end subroutine parse_action_record
 
     subroutine read_link_record(c, action_id, content_key, mtime, fsize, ok)
         type(cache_t), intent(in) :: c
@@ -490,10 +414,10 @@ contains
     end subroutine read_link_record
 
     logical function local_outputs_match(obj_path, mod_dir, mod_name, object_key, &
-            mod_key, has_mod) result(ok)
+            mod_key, has_mod, smod_name, smod_key, has_smod) result(ok)
         character(len=*), intent(in) :: obj_path, mod_dir, mod_name
-        character(len=*), intent(in) :: object_key, mod_key
-        logical, intent(in) :: has_mod
+        character(len=*), intent(in) :: object_key, mod_key, smod_name, smod_key
+        logical, intent(in) :: has_mod, has_smod
 
         character(len=HASH_LEN) :: actual_key
         integer :: size_bytes, ierr
@@ -505,6 +429,11 @@ contains
             call cache_file_content_key(trim(mod_dir)//'/'//trim(mod_name)//'.mod', &
                 'mod', actual_key, size_bytes, ierr)
             if (ierr /= 0 .or. trim(actual_key) /= trim(mod_key)) return
+        end if
+        if (has_smod) then
+            call cache_file_content_key(trim(mod_dir)//'/'//trim(smod_name)//'.smod', &
+                'smod', actual_key, size_bytes, ierr)
+            if (ierr /= 0 .or. trim(actual_key) /= trim(smod_key)) return
         end if
         ok = .true.
     end function local_outputs_match
