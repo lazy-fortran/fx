@@ -222,6 +222,7 @@ contains
         found = .false.
         result = ''
         call parse_path(path, segments, n_segs)
+        if (n_segs > size(segments)) return
         call json_parser_init(p, input)
         depth = 0
         key_stack = ''
@@ -234,29 +235,37 @@ contains
             case (JSON_END_OF_INPUT, JSON_ERROR)
                 return
             case (JSON_OBJECT_START)
+                if (.not. stack_index_is_valid(depth + 1)) return
                 depth = depth + 1
                 is_arr(depth) = .false.
                 key_stack(depth) = ''
             case (JSON_ARRAY_START)
+                if (.not. stack_index_is_valid(depth + 1)) return
                 depth = depth + 1
                 is_arr(depth) = .true.
                 arr_idx(depth) = 0
             case (JSON_OBJECT_END, JSON_ARRAY_END)
+                if (.not. stack_index_is_valid(depth)) return
                 depth = depth - 1
             case (JSON_KEY)
+                if (.not. stack_index_is_valid(depth)) return
                 if (allocated(ev%string_val)) key_stack(depth) = ev%string_val
             case (JSON_STRING)
-                if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                if (stack_index_is_valid(depth)) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 if (path_matches(key_stack, arr_idx, is_arr, depth, &
                     segments, n_segs)) then
                     if (allocated(ev%string_val)) result = ev%string_val
                     found = .true.
                     return
                 end if
-                key_stack(depth) = ''
+                if (stack_index_is_valid(depth)) key_stack(depth) = ''
             case (JSON_INTEGER, JSON_REAL, JSON_BOOL, JSON_NULL_VAL)
-                if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                key_stack(depth) = ''
+                if (stack_index_is_valid(depth)) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                    key_stack(depth) = ''
+                end if
             end select
         end do
     end subroutine json_extract_string
@@ -279,6 +288,7 @@ contains
         found = .false.
         result = 0
         call parse_path(path, segments, n_segs)
+        if (n_segs > size(segments)) return
         call json_parser_init(p, input)
         depth = 0
         key_stack = ''
@@ -291,29 +301,37 @@ contains
             case (JSON_END_OF_INPUT, JSON_ERROR)
                 return
             case (JSON_OBJECT_START)
+                if (.not. stack_index_is_valid(depth + 1)) return
                 depth = depth + 1
                 is_arr(depth) = .false.
                 key_stack(depth) = ''
             case (JSON_ARRAY_START)
+                if (.not. stack_index_is_valid(depth + 1)) return
                 depth = depth + 1
                 is_arr(depth) = .true.
                 arr_idx(depth) = 0
             case (JSON_OBJECT_END, JSON_ARRAY_END)
+                if (.not. stack_index_is_valid(depth)) return
                 depth = depth - 1
             case (JSON_KEY)
+                if (.not. stack_index_is_valid(depth)) return
                 if (allocated(ev%string_val)) key_stack(depth) = ev%string_val
             case (JSON_INTEGER)
-                if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                if (stack_index_is_valid(depth)) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 if (path_matches(key_stack, arr_idx, is_arr, depth, &
                     segments, n_segs)) then
                     result = ev%int_val
                     found = .true.
                     return
                 end if
-                key_stack(depth) = ''
+                if (stack_index_is_valid(depth)) key_stack(depth) = ''
             case (JSON_STRING, JSON_REAL, JSON_BOOL, JSON_NULL_VAL)
-                if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                key_stack(depth) = ''
+                if (stack_index_is_valid(depth)) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                    key_stack(depth) = ''
+                end if
             end select
         end do
     end subroutine json_extract_int
@@ -336,6 +354,7 @@ contains
         found = .false.
         result = .false.
         call parse_path(path, segments, n_segs)
+        if (n_segs > size(segments)) return
         call json_parser_init(p, input)
         depth = 0
         key_stack = ''
@@ -348,29 +367,37 @@ contains
             case (JSON_END_OF_INPUT, JSON_ERROR)
                 return
             case (JSON_OBJECT_START)
+                if (.not. stack_index_is_valid(depth + 1)) return
                 depth = depth + 1
                 is_arr(depth) = .false.
                 key_stack(depth) = ''
             case (JSON_ARRAY_START)
+                if (.not. stack_index_is_valid(depth + 1)) return
                 depth = depth + 1
                 is_arr(depth) = .true.
                 arr_idx(depth) = 0
             case (JSON_OBJECT_END, JSON_ARRAY_END)
+                if (.not. stack_index_is_valid(depth)) return
                 depth = depth - 1
             case (JSON_KEY)
+                if (.not. stack_index_is_valid(depth)) return
                 if (allocated(ev%string_val)) key_stack(depth) = ev%string_val
             case (JSON_BOOL)
-                if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                if (stack_index_is_valid(depth)) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 if (path_matches(key_stack, arr_idx, is_arr, depth, &
                     segments, n_segs)) then
                     result = ev%bool_val
                     found = .true.
                     return
                 end if
-                key_stack(depth) = ''
+                if (stack_index_is_valid(depth)) key_stack(depth) = ''
             case (JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_NULL_VAL)
-                if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                key_stack(depth) = ''
+                if (stack_index_is_valid(depth)) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                    key_stack(depth) = ''
+                end if
             end select
         end do
     end subroutine json_extract_bool
@@ -389,6 +416,9 @@ contains
 
         path_matches = .false.
         if (depth /= n_segs) return
+        if (depth < 0) return
+        if (depth > size(key_stack) .or. depth > size(arr_idx)) return
+        if (depth > size(is_arr) .or. depth > size(segments)) return
 
         do i = 1, depth
             if (is_arr(i)) then
@@ -401,7 +431,8 @@ contains
         path_matches = .true.
     end function path_matches
 
-    ! Parse "a.b[0].c" → segments ["a","b","0","c"]
+    ! Parse "a.b[0].c" → segments ["a","b","0","c"].
+    ! Overflow returns size(segments) + 1; callers reject the incomplete path.
     pure subroutine parse_path(path, segments, n_segs)
         character(len=*), intent(in) :: path
         character(len=256), intent(out) :: segments(:)
@@ -420,6 +451,7 @@ contains
             if (ch == '.' .or. ch == '[' .or. ch == ']') then
                 if (i > start) then
                     n_segs = n_segs + 1
+                    if (n_segs > size(segments)) return
                     segments(n_segs) = path(start:i - 1)
                 end if
                 start = i + 1
@@ -428,6 +460,7 @@ contains
         end do
         if (start <= plen) then
             n_segs = n_segs + 1
+            if (n_segs > size(segments)) return
             segments(n_segs) = path(start:plen)
         end if
     end subroutine parse_path
