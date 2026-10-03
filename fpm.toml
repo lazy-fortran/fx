@@ -35,3 +35,7 @@ main = "test_action_cache.f90"
 [[test]]
 name = "test_cache_key_concurrent"
 main = "test_cache_key_concurrent.f90"
+
+[[test]]
+name = "test_immutable_store"
+main = "test_immutable_store.f90"
