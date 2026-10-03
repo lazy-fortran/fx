@@ -23,6 +23,21 @@ program test_immutable_store
     implicit none
 
     interface
+        integer(c_int) function file_watch_open(path) &
+                bind(C, name='fx_immutable_test_watch_open')
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: path(*)
+        end function file_watch_open
+        integer(c_int) function file_watch_poll(fd) &
+                bind(C, name='fx_immutable_test_watch_poll')
+            import :: c_int
+            integer(c_int), value :: fd
+        end function file_watch_poll
+        subroutine file_watch_close(fd) &
+                bind(C, name='fx_immutable_test_watch_close')
+            import :: c_int
+            integer(c_int), value :: fd
+        end subroutine file_watch_close
         integer(c_int) function tmp_root(out, cap) &
                 bind(C, name='fx_immutable_test_tmp_root')
             import :: c_int, c_char
@@ -136,7 +151,8 @@ contains
         character(len=*), intent(in) :: source_path, id
         character(len=512) :: blob_path, watched_path
         integer(int64) :: bytes0, mtime0, ino0, bytes1, mtime1, ino1
-        integer :: local_err, fd, wd_dir, wd_file, evt, poll_err
+        integer :: local_err, fd, wd_dir, evt, poll_err
+        integer(c_int) :: file_fd, file_event
         logical :: event_seen, write_event
 
         blob_path = immutable_store_blob_path(cache, id)
@@ -151,10 +167,8 @@ contains
                 local_err)
         end if
         call test_assert_equal_int(s, 0, local_err, 'watch monitors blob shard')
-        if (fd >= 0 .and. local_err == 0) then
-            call proc_watch_add(fd, trim(blob_path), 14, wd_file, local_err)
-        end if
-        call test_assert_equal_int(s, 0, local_err, &
+        file_fd = file_watch_open(trim(blob_path)//c_null_char)
+        call test_assert(s, file_fd >= 0, &
             'write-only watch monitors the canonical blob itself')
         if (fd >= 0 .and. local_err == 0) call drain_events(fd)
         call immutable_store_put_blob(cache, source_path, expected_id, local_err)
@@ -164,6 +178,12 @@ contains
             local_err)
         call test_assert(s, bytes0 == bytes1 .and. mtime0 == mtime1 .and. &
             ino0 == ino1, 'reuse preserves blob size, inode, and mtime')
+        if (file_fd >= 0) then
+            file_event = file_watch_poll(file_fd)
+            call test_assert_equal_int(s, 0, int(file_event), &
+                'reuse emits no native write event on the canonical blob')
+            call file_watch_close(file_fd)
+        end if
         if (fd >= 0) then
             write_event = .false.
             call proc_watch_poll(fd, watched_path, evt, 30, event_seen, poll_err)
@@ -240,7 +260,7 @@ contains
         worker_argv(1) = 'sh'
         worker_argv(2) = '-c'
         worker_argv(3) = trim(command)
-        call proc_exec_silent(worker_argv, 3, child_status)
+        call execute_command_line(trim(command), exitstat=child_status)
         call test_assert_equal_int(s, 0, child_status, &
             'barrier-released identical publishers all succeed')
         eexist_count = 0
