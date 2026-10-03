@@ -25,6 +25,10 @@
 int fx_immutable_open_directory(const char *path);
 int fx_immutable_mkdirs_sync(const char *path);
 void fx_immutable_owned_pause(int phase, const char *path);
+int fx_immutable_tempfile(int directory, const char *name);
+void fx_immutable_copy_pause(const char *path);
+void fx_immutable_publish_pause(const char *path);
+void fx_immutable_eexist_record(void);
 
 typedef struct {
     int parent, fd, staging, tree, published;
@@ -95,8 +99,7 @@ static int make_owned(owned_t *t)
         }
         if (t->staging < 0 ||
             !fx_owned_same_entry(t->parent, t->temp, t->staging)) return -1;
-        t->fd = t->tree ? dup(t->staging) : openat(t->staging, "payload",
-            O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        t->fd = t->tree ? dup(t->staging) : fx_immutable_tempfile(t->staging, "payload");
         return t->fd >= 0 ? 0 : -1;
     }
     return -1;
@@ -215,12 +218,18 @@ static int publish_owned_file(owned_t *t)
     return linkat(t->staging, "payload", t->parent, t->name, 0);
 #endif
 }
-int fx_owned_finish(void *handle, int mode)
+static int finish_owned(owned_t *t, int mode, int cas)
 {
-    owned_t *t = handle;
     int rc;
     if (!fx_owned_same_entry(t->parent, t->temp, t->staging)) return -1;
     if (!t->tree && !fx_owned_same_entry(t->staging, "payload", t->fd)) return -1;
+    if (cas) {
+        fx_immutable_publish_pause(t->display);
+        fx_immutable_owned_pause(6, t->display);
+        /* Repeat ownership checks after the synchronized publication boundary. */
+        if (!fx_owned_same_entry(t->parent, t->temp, t->staging) ||
+            !fx_owned_same_entry(t->staging, "payload", t->fd)) return -1;
+    }
     if (fchmod(t->fd, (mode_t)mode) != 0 || fsync(t->fd) != 0) return -1;
     if (t->tree) {
 #if defined(__linux__) && defined(SYS_renameat2)
@@ -232,10 +241,66 @@ int fx_owned_finish(void *handle, int mode)
         return 2;
 #endif
     } else rc = publish_owned_file(t);
-    if (rc != 0) return -1;
+    if (rc != 0) {
+        if (cas && errno == EEXIST && fsync(t->parent) == 0) {
+            fx_immutable_eexist_record();
+            return 1;
+        }
+        return -1;
+    }
     t->published = 1;
     if (!fx_owned_same_entry(t->parent, t->name, t->fd)) return -1;
+    rc = fsync(t->parent);
+    if (rc == 0 && cas) fx_immutable_owned_pause(7, t->display);
+    return rc;
+}
+int fx_owned_finish(void *handle, int mode) { return finish_owned(handle, mode, 0); }
+int fx_owned_publish(void *handle) { return finish_owned(handle, 0444, 1); }
+int fx_owned_reject(void *handle)
+{
+    owned_t *t = handle;
+    if (!t->published) return 0;
+    if (!fx_owned_same_entry(t->parent, t->name, t->fd)) return -1;
+    if (unlinkat(t->parent, t->name, 0) != 0) return -1;
+    t->published = 0;
     return fsync(t->parent);
+}
+int fx_owned_write(void *handle, const char *text, int count)
+{
+    owned_t *t = handle;
+    int offset = 0;
+    while (offset < count) {
+        ssize_t n = write(t->fd, text + offset, (size_t)(count - offset));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        offset += (int)n;
+    }
+    return fsync(t->fd);
+}
+int fx_owned_copy_source(void *handle, const char *path)
+{
+    owned_t *t = handle;
+    char bytes[65536];
+    struct stat st;
+    int input = open(path, O_RDONLY), rc = -1, paused = 0;
+    if (input < 0 || fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) goto done;
+    for (;;) {
+        ssize_t n = read(input, bytes, sizeof(bytes)), offset = 0;
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) goto done;
+        if (!n) break;
+        while (offset < n) {
+            ssize_t written = write(t->fd, bytes + offset, (size_t)(n - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) goto done;
+            offset += written;
+        }
+        if (!paused) { fx_immutable_copy_pause(t->display); paused = 1; }
+    }
+    rc = fsync(t->fd);
+done:
+    if (input >= 0 && close(input) != 0) rc = -1;
+    return rc;
 }
 static int remove_contents_fd(int fd)
 {
@@ -244,6 +309,7 @@ static int remove_contents_fd(int fd)
     struct stat st;
     int rc = 0;
     if (!directory) return -1;
+    rewinddir(directory);
     while ((entry = readdir(directory)) != NULL) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) { rc = -1; break; }
