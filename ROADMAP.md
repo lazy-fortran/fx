@@ -47,7 +47,9 @@ remain visible. Such an action is quarantined from reuse while both result IDs
 and conflict evidence are retained; conflict lookup supersedes the old binding
 at one durable linearization point, including crash recovery. A corrected
 key/schema produces a distinct action. Materialization may use reflink/clone with byte-copy fallback.
-No database, cache daemon, bulk RAM cache or global store lock is added.
+No database, cache daemon or bulk RAM cache is added. No payload copy or full
+store traversal runs under a global lock; #44 may use one short metadata
+synchronization boundary for root acquisition, graph publication and sweep.
 
 Keep legacy `fx_cache` replacement semantics isolated. New store writes use a
 versioned namespace; eligible store/v1 payloads may be lazily imported only
