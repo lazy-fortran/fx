@@ -1,12 +1,12 @@
 # fx roadmap
 
-Snapshot: 2026-10-03. fx supplies shared cache, JSON, DAG, MCP, watch, and LSP
+Snapshot: 2026-10-04. fx supplies shared cache, JSON, DAG, MCP, watch, and LSP
 infrastructure. In the compiler path it consumes the structured
 fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current `main` is `410e4a0`; `c1da80d` is the watcher-lifecycle implementation
+Current `main` is `4179a3d`; `c1da80d` is the watcher-lifecycle implementation
 checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
@@ -51,6 +51,12 @@ No database, cache daemon or bulk RAM cache is added. No payload copy or full
 store traversal runs under a global lock; #44 may use one short metadata
 synchronization boundary for root acquisition, graph publication and sweep.
 
+Keep four identities distinct: a content ID covers raw bytes; a tree ID covers
+the canonical path/type/mode graph; an action ID covers the complete computation
+contract; and a result ID covers the complete output/companion manifest. The
+action binding is small metadata over immutable objects. Concurrent producers
+write private temporaries; existing verified payloads are never rewritten.
+
 Keep legacy `fx_cache` replacement semantics isolated. New store writes use a
 versioned namespace; eligible store/v1 payloads may be lazily imported only
 after independent hashing/validation. `nopayload` link records never become
@@ -62,6 +68,13 @@ Publishers register a lease before writing. Collection discovers candidates
 outside the boundary, then revalidates the root/publication epoch and unlinks a
 bounded batch while holding it; an epoch change aborts the batch. A newly live
 graph therefore cannot be swept between reachability discovery and unlink.
+
+Maintenance is thresholded and bounded rather than a per-command store walk.
+Recently used roots receive only coarse low-frequency retention touches; idle
+lookups do not rewrite blobs. The fo policy layer chooses time/byte thresholds
+and owner roots, while fx supplies deterministic clocks/limits for behavioral
+oracles. Ordinary one-shot fo retains its stat-memo-assisted fast path and is
+not required to recapture a complete tree merely to use this store.
 
 ## Delivery gate
 
