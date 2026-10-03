@@ -419,23 +419,29 @@ contains
         end if
     end subroutine proc_watch_rm
 
-    subroutine proc_watch_poll(fd, path, event_type, timeout_ms, got_event)
+    subroutine proc_watch_poll(fd, path, event_type, timeout_ms, got_event, ierr)
+        !! Optional ierr preserves legacy callers; backend failure returns 1.
         integer, intent(in) :: fd
         character(len=*), intent(out) :: path
         integer, intent(out) :: event_type
         integer, intent(in) :: timeout_ms
         logical, intent(out) :: got_event
+        integer, intent(out), optional :: ierr
 
         character(kind=c_char) :: c_path(PATH_MAX_LEN)
         integer(c_int) :: c_event_type
         integer(c_int) :: c_got
 
+        if (present(ierr)) ierr = 0
         path = ''
         event_type = 0
         c_event_type = 0_c_int
         c_got = fx_c_inotify_poll(int(fd, c_int), c_path, &
             int(PATH_MAX_LEN, c_int), c_event_type, &
             int(timeout_ms, c_int))
+        if (present(ierr)) then
+            if (c_got < 0_c_int) ierr = 1
+        end if
         got_event = (c_got > 0_c_int)
         if (got_event) then
             path = c_string_from_chars(c_path)

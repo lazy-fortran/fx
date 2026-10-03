@@ -122,16 +122,20 @@ contains
     end subroutine watcher_remove
 
     subroutine watcher_poll(w, changed_path, event_type, &
-            timeout_ms, got_event)
+            timeout_ms, got_event, ierr)
+        !! ierr is zero for an event/timeout and nonzero for provider failure.
         type(watcher_t), intent(inout) :: w
         character(len=WATCH_PATH_LEN), intent(out) :: changed_path
         integer, intent(out) :: event_type
         integer, intent(in) :: timeout_ms
         logical, intent(out) :: got_event
+        integer, intent(out), optional :: ierr
 
         character(len=WATCH_PATH_LEN) :: path
-        integer :: ierr
+        integer :: error
 
+        if (present(ierr)) ierr = 0
+        error = 0
         changed_path = ''
         event_type = 0
         got_event = .false.
@@ -141,7 +145,9 @@ contains
             got_event = .true.
             return
         end if
-        call proc_watch_poll(w%fd, path, event_type, timeout_ms, got_event)
+        call proc_watch_poll(w%fd, path, event_type, timeout_ms, got_event, error)
+        if (present(ierr)) ierr = error
+        if (error /= 0) return
         if (.not. got_event) return
 
         path = watcher_canonical_path(path)
@@ -163,16 +169,17 @@ contains
         changed_path = path
         if (event_type == WATCH_DELETE) then
             if (watcher_find_watch(w, path) > 0) then
-                call watcher_remove(w, path, ierr)
+                call watcher_remove(w, path, error)
             end if
         else if (event_type == WATCH_CREATE) then
             if (proc_path_is_dir(path)) then
-                call watcher_add(w, path, .true., ierr)
-                if (ierr == 0) then
-                    call watcher_queue_existing_files(w, path, ierr)
+                call watcher_add(w, path, .true., error)
+                if (error == 0) then
+                    call watcher_queue_existing_files(w, path, error)
                 end if
             end if
         end if
+        if (present(ierr)) ierr = error
     end subroutine watcher_poll
 
     subroutine watcher_mark_self_written(w, path)
@@ -233,10 +240,13 @@ contains
         character(len=*), intent(in) :: path
         integer, intent(in) :: wd
 
-        integer :: idx
+        integer :: idx, remove_error
 
         idx = watcher_find_watch(w, path)
         if (idx > 0) then
+            if (w%watches(idx) /= wd) then
+                call proc_watch_rm(w%fd, w%watches(idx), remove_error)
+            end if
             w%watches(idx) = wd
             w%watch_paths(idx) = watcher_canonical_path(path)
             return
