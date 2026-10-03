@@ -17,9 +17,9 @@
 #include <sys/syscall.h>
 #endif
 #ifdef __APPLE__
-#include <copyfile.h>
 #include <stdio.h>
 #include <sys/attr.h>
+#include <sys/clonefile.h>
 #endif
 
 #ifndef PATH_MAX
