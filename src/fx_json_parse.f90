@@ -79,8 +79,9 @@ contains
         case ('}')
             p%pos = p%pos + 1
             p%depth = p%depth - 1
-            if (p%depth > 0 .and. p%in_object(p%depth)) &
-                p%expect_key(p%depth) = .true.
+            if (p%depth > 0) then
+                if (p%in_object(p%depth)) p%expect_key(p%depth) = .true.
+            end if
             event%event_type = JSON_OBJECT_END
         case ('[')
             p%pos = p%pos + 1
@@ -91,14 +92,20 @@ contains
         case (']')
             p%pos = p%pos + 1
             p%depth = p%depth - 1
-            if (p%depth > 0 .and. p%in_object(p%depth)) &
-                p%expect_key(p%depth) = .true.
+            if (p%depth > 0) then
+                if (p%in_object(p%depth)) p%expect_key(p%depth) = .true.
+            end if
             event%event_type = JSON_ARRAY_END
         case ('"')
             call parse_string(p, event%string_val, event%event_type)
             if (event%event_type /= JSON_ERROR) then
-                if (p%depth > 0 .and. p%expect_key(p%depth)) then
-                    event%event_type = JSON_KEY
+                if (p%depth > 0) then
+                    if (p%expect_key(p%depth)) then
+                        event%event_type = JSON_KEY
+                    else
+                        event%event_type = JSON_STRING
+                        call mark_value_done(p)
+                    end if
                 else
                     event%event_type = JSON_STRING
                     call mark_value_done(p)
@@ -158,8 +165,9 @@ contains
 
     subroutine mark_value_done(p)
         type(json_parser_t), intent(inout) :: p
-        if (p%depth > 0 .and. p%in_object(p%depth)) &
-            p%expect_key(p%depth) = .true.
+        if (p%depth > 0) then
+            if (p%in_object(p%depth)) p%expect_key(p%depth) = .true.
+        end if
     end subroutine mark_value_done
 
     ! Extract a string value at a dot/bracket path, e.g. "result.tools[1].name"
@@ -431,7 +439,7 @@ contains
                 select case (iachar(ch))
                 case (34) ! "
                     val = val // '"'
-                case (92) ! \
+                case (92) ! backslash
                     val = val // achar(92)
                 case (47) ! /
                     val = val // '/'
@@ -473,34 +481,39 @@ contains
         logical, intent(out) :: bool_val
         integer, intent(out) :: event_type
 
-        if (p%pos + 3 <= len(p%input) .and. &
-            p%input(p%pos:p%pos + 3) == 'true') then
-            bool_val = .true.
-            p%pos = p%pos + 4
-            event_type = JSON_BOOL
-        else if (p%pos + 4 <= len(p%input) .and. &
-                p%input(p%pos:p%pos + 4) == 'false') then
-            bool_val = .false.
-            p%pos = p%pos + 5
-            event_type = JSON_BOOL
-        else
-            event_type = JSON_ERROR
-            p%pos = p%pos + 1
+        if (p%pos + 3 <= len(p%input)) then
+            if (p%input(p%pos:p%pos + 3) == 'true') then
+                bool_val = .true.
+                p%pos = p%pos + 4
+                event_type = JSON_BOOL
+                return
+            end if
         end if
+        if (p%pos + 4 <= len(p%input)) then
+            if (p%input(p%pos:p%pos + 4) == 'false') then
+                bool_val = .false.
+                p%pos = p%pos + 5
+                event_type = JSON_BOOL
+                return
+            end if
+        end if
+        event_type = JSON_ERROR
+        p%pos = p%pos + 1
     end subroutine parse_bool
 
     subroutine parse_null(p, event_type)
         type(json_parser_t), intent(inout) :: p
         integer, intent(out) :: event_type
 
-        if (p%pos + 3 <= len(p%input) .and. &
-            p%input(p%pos:p%pos + 3) == 'null') then
-            p%pos = p%pos + 4
-            event_type = JSON_NULL_VAL
-        else
-            event_type = JSON_ERROR
-            p%pos = p%pos + 1
+        if (p%pos + 3 <= len(p%input)) then
+            if (p%input(p%pos:p%pos + 3) == 'null') then
+                p%pos = p%pos + 4
+                event_type = JSON_NULL_VAL
+                return
+            end if
         end if
+        event_type = JSON_ERROR
+        p%pos = p%pos + 1
     end subroutine parse_null
 
     subroutine parse_number(p, int_val, real_val, event_type)
@@ -515,8 +528,9 @@ contains
         start = p%pos
         is_real = .false.
 
-        if (p%pos <= len(p%input) .and. p%input(p%pos:p%pos) == '-') &
-            p%pos = p%pos + 1
+        if (p%pos <= len(p%input)) then
+            if (p%input(p%pos:p%pos) == '-') p%pos = p%pos + 1
+        end if
 
         do while (p%pos <= len(p%input))
             select case (iachar(p%input(p%pos:p%pos)))
@@ -527,17 +541,19 @@ contains
             end select
         end do
 
-        if (p%pos <= len(p%input) .and. p%input(p%pos:p%pos) == '.') then
-            is_real = .true.
-            p%pos = p%pos + 1
-            do while (p%pos <= len(p%input))
-                select case (iachar(p%input(p%pos:p%pos)))
-                case (48:57)
-                    p%pos = p%pos + 1
-                case default
-                    exit
-                end select
-            end do
+        if (p%pos <= len(p%input)) then
+            if (p%input(p%pos:p%pos) == '.') then
+                is_real = .true.
+                p%pos = p%pos + 1
+                do while (p%pos <= len(p%input))
+                    select case (iachar(p%input(p%pos:p%pos)))
+                    case (48:57)
+                        p%pos = p%pos + 1
+                    case default
+                        exit
+                    end select
+                end do
+            end if
         end if
 
         if (p%pos <= len(p%input)) then
