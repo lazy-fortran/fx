@@ -71,35 +71,62 @@ contains
 
         select case (ch)
         case ('{')
+            if (p%depth < 0 .or. p%depth >= MAX_DEPTH) then
+                event%event_type = JSON_ERROR
+                p%pos = p%pos + 1
+                return
+            end if
             p%pos = p%pos + 1
             p%depth = p%depth + 1
-            p%in_object(p%depth) = .true.
-            p%expect_key(p%depth) = .true.
+            if (stack_index_is_valid(p%depth)) then
+                p%in_object(p%depth) = .true.
+                p%expect_key(p%depth) = .true.
+            end if
             event%event_type = JSON_OBJECT_START
         case ('}')
+            if (.not. stack_index_is_valid(p%depth)) then
+                event%event_type = JSON_ERROR
+                p%pos = p%pos + 1
+                return
+            end if
             p%pos = p%pos + 1
             p%depth = p%depth - 1
-            if (p%depth > 0) then
+            if (stack_index_is_valid(p%depth)) then
                 if (p%in_object(p%depth)) p%expect_key(p%depth) = .true.
             end if
             event%event_type = JSON_OBJECT_END
         case ('[')
+            if (p%depth < 0 .or. p%depth >= MAX_DEPTH) then
+                event%event_type = JSON_ERROR
+                p%pos = p%pos + 1
+                return
+            end if
             p%pos = p%pos + 1
             p%depth = p%depth + 1
-            p%in_object(p%depth) = .false.
-            p%expect_key(p%depth) = .false.
+            if (stack_index_is_valid(p%depth)) then
+                p%in_object(p%depth) = .false.
+                p%expect_key(p%depth) = .false.
+            end if
             event%event_type = JSON_ARRAY_START
         case (']')
+            if (.not. stack_index_is_valid(p%depth)) then
+                event%event_type = JSON_ERROR
+                p%pos = p%pos + 1
+                return
+            end if
             p%pos = p%pos + 1
             p%depth = p%depth - 1
-            if (p%depth > 0) then
+            if (stack_index_is_valid(p%depth)) then
                 if (p%in_object(p%depth)) p%expect_key(p%depth) = .true.
             end if
             event%event_type = JSON_ARRAY_END
         case ('"')
             call parse_string(p, event%string_val, event%event_type)
             if (event%event_type /= JSON_ERROR) then
-                if (p%depth > 0) then
+                if (p%depth == 0) then
+                    event%event_type = JSON_STRING
+                    call mark_value_done(p)
+                else if (stack_index_is_valid(p%depth)) then
                     if (p%expect_key(p%depth)) then
                         event%event_type = JSON_KEY
                     else
@@ -107,8 +134,7 @@ contains
                         call mark_value_done(p)
                     end if
                 else
-                    event%event_type = JSON_STRING
-                    call mark_value_done(p)
+                    event%event_type = JSON_ERROR
                 end if
             end if
         case ('t', 'f')
@@ -156,7 +182,9 @@ contains
             end if
             if (ch == ':') then
                 p%pos = p%pos + 1
-                if (p%depth > 0) p%expect_key(p%depth) = .false.
+                if (stack_index_is_valid(p%depth)) then
+                    p%expect_key(p%depth) = .false.
+                end if
                 cycle
             end if
             return
@@ -165,10 +193,15 @@ contains
 
     subroutine mark_value_done(p)
         type(json_parser_t), intent(inout) :: p
-        if (p%depth > 0) then
+        if (stack_index_is_valid(p%depth)) then
             if (p%in_object(p%depth)) p%expect_key(p%depth) = .true.
         end if
     end subroutine mark_value_done
+
+    pure logical function stack_index_is_valid(depth)
+        integer, intent(in) :: depth
+        stack_index_is_valid = depth >= 1 .and. depth <= MAX_DEPTH
+    end function stack_index_is_valid
 
     ! Extract a string value at a dot/bracket path, e.g. "result.tools[1].name"
     subroutine json_extract_string(input, path, result, found)

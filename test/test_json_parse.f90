@@ -354,6 +354,9 @@ contains
         type(json_parser_t) :: p
         type(json_event_t) :: ev
         logical :: got_error
+        logical :: starts_ok
+        integer :: i
+        character(len=:), allocatable :: deep_json
 
         ! Invalid token at top level
         call json_parser_init(p, 'invalid')
@@ -373,6 +376,70 @@ contains
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_END_OF_INPUT, &
             'malformed: empty is end-of-input')
+        call test_assert_equal_int(suite, 0, p%depth, &
+            'malformed: empty depth remains zero')
+
+        ! Unmatched closers report an error without underflowing the depth.
+        call json_parser_init(p, '}{')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_ERROR, &
+            'malformed: unmatched object closer')
+        call test_assert_equal_int(suite, 0, p%depth, &
+            'malformed: unmatched closer depth remains zero')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_OBJECT_START, &
+            'malformed: token after unmatched closer remains readable')
+
+        call json_parser_init(p, ']')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_ERROR, &
+            'malformed: unmatched array closer')
+        call test_assert_equal_int(suite, 0, p%depth, &
+            'malformed: unmatched array depth remains zero')
+
+        ! The parser accepts exactly MAX_DEPTH open containers and rejects one more.
+        deep_json = repeat('[', 129) // repeat(']', 129)
+        call json_parser_init(p, deep_json)
+        starts_ok = .true.
+        do i = 1, 128
+            call json_parser_next(p, ev)
+            if (ev%event_type /= JSON_ARRAY_START) then
+                starts_ok = .false.
+                exit
+            end if
+        end do
+        call test_assert(suite, starts_ok, 'malformed: maximum nesting accepted')
+        if (starts_ok) then
+            call json_parser_next(p, ev)
+            call test_assert(suite, ev%event_type == JSON_ERROR, &
+                'malformed: excess nesting rejected')
+            call test_assert_equal_int(suite, 128, p%depth, &
+                'malformed: excess nesting preserves maximum depth')
+        end if
+
+        ! Tokens ending at end-of-input stay valid without a trailing delimiter.
+        call json_parser_init(p, 'true')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_BOOL .and. ev%bool_val, &
+            'boundary: true at end of input')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_END_OF_INPUT, &
+            'boundary: true reaches end of input')
+
+        call json_parser_init(p, 'false')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_BOOL .and. &
+            .not. ev%bool_val, 'boundary: false at end of input')
+
+        call json_parser_init(p, 'null')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_NULL_VAL, &
+            'boundary: null at end of input')
+
+        call json_parser_init(p, '42')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
+            ev%int_val == 42, 'boundary: integer at end of input')
 
         ! Whitespace only
         call json_parser_init(p, '   ')
