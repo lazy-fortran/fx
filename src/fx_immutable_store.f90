@@ -244,7 +244,6 @@ contains
         integer, intent(out) :: ierr
         character(len=HASH_LEN) :: actual
         character(len=:), allocatable :: file_path
-        logical :: exists
         integer(c_int) :: status
         integer(c_long_long) :: c_size, c_mtime, c_inode
         character(kind=c_char), allocatable :: c_file(:)
@@ -252,13 +251,12 @@ contains
         ierr = IMMUTABLE_INVALID
         if (.not. store%initialized .or. .not. immutable_id_valid(object_id)) return
         file_path = immutable_store_blob_path(store, object_id)
-        inquire(file=file_path, exist=exists)
-        if (.not. exists) then
+        call to_c_text(file_path, c_file)
+        status = c_file_info(c_file, c_size, c_mtime, c_inode)
+        if (status == 1_c_int) then
             ierr = IMMUTABLE_MISSING
             return
         end if
-        call to_c_text(file_path, c_file)
-        status = c_file_info(c_file, c_size, c_mtime, c_inode)
         if (status /= 0_c_int) then
             ierr = IMMUTABLE_CORRUPT
             return
