@@ -6,7 +6,8 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current `main` is `c1da80d`. The digest-part concurrency issue #36 and watcher
+Current `main` is `0d13bf2`; `c1da80d` is the watcher-lifecycle implementation
+checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
 
@@ -38,7 +39,9 @@ The new store uses raw content IDs for bytes and canonical manifests for roles,
 modes, paths, trees and action results. Existing verified blobs are reused
 without a rewrite. Equal action/result publication is idempotent; different
 result IDs for one action are nondeterminism or an incomplete-key failure and
-remain visible. Materialization may use reflink/clone with byte-copy fallback.
+remain visible. Such an action is quarantined from reuse while both result IDs
+and conflict evidence are retained; a corrected key/schema produces a distinct
+action. Materialization may use reflink/clone with byte-copy fallback.
 No database, cache daemon, bulk RAM cache or global store lock is added.
 
 Keep legacy `fx_cache` replacement semantics isolated. New store writes use a
@@ -46,6 +49,9 @@ versioned namespace; eligible store/v1 payloads may be lazily imported only
 after independent hashing/validation. `nopayload` link records never become
 executable hits. Collection begins only after fo provides owner-specific roots;
 the current one-bit Gremlin pin is not sufficient retention authority.
+Root/lease acquisition, graph publication and collection snapshot/deletion use
+one explicit synchronization protocol so a newly live graph cannot be swept
+between reachability discovery and unlink.
 
 ## Delivery gate
 
