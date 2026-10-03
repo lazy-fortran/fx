@@ -192,7 +192,6 @@ contains
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=:), allocatable :: raw, file_path
         character(len=HASH_LEN) :: actual
-        logical :: exists
         integer :: i
         integer(c_int) :: status
         integer(c_long_long) :: c_size, c_mtime, c_inode
@@ -202,13 +201,12 @@ contains
         if (.not. store%initialized .or. .not. immutable_id_valid(tree_id)) return
         if (depth > 128) return
         file_path = immutable_store_tree_path(store, tree_id)
-        inquire(file=file_path, exist=exists)
-        if (.not. exists) then
+        call to_c_text(file_path, c_file)
+        status = c_file_info(c_file, c_size, c_mtime, c_inode)
+        if (status == 1_c_int) then
             ierr = IMMUTABLE_MISSING
             return
         end if
-        call to_c_text(file_path, c_file)
-        status = c_file_info(c_file, c_size, c_mtime, c_inode)
         if (status /= 0_c_int) then
             ierr = IMMUTABLE_CORRUPT
             return
