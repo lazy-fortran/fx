@@ -13,8 +13,30 @@ module fx_immutable_owned
     public :: owned_finish, owned_dispose, owned_close, owned_sync, owned_pause
     public :: owned_open_verified, owned_hash_fd, owned_read_manifest
     public :: owned_materialize_blob, owned_file_info
+    public :: owned_copy_source, owned_write, owned_publish, owned_reject
     integer, parameter :: HASH_BLOCK = 65536
     interface
+        integer(c_int) function owned_copy_source(handle, path) &
+                bind(C, name='fx_owned_copy_source')
+            import :: c_int, c_ptr, c_char
+            type(c_ptr), value :: handle
+            character(kind=c_char), intent(in) :: path(*)
+        end function owned_copy_source
+        integer(c_int) function owned_write(handle, text, count) &
+                bind(C, name='fx_owned_write')
+            import :: c_int, c_ptr, c_char
+            type(c_ptr), value :: handle
+            character(kind=c_char), intent(in) :: text(*)
+            integer(c_int), value :: count
+        end function owned_write
+        integer(c_int) function owned_publish(handle) bind(C, name='fx_owned_publish')
+            import :: c_int, c_ptr
+            type(c_ptr), value :: handle
+        end function owned_publish
+        integer(c_int) function owned_reject(handle) bind(C, name='fx_owned_reject')
+            import :: c_int, c_ptr
+            type(c_ptr), value :: handle
+        end function owned_reject
         integer(c_int) function owned_open_store(path) &
                 bind(C, name='fx_owned_open_store')
             import :: c_char, c_int

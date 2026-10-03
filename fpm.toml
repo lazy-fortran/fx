@@ -43,3 +43,8 @@ main = "test_immutable_store.f90"
 [[test]]
 name = "test_immutable_materialization"
 main = "test_immutable_materialization.f90"
+
+[[test]]
+name = "test_immutable_publication"
+source-dir = "test"
+main = "test_immutable_publication.f90"
