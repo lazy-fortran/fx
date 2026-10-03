@@ -1,4 +1,5 @@
 module fx_immutable_manifest
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_INVALID, &
         IMMUTABLE_CORRUPT
     implicit none
@@ -24,13 +25,25 @@ module fx_immutable_manifest
     public :: immutable_entries_canonical, immutable_manifest_serialize
     public :: immutable_manifest_parse, immutable_id_valid
 
+    interface
+        integer(c_int) function name_valid(name) bind(C, name='fx_immutable_name_valid')
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: name(*)
+        end function name_valid
+        integer(c_int) function names_equivalent(left, right) &
+                bind(C, name='fx_immutable_names_equivalent')
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: left(*), right(*)
+        end function names_equivalent
+    end interface
+
 contains
 
     subroutine immutable_entries_canonical(input, output, ierr)
         type(immutable_tree_entry_t), intent(in) :: input(:)
         type(immutable_tree_entry_t), allocatable, intent(out) :: output(:)
         integer, intent(out) :: ierr
-        integer :: i
+        integer :: i, j
 
         allocate(output(size(input)))
         output = input
@@ -38,14 +51,16 @@ contains
         ierr = IMMUTABLE_INVALID
         do i = 1, size(output)
             if (.not. valid_component(output(i)%path)) return
+            if (name_valid(output(i)%path//c_null_char) /= 1_c_int) return
             if (.not. valid_role(output(i)%role)) return
             if (.not. immutable_id_valid(output(i)%object_id)) return
             if (output(i)%mode < 0 .or. output(i)%mode > 511) return
             if (output(i)%kind /= IMMUTABLE_BLOB .and. &
                 output(i)%kind /= IMMUTABLE_TREE) return
-            if (i > 1) then
-                if (same_bytes(output(i - 1)%path, output(i)%path)) return
-            end if
+            do j = 1, i - 1
+                if (names_equivalent(output(j)%path//c_null_char, &
+                    output(i)%path//c_null_char) /= 0_c_int) return
+            end do
         end do
         ierr = IMMUTABLE_OK
     end subroutine immutable_entries_canonical

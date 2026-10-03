@@ -1,8 +1,11 @@
 module fx_immutable_store
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
-        c_null_char
+        c_null_char, c_ptr, c_associated
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t
+    use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
+        owned_close, owned_begin_path, owned_dispose, owned_materialize_blob, &
+        owned_file_info
     use fx_path, only: path_dirname
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_IO_ERROR, &
         IMMUTABLE_INVALID, IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, &
@@ -242,70 +245,47 @@ contains
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: object_id
         integer, intent(out) :: ierr
-        character(len=HASH_LEN) :: actual
-        character(len=:), allocatable :: file_path
-        integer(c_int) :: status
-        integer(c_long_long) :: c_size, c_mtime, c_inode
-        character(kind=c_char), allocatable :: c_file(:)
+        integer(c_int) :: root, fd, cleanup
 
         ierr = IMMUTABLE_INVALID
-        if (.not. store%initialized .or. .not. immutable_id_valid(object_id)) return
-        file_path = immutable_store_blob_path(store, object_id)
-        call to_c_text(file_path, c_file)
-        status = c_file_info(c_file, c_size, c_mtime, c_inode)
-        if (status == 1_c_int) then
-            ierr = IMMUTABLE_MISSING
-            return
-        end if
-        if (status /= 0_c_int) then
-            ierr = IMMUTABLE_CORRUPT
-            return
-        end if
-        call immutable_store_hash_file(file_path, actual, ierr)
-        if (ierr /= IMMUTABLE_OK) return
-        ierr = IMMUTABLE_OK
-        if (actual /= object_id) ierr = IMMUTABLE_CORRUPT
+        if (.not. store%initialized) return
+        if (.not. immutable_id_valid(object_id)) return
+        root = owned_open_store(store%root_dir//c_null_char)
+        ierr = IMMUTABLE_CORRUPT
+        if (root < 0) return
+        call owned_open_verified(root, 1_c_int, object_id, fd, ierr)
+        if (fd >= 0) cleanup = owned_close(fd)
+        cleanup = owned_close(root)
     end subroutine immutable_store_verify_blob
 
     subroutine immutable_store_materialize_blob(store, object_id, dest_path, &
             mode, strategy, used_clone, ierr)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: object_id, dest_path
-        integer, intent(in) :: mode
-        integer, intent(in) :: strategy
+        integer, intent(in) :: mode, strategy
         logical, intent(out) :: used_clone
         integer, intent(out) :: ierr
-        character(len=:), allocatable :: blob_path, dest_parent
-        character(kind=c_char), allocatable :: c_blob(:), c_dest(:)
-        integer(c_int) :: status, c_clone
+        integer(c_int) :: root, cleanup
+        type(c_ptr) :: transaction
 
         used_clone = .false.
-        call immutable_store_verify_blob(store, object_id, ierr)
-        if (ierr /= IMMUTABLE_OK) return
+        ierr = IMMUTABLE_INVALID
+        if (.not. store%initialized) return
+        if (.not. immutable_id_valid(object_id)) return
         if (mode < 0 .or. mode > 511 .or. strategy < &
             IMMUTABLE_MATERIALIZE_AUTO .or. strategy > &
-            IMMUTABLE_MATERIALIZE_CLONE) then
-            ierr = IMMUTABLE_INVALID
-            return
+            IMMUTABLE_MATERIALIZE_CLONE) return
+        root = owned_open_store(store%root_dir//c_null_char)
+        ierr = IMMUTABLE_CORRUPT
+        if (root < 0) return
+        transaction = owned_begin_path(trim(dest_path)//c_null_char, 0_c_int)
+        ierr = IMMUTABLE_IO_ERROR
+        if (c_associated(transaction)) then
+            call owned_materialize_blob(transaction, root, object_id, mode, &
+                strategy, used_clone, ierr)
+            call owned_dispose(transaction)
         end if
-        blob_path = immutable_store_blob_path(store, object_id)
-        dest_parent = path_dirname(dest_path)
-        call ensure_dir(dest_parent, ierr)
-        if (ierr /= IMMUTABLE_OK) return
-        call to_c_text(blob_path, c_blob)
-        call to_c_text(dest_path, c_dest)
-        status = c_materialize(c_blob, c_dest, &
-            int(mode, c_int), int(strategy, c_int), c_clone)
-        if (status == 0_c_int) then
-            used_clone = c_clone /= 0_c_int
-            ierr = IMMUTABLE_OK
-        else if (status == 1_c_int) then
-            ierr = IMMUTABLE_IO_ERROR
-        else if (status == 2_c_int) then
-            ierr = IMMUTABLE_UNSUPPORTED
-        else
-            ierr = IMMUTABLE_IO_ERROR
-        end if
+        cleanup = owned_close(root)
     end subroutine immutable_store_materialize_blob
 
     subroutine immutable_store_file_info(store, object_id, size_bytes, &
@@ -314,27 +294,30 @@ contains
         character(len=*), intent(in) :: object_id
         integer(int64), intent(out) :: size_bytes, mtime_ns, inode
         integer, intent(out) :: ierr
-        integer(c_int) :: status
+        integer(c_int) :: root, fd, cleanup, status
         integer(c_long_long) :: c_size, c_mtime, c_inode
-        character(len=:), allocatable :: path
-        character(kind=c_char), allocatable :: c_path(:)
 
         size_bytes = 0_int64
         mtime_ns = 0_int64
         inode = 0_int64
-        call immutable_store_verify_blob(store, object_id, ierr)
-        if (ierr /= IMMUTABLE_OK) return
-        path = immutable_store_blob_path(store, object_id)
-        call to_c_text(path, c_path)
-        status = c_file_info(c_path, c_size, c_mtime, c_inode)
-        if (status /= 0_c_int) then
+        ierr = IMMUTABLE_INVALID
+        if (.not. store%initialized) return
+        root = owned_open_store(store%root_dir//c_null_char)
+        ierr = IMMUTABLE_CORRUPT
+        if (root < 0) return
+        call owned_open_verified(root, 1_c_int, object_id, fd, ierr)
+        if (ierr == IMMUTABLE_OK) then
+            status = owned_file_info(fd, c_size, c_mtime, c_inode)
             ierr = IMMUTABLE_IO_ERROR
-            return
+            if (status == 0_c_int) then
+                size_bytes = int(c_size, int64)
+                mtime_ns = int(c_mtime, int64)
+                inode = int(c_inode, int64)
+                ierr = IMMUTABLE_OK
+            end if
         end if
-        size_bytes = int(c_size, int64)
-        mtime_ns = int(c_mtime, int64)
-        inode = int(c_inode, int64)
-        ierr = IMMUTABLE_OK
+        if (fd >= 0) cleanup = owned_close(fd)
+        cleanup = owned_close(root)
     end subroutine immutable_store_file_info
 
     function object_path(store, class_name, object_id) result(path)
