@@ -23,6 +23,12 @@ program test_immutable_store
     implicit none
 
     interface
+        integer(c_int) function tmp_root(out, cap) &
+                bind(C, name='fx_immutable_test_tmp_root')
+            import :: c_int, c_char
+            character(kind=c_char), intent(out) :: out(*)
+            integer(c_int), value :: cap
+        end function tmp_root
         subroutine c_test_configure(ready, copy_release, publish_ready, &
                 publish_release, eexist) &
                 bind(C, name='fx_immutable_test_configure')
@@ -67,7 +73,8 @@ program test_immutable_store
     character(len=512) :: fallback_path, executable
     character(len=512) :: arg
     character(len=1) :: payload(5)
-    integer :: ierr
+    integer :: ierr, end_path
+    character(len=512, kind=c_char) :: scratch
 
     call get_command_argument(1, arg)
     if (trim(arg) == '--put-blob') then
@@ -83,7 +90,12 @@ program test_immutable_store
         stop 0
     end if
     call test_suite_init(suite, 'fx_immutable_store')
-    write(root, '(A,I0)') '/tmp/fx_store42_', proc_pid()
+    scratch = c_null_char
+    ierr = tmp_root(scratch, 512_c_int)
+    call test_assert_equal_int(suite, 0, ierr, 'system scratch resolves physically')
+    end_path = index(scratch, c_null_char)
+    if (end_path <= 1) stop 20
+    write(root, '(A,I0)') scratch(1:end_path - 1)//'/fx_store42_', proc_pid()
     call immutable_store_init(store, trim(root), ierr)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'store initializes')
 

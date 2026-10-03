@@ -1,15 +1,17 @@
 module fx_immutable_tree
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
-    use, intrinsic :: iso_fortran_env, only: int64
-    use fx_path, only: path_dirname, path_join
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
+        c_ptr, c_associated
+    use fx_path, only: path_dirname
     use fx_hash, only: sha256_string
     use fx_immutable_store, only: immutable_store_t, IMMUTABLE_OK, &
         IMMUTABLE_IO_ERROR, IMMUTABLE_INVALID, IMMUTABLE_MISSING, &
         IMMUTABLE_CORRUPT, IMMUTABLE_UNSUPPORTED, &
         IMMUTABLE_MATERIALIZE_AUTO, IMMUTABLE_MATERIALIZE_COPY, &
-        IMMUTABLE_MATERIALIZE_CLONE, immutable_store_blob_path, &
-        immutable_store_tree_path, immutable_store_verify_blob, &
-        immutable_store_materialize_blob, immutable_store_hash_file
+        IMMUTABLE_MATERIALIZE_CLONE, &
+        immutable_store_tree_path, immutable_store_verify_blob
+    use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
+        owned_read_manifest, owned_begin_path, owned_begin_at, owned_fd, &
+        owned_pause, owned_materialize_blob, owned_finish, owned_dispose, owned_close
     use fx_immutable_manifest, only: immutable_tree_entry_t, IMMUTABLE_BLOB, &
         IMMUTABLE_TREE, immutable_entries_canonical, &
         immutable_manifest_serialize, immutable_manifest_parse, &
@@ -39,14 +41,6 @@ module fx_immutable_tree
             integer(c_int), value :: cap
         end function c_tempfile
 
-        integer(c_int) function c_tempdir(dir, out, cap) &
-                bind(C, name='fx_immutable_tempdir')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: dir(*)
-            character(kind=c_char), intent(out) :: out(*)
-            integer(c_int), value :: cap
-        end function c_tempdir
-
         integer(c_int) function c_fsync_file(path) &
                 bind(C, name='fx_immutable_fsync_file')
             import :: c_char, c_int
@@ -70,44 +64,6 @@ module fx_immutable_tree
             character(kind=c_char), intent(in) :: path(*)
         end function c_unlink
 
-        integer(c_int) function c_mkdir_mode(path, mode) &
-                bind(C, name='fx_immutable_mkdir_mode')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-            integer(c_int), value :: mode
-        end function c_mkdir_mode
-
-        integer(c_int) function c_chmod_sync(path, mode) &
-                bind(C, name='fx_immutable_chmod_sync')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-            integer(c_int), value :: mode
-        end function c_chmod_sync
-
-        integer(c_int) function c_fsync_dir(path) &
-                bind(C, name='fx_immutable_fsync_dir')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-        end function c_fsync_dir
-
-        integer(c_int) function c_publish_tree(src, dst) &
-                bind(C, name='fx_immutable_publish_tree')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: src(*), dst(*)
-        end function c_publish_tree
-
-        integer(c_int) function c_file_info(path, size_bytes, mtime_ns, &
-                inode) bind(C, name='fx_immutable_file_info')
-            import :: c_char, c_int, c_long_long
-            character(kind=c_char), intent(in) :: path(*)
-            integer(c_long_long), intent(out) :: size_bytes, mtime_ns, inode
-        end function c_file_info
-
-        integer(c_int) function c_remove_tree(path) &
-                bind(C, name='fx_immutable_remove_tree')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-        end function c_remove_tree
     end interface
 
 contains
@@ -184,57 +140,48 @@ contains
         call verify_tree_depth(store, tree_id, 0, ierr)
     end subroutine immutable_store_verify_tree
 
-    recursive subroutine verify_tree_depth(store, tree_id, depth, ierr)
+    subroutine verify_tree_depth(store, tree_id, depth, ierr)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: tree_id
         integer, intent(in) :: depth
         integer, intent(out) :: ierr
-        type(immutable_tree_entry_t), allocatable :: entries(:)
-        character(len=:), allocatable :: raw, file_path
-        character(len=HASH_LEN) :: actual
-        integer :: i
-        integer(c_int) :: status
-        integer(c_long_long) :: c_size, c_mtime, c_inode
-        character(kind=c_char), allocatable :: c_file(:)
+        integer(c_int) :: root, cleanup
 
         ierr = IMMUTABLE_INVALID
-        if (.not. store%initialized .or. .not. immutable_id_valid(tree_id)) return
+        if (.not. store%initialized) return
+        root = owned_open_store(store%root_dir//c_null_char)
+        ierr = IMMUTABLE_CORRUPT
+        if (root < 0) return
+        call verify_owned_depth(root, tree_id, depth, ierr)
+        cleanup = owned_close(root)
+    end subroutine verify_tree_depth
+
+    recursive subroutine verify_owned_depth(root, tree_id, depth, ierr)
+        integer(c_int), intent(in) :: root
+        character(len=*), intent(in) :: tree_id
+        integer, intent(in) :: depth
+        integer, intent(out) :: ierr
+        type(immutable_tree_entry_t), allocatable :: entries(:)
+        character(len=:), allocatable :: raw
+        integer :: i
+        integer(c_int) :: fd, cleanup
+
+        ierr = IMMUTABLE_INVALID
         if (depth > 128) return
-        file_path = immutable_store_tree_path(store, tree_id)
-        call to_c_text(file_path, c_file)
-        status = c_file_info(c_file, c_size, c_mtime, c_inode)
-        if (status == 1_c_int) then
-            ierr = IMMUTABLE_MISSING
-            return
-        end if
-        if (status /= 0_c_int) then
-            ierr = IMMUTABLE_CORRUPT
-            return
-        end if
-        call immutable_store_hash_file(file_path, actual, ierr)
-        if (ierr /= IMMUTABLE_OK) return
-        if (actual /= tree_id) then
-            ierr = IMMUTABLE_CORRUPT
-            return
-        end if
-        call read_text_file(file_path, raw, ierr)
+        call owned_read_manifest(root, tree_id, raw, ierr)
         if (ierr /= IMMUTABLE_OK) return
         call immutable_manifest_parse(raw, entries, ierr)
         if (ierr /= IMMUTABLE_OK) return
-        if (.not. allocated(entries)) then
-            ierr = IMMUTABLE_CORRUPT
-            return
-        end if
         do i = 1, size(entries)
             if (entries(i)%kind == IMMUTABLE_BLOB) then
-                call immutable_store_verify_blob(store, entries(i)%object_id, ierr)
+                call owned_open_verified(root, 1_c_int, entries(i)%object_id, fd, ierr)
+                if (fd >= 0) cleanup = owned_close(fd)
             else
-                call verify_tree_depth(store, entries(i)%object_id, depth + 1, ierr)
+                call verify_owned_depth(root, entries(i)%object_id, depth + 1, ierr)
             end if
             if (ierr /= IMMUTABLE_OK) return
         end do
-        ierr = IMMUTABLE_OK
-    end subroutine verify_tree_depth
+    end subroutine verify_owned_depth
 
     subroutine immutable_store_materialize_tree(store, tree_id, dest_path, &
             strategy, used_clone, ierr)
@@ -243,119 +190,76 @@ contains
         integer, intent(in) :: strategy
         logical, intent(out) :: used_clone
         integer, intent(out) :: ierr
-        character(len=:), allocatable :: parent, temp_root
-        logical :: any_clone
-        integer :: cleanup
-        integer(c_int) :: status
-        character(kind=c_char), allocatable :: c_temp(:), c_dest(:)
+        integer(c_int) :: root, cleanup
+        type(c_ptr) :: transaction
 
         used_clone = .false.
+        ierr = IMMUTABLE_INVALID
+        if (.not. store%initialized) return
+        if (.not. immutable_id_valid(tree_id)) return
         if (strategy < IMMUTABLE_MATERIALIZE_AUTO .or. &
-            strategy > IMMUTABLE_MATERIALIZE_CLONE) then
-            ierr = IMMUTABLE_INVALID
-            return
+            strategy > IMMUTABLE_MATERIALIZE_CLONE) return
+        root = owned_open_store(store%root_dir//c_null_char)
+        ierr = IMMUTABLE_CORRUPT
+        if (root < 0) return
+        transaction = owned_begin_path(trim(dest_path)//c_null_char, 1_c_int)
+        ierr = IMMUTABLE_IO_ERROR
+        if (c_associated(transaction)) then
+            call owned_pause(transaction, 4_c_int)
+            call materialize_tree_contents(root, tree_id, transaction, &
+                DEFAULT_DIR_MODE, strategy, 0, used_clone, ierr)
+            call owned_dispose(transaction)
         end if
-        call immutable_store_verify_tree(store, tree_id, ierr)
-        if (ierr /= IMMUTABLE_OK) return
-        parent = path_dirname(dest_path)
-        call ensure_dir(parent, ierr)
-        if (ierr /= IMMUTABLE_OK) return
-        call make_tempdir(parent, temp_root, ierr)
-        if (ierr /= IMMUTABLE_OK) return
-        call materialize_tree_contents(store, tree_id, temp_root, strategy, &
-            any_clone, ierr)
-        if (ierr == IMMUTABLE_OK) then
-            call to_c_text(temp_root, c_temp)
-            status = c_chmod_sync(c_temp, int(DEFAULT_DIR_MODE, c_int))
-            if (status /= 0_c_int) ierr = IMMUTABLE_IO_ERROR
-        end if
-        if (ierr == IMMUTABLE_OK) then
-            call to_c_text(temp_root, c_temp)
-            call to_c_text(dest_path, c_dest)
-            status = c_publish_tree(c_temp, c_dest)
-            if (status == 1_c_int) then
-                ierr = IMMUTABLE_IO_ERROR
-            else if (status == 2_c_int) then
-                ierr = IMMUTABLE_UNSUPPORTED
-            else if (status /= 0_c_int) then
-                ierr = IMMUTABLE_IO_ERROR
-            end if
-        end if
-        if (ierr /= IMMUTABLE_OK) then
-            call to_c_text(temp_root, c_temp)
-            status = c_remove_tree(c_temp)
-            cleanup = int(status)
-        else
-            used_clone = any_clone
-        end if
+        cleanup = owned_close(root)
     end subroutine immutable_store_materialize_tree
 
-    recursive subroutine materialize_tree_contents(store, tree_id, dir_path, &
-            strategy, used_clone, ierr)
-        type(immutable_store_t), intent(in) :: store
-        character(len=*), intent(in) :: tree_id, dir_path
-        integer, intent(in) :: strategy
+    recursive subroutine materialize_tree_contents(root, tree_id, transaction, &
+            mode, strategy, depth, used_clone, ierr)
+        integer(c_int), intent(in) :: root
+        character(len=*), intent(in) :: tree_id
+        type(c_ptr), intent(in) :: transaction
+        integer, intent(in) :: mode, strategy, depth
         logical, intent(out) :: used_clone
         integer, intent(out) :: ierr
         type(immutable_tree_entry_t), allocatable :: entries(:)
-        character(len=:), allocatable :: manifest, tree_path, child
+        character(len=:), allocatable :: manifest
+        type(c_ptr) :: child
         logical :: child_clone
-        integer(c_int) :: status
-        integer :: i, read_err
-        character(kind=c_char), allocatable :: c_child(:)
+        integer(c_int) :: status, parent
+        integer :: i, child_kind
 
         used_clone = .false.
-        tree_path = immutable_store_tree_path(store, tree_id)
-        call read_text_file(tree_path, manifest, ierr)
+        ierr = IMMUTABLE_INVALID
+        if (depth > 128) return
+        call owned_read_manifest(root, tree_id, manifest, ierr)
         if (ierr /= IMMUTABLE_OK) return
+        call owned_pause(transaction, 3_c_int)
         call immutable_manifest_parse(manifest, entries, ierr)
         if (ierr /= IMMUTABLE_OK) return
+        parent = owned_fd(transaction)
         do i = 1, size(entries)
-            child = path_join(dir_path, entries(i)%path)
-            if (entries(i)%kind == IMMUTABLE_BLOB) then
-                call immutable_store_materialize_blob(store, &
-                    entries(i)%object_id, child, entries(i)%mode, strategy, &
-                    child_clone, ierr)
-                used_clone = used_clone .or. child_clone
+            child_kind = 0
+            if (entries(i)%kind == IMMUTABLE_TREE) child_kind = 1
+            child = owned_begin_at(parent, entries(i)%path//c_null_char, &
+                int(child_kind, c_int))
+            ierr = IMMUTABLE_IO_ERROR
+            if (.not. c_associated(child)) return
+            if (child_kind == 0) then
+                call owned_materialize_blob(child, root, entries(i)%object_id, &
+                    entries(i)%mode, strategy, child_clone, ierr)
             else
-                call to_c_text(child, c_child)
-                status = c_mkdir_mode(c_child, int(448, c_int))
-                if (status /= 0_c_int) then
-                    ierr = IMMUTABLE_IO_ERROR
-                    return
-                end if
-                call materialize_tree_contents(store, entries(i)%object_id, &
-                    child, strategy, child_clone, ierr)
-                if (ierr /= IMMUTABLE_OK) return
-                used_clone = used_clone .or. child_clone
-                call to_c_text(child, c_child)
-                status = c_chmod_sync(c_child, int(entries(i)%mode, c_int))
-                if (status /= 0_c_int) then
-                    ierr = IMMUTABLE_IO_ERROR
-                    return
-                end if
+                call materialize_tree_contents(root, entries(i)%object_id, child, &
+                    entries(i)%mode, strategy, depth + 1, child_clone, ierr)
             end if
+            call owned_dispose(child)
             if (ierr /= IMMUTABLE_OK) return
+            used_clone = used_clone .or. child_clone
         end do
-        read_err = sync_directory(dir_path)
-        if (read_err /= 0) ierr = IMMUTABLE_IO_ERROR
-    end subroutine materialize_tree_contents
-
-    subroutine make_tempdir(dir, path, ierr)
-        character(len=*), intent(in) :: dir
-        character(len=:), allocatable, intent(out) :: path
-        integer, intent(out) :: ierr
-        character(kind=c_char) :: c_out(PATH_LIMIT)
-        character(kind=c_char), allocatable :: c_dir(:)
-        integer(c_int) :: status
-        c_out = c_null_char
-        call to_c_text(dir, c_dir)
-        status = c_tempdir(c_dir, c_out, int(PATH_LIMIT, c_int))
+        status = owned_finish(transaction, int(mode, c_int))
         ierr = IMMUTABLE_IO_ERROR
-        if (status /= 0_c_int) return
-        path = from_c_text(c_out)
-        ierr = IMMUTABLE_OK
-    end subroutine make_tempdir
+        if (status == 0_c_int) ierr = IMMUTABLE_OK
+        if (status == 2_c_int) ierr = IMMUTABLE_UNSUPPORTED
+    end subroutine materialize_tree_contents
 
     subroutine make_tempfile(dir, path, ierr)
         character(len=*), intent(in) :: dir
@@ -399,29 +303,6 @@ contains
         status = c_fsync_file(c_path)
         if (status == 0_c_int) ierr = IMMUTABLE_OK
     end subroutine write_text_file
-    subroutine read_text_file(path, text, ierr)
-        character(len=*), intent(in) :: path
-        character(len=:), allocatable, intent(out) :: text
-        integer, intent(out) :: ierr
-        integer(int64) :: n_bytes
-        integer :: unit, ios
-        character(len=1), allocatable :: bytes(:)
-
-        inquire(file=path, size=n_bytes, iostat=ios)
-        ierr = IMMUTABLE_IO_ERROR
-        if (ios /= 0 .or. n_bytes < 0_int64 .or. &
-            n_bytes > int(huge(0), int64)) return
-        allocate(bytes(int(n_bytes)))
-        open(newunit=unit, file=path, status='old', access='stream', &
-            form='unformatted', action='read', iostat=ios)
-        if (ios /= 0) return
-        if (n_bytes > 0) read(unit, iostat=ios) bytes
-        close(unit)
-        if (ios /= 0) return
-        allocate(character(len=int(n_bytes)) :: text)
-        if (n_bytes > 0) text = transfer(bytes, text)
-        ierr = IMMUTABLE_OK
-    end subroutine read_text_file
 
     subroutine ensure_dir(path, ierr)
         character(len=*), intent(in) :: path
@@ -431,13 +312,6 @@ contains
         ierr = IMMUTABLE_IO_ERROR
         if (c_mkdirs(c_path) == 0_c_int) ierr = IMMUTABLE_OK
     end subroutine ensure_dir
-
-    integer function sync_directory(path)
-        character(len=*), intent(in) :: path
-        character(kind=c_char), allocatable :: c_path(:)
-        call to_c_text(path, c_path)
-        sync_directory = int(c_fsync_dir(c_path))
-    end function sync_directory
 
     subroutine to_c_text(text, c_string)
         character(len=*), intent(in) :: text
