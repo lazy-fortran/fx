@@ -12,11 +12,13 @@ module fx_action_cache
     use fx_immutable_manifest, only: immutable_tree_entry_t
     use fx_immutable_store, only: immutable_store_hash_file, &
         immutable_store_blob_path
+    use fx_immutable_constants, only: IMMUTABLE_OK
+    use fx_immutable_tree, only: immutable_store_verify_tree
     use fx_action_result_store, only: action_result_store_t, &
         action_result_read_t, action_result_read_acquire, &
         action_result_read_lookup, action_result_read_release, &
         action_result_store_init, &
-        action_result_preview, action_result_preview_confirm, &
+        action_result_manifest_preview, action_result_preview_confirm, &
         action_result_publish_files, action_result_lookup, &
         action_result_materialize_blob, action_result_file_mode, &
         action_result_compile_action_key, &
@@ -319,7 +321,7 @@ contains
         character(len=MAX_MOD_NAME) :: old_mod_name, old_smod_name
         integer :: ierr, i, init_status, release_status
         integer :: old_obj_size, old_mod_size, old_smod_size
-        integer :: preview_status
+        integer :: preview_status, verify_status
         logical :: local_ok, preview_ok
         logical :: old_has_mod, old_has_smod
 
@@ -330,7 +332,8 @@ contains
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
 
-        call action_result_preview(store, action_id, entries, result_id, ierr)
+        call action_result_manifest_preview(store, action_id, entries, &
+            result_id, ierr)
         preview_ok = ierr == ACTION_RESULT_OK
         if (preview_ok) then
             if (present(required_smod_name)) then
@@ -343,19 +346,23 @@ contains
             preview_ok = local_result_matches(entries, obj_path, mod_dir)
         end if
         if (preview_ok) then
-            call action_result_preview_confirm(store, action_id, result_id, &
-                preview_status)
-            if (preview_status == ACTION_RESULT_OK) then
-                if (present(output_id)) then
-                    output_id = result_id
-                    call restore_action_record(c, action_id, old_output, &
-                        old_object, old_obj_size, old_mod_name, old_mod, &
-                        old_mod_size, old_has_mod, old_smod_name, old_smod, &
-                        old_smod_size, old_has_smod, ierr)
-                    if (ierr == 0) output_id = old_output
+            call immutable_store_verify_tree(store%objects, result_id, &
+                verify_status)
+            if (verify_status == IMMUTABLE_OK) then
+                call action_result_preview_confirm(store, action_id, result_id, &
+                    preview_status)
+                if (preview_status == ACTION_RESULT_OK) then
+                    if (present(output_id)) then
+                        output_id = result_id
+                        call restore_action_record(c, action_id, old_output, &
+                            old_object, old_obj_size, old_mod_name, old_mod, &
+                            old_mod_size, old_has_mod, old_smod_name, old_smod, &
+                            old_smod_size, old_has_smod, ierr)
+                        if (ierr == 0) output_id = old_output
+                    end if
+                    restored = .true.
+                    return
                 end if
-                restored = .true.
-                return
             end if
         end if
 

@@ -56,7 +56,8 @@ module fx_action_result_store
     public :: action_result_lookup, action_result_conflicts
     public :: action_result_read_acquire, action_result_read_lookup, &
         action_result_read_release
-    public :: action_result_preview, action_result_preview_confirm
+    public :: action_result_preview, action_result_manifest_preview, &
+        action_result_preview_confirm
     public :: action_result_materialize_blob, action_result_action_key, &
         action_result_action_key_parts, action_result_compile_action_key
     public :: action_result_file_mode
@@ -405,8 +406,33 @@ contains
         type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
         character(len=HASH_LEN), intent(out) :: result_id
         integer, intent(out) :: ierr
-        character(len=HASH_LEN) :: key, snapshot
+        character(len=HASH_LEN) :: snapshot
         integer :: verify_status
+
+        result_id = ''
+        call action_result_manifest_preview(store, action_id, entries, &
+            snapshot, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
+        call immutable_store_verify_tree(store%objects, snapshot, verify_status)
+        if (verify_status /= IMMUTABLE_OK) then
+            if (allocated(entries)) deallocate(entries)
+            ierr = ACTION_RESULT_CORRUPT
+            return
+        end if
+        result_id = snapshot
+        ierr = ACTION_RESULT_OK
+    end subroutine action_result_preview
+
+    subroutine action_result_manifest_preview(store, action_id, entries, &
+            result_id, ierr)
+        !! Read the bound, descriptor-verified root manifest without traversing
+        !! its payload graph. Verify the graph before reporting a hit or restoring.
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: action_id
+        type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
+        character(len=HASH_LEN), intent(out) :: result_id
+        integer, intent(out) :: ierr
+        character(len=HASH_LEN) :: key, snapshot
 
         result_id = ''
         ierr = ACTION_RESULT_INVALID
@@ -416,15 +442,10 @@ contains
         call action_result_record_snapshot(store, key, snapshot, &
             .true., ACTION_RESULT_MISSING, ierr)
         if (ierr /= ACTION_RESULT_OK) return
-        call immutable_store_verify_tree(store%objects, snapshot, verify_status)
-        if (verify_status /= IMMUTABLE_OK) then
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
         call read_result_tree(store, snapshot, entries, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         result_id = snapshot
-    end subroutine action_result_preview
+    end subroutine action_result_manifest_preview
 
     subroutine action_result_preview_confirm(store, action_id, result_id, ierr)
         !! Confirm a preview still names the action's bound, non-conflicting result.
