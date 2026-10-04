@@ -244,8 +244,6 @@ contains
         integer, intent(out) :: ierr
         integer(c_int) :: root, cleanup
         type(c_ptr) :: transaction
-        type(immutable_lease_t) :: read_lease
-        integer :: lease_status
 
         used_clone = .false.
         ierr = IMMUTABLE_INVALID
@@ -254,19 +252,13 @@ contains
         if (mode < 0 .or. mode > 511 .or. strategy < &
             IMMUTABLE_MATERIALIZE_AUTO .or. strategy > &
             IMMUTABLE_MATERIALIZE_CLONE) return
-        call immutable_store_read_lease_acquire(store, 'fx-materialize', &
-            store%writer_start, 'blob-materialize', 'blob', object_id, &
-            read_lease, lease_status)
-        if (lease_status /= IMMUTABLE_OK) then
-            ierr = IMMUTABLE_IO_ERROR
-            return
-        end if
+        ! The owned path opens and verifies the source before copying from its
+        ! held descriptor, then verifies and atomically publishes the output.
+        ! A pre-open unlink is a cache miss; an opened FD survives unlink. Keep
+        ! tree/action graph leases across multi-file consumers independently.
         root = owned_open_store(store%root_dir//c_null_char)
         ierr = IMMUTABLE_CORRUPT
-        if (root < 0) then
-            call immutable_store_lease_release(store, read_lease, lease_status)
-            return
-        end if
+        if (root < 0) return
         transaction = owned_begin_path(trim(dest_path)//c_null_char, 0_c_int)
         ierr = IMMUTABLE_IO_ERROR
         if (c_associated(transaction)) then
@@ -275,8 +267,6 @@ contains
             call owned_dispose(transaction)
         end if
         cleanup = owned_close(root)
-        call immutable_store_lease_release(store, read_lease, lease_status)
-        if (lease_status /= IMMUTABLE_OK) ierr = IMMUTABLE_IO_ERROR
     end subroutine immutable_store_materialize_blob
 
     subroutine immutable_store_root_set(store, owner, owner_start, reason, &
