@@ -17,7 +17,8 @@ program test_action_result_store
         action_result_materialize_blob, ACTION_RESULT_OK, &
         ACTION_RESULT_CONFLICT, ACTION_RESULT_QUARANTINED, &
         ACTION_RESULT_MISSING, ACTION_RESULT_CORRUPT, &
-        action_result_action_key_parts, action_result_compile_action_key
+        action_result_action_key, action_result_action_key_parts, &
+        action_result_compile_action_key
     implicit none
 
     interface
@@ -344,7 +345,34 @@ contains
             'concurrent conflict evidence is durable')
         call test_assert(suite, includes_id(ids, race_result_a) .and. &
             includes_id(ids, race_result_b), 'conflict retains both result IDs')
+        call assert_action_root('conflict-race-action', 'conflict', race_result_a)
+        call assert_action_root('conflict-race-action', 'conflict', race_result_b)
     end subroutine test_conflicting_concurrent_publishers
+
+    subroutine assert_action_root(action_id, reason, object_id)
+        character(len=*), intent(in) :: action_id, reason, object_id
+        character(len=64) :: owner
+        character(len=2048) :: line
+        character(len=4096) :: metadata
+        integer :: unit, local_err
+        logical :: found
+
+        owner = action_result_action_key(action_id)
+        metadata = trim(root)//'/store/v2/.fx-metadata/leases'
+        found = .false.
+        open(newunit=unit, file=trim(metadata), status='old', action='read', &
+            iostat=local_err)
+        if (local_err == 0) then
+            do
+                read(unit, '(A)', iostat=local_err) line
+                if (local_err /= 0) exit
+                if (index(line, 'R||'//trim(owner)//'|fx-action-v1|'// &
+                    trim(reason)//'|tree|'//trim(object_id)) > 0) found = .true.
+            end do
+            close(unit)
+        end if
+        call test_assert(suite, found, 'action result graph has a durable root')
+    end subroutine assert_action_root
 
     subroutine test_crash_boundaries()
         call test_crash_before_conflict_rename()

@@ -1,5 +1,5 @@
 module fx_immutable_store
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_size_t, &
         c_null_char, c_ptr, c_associated
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t
@@ -25,16 +25,39 @@ module fx_immutable_store
 
     type, public :: immutable_store_t
         character(len=:), allocatable :: root_dir
+        character(len=:), allocatable :: writer_start
         logical :: initialized = .false.
     end type immutable_store_t
 
+    type, public :: immutable_lease_t
+        character(len=:), allocatable :: owner
+        character(len=:), allocatable :: owner_start
+        character(len=:), allocatable :: token
+        logical :: active = .false.
+    end type immutable_lease_t
+
 
     interface
+        integer(c_int) function c_lease_update(root, operation, owner, start, &
+                reason, token, kind, object_id, roots, out_token, &
+                out_capacity, epoch) bind(C, name='fx_immutable_lease_update')
+            import :: c_char, c_int, c_long_long, c_size_t
+            character(kind=c_char), intent(in) :: root(*), owner(*), start(*)
+            integer(c_int), value :: operation
+            character(kind=c_char), intent(in) :: reason(*), token(*)
+            character(kind=c_char), intent(in) :: kind(*), object_id(*), roots(*)
+            character(kind=c_char), intent(out) :: out_token(*)
+            integer(c_size_t), value :: out_capacity
+            integer(c_long_long), intent(out) :: epoch
+        end function c_lease_update
         integer(c_int) function c_mkdirs(path) &
                 bind(C, name='fx_immutable_mkdirs_sync')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function c_mkdirs
+        integer(c_int) function c_getpid() bind(C, name='getpid')
+            import :: c_int
+        end function c_getpid
 
     end interface
 
@@ -42,6 +65,12 @@ module fx_immutable_store
     public :: immutable_store_tree_path, immutable_store_put_blob
     public :: immutable_store_verify_blob
     public :: immutable_store_materialize_blob
+    public :: immutable_store_root_set
+    public :: immutable_store_reason_release
+    public :: immutable_store_read_lease_acquire
+    public :: immutable_store_publication_lease_acquire
+    public :: immutable_store_publication_commit
+    public :: immutable_store_lease_release
     public :: immutable_store_file_info
     public :: immutable_store_hash_file
     public :: IMMUTABLE_OK, IMMUTABLE_IO_ERROR, IMMUTABLE_INVALID
@@ -56,6 +85,9 @@ contains
         integer, intent(out) :: ierr
         character(kind=c_char), allocatable :: c_root(:)
         character(len=:), allocatable :: clean
+        integer(int64) :: start_tick
+        integer(c_int) :: pid
+        character(len=64) :: identity
 
         ierr = IMMUTABLE_INVALID
         clean = trim(root_dir)
@@ -66,6 +98,10 @@ contains
             return
         end if
         store%root_dir = clean
+        pid = c_getpid()
+        call system_clock(start_tick)
+        write(identity, '(A,I0,A,I0)') 'p', pid, 'c', start_tick
+        store%writer_start = trim(identity)
         store%initialized = .true.
         ierr = IMMUTABLE_OK
     end subroutine immutable_store_init
@@ -92,6 +128,9 @@ contains
         character(len=HASH_LEN), intent(out) :: object_id
         integer, intent(out) :: ierr
         integer :: status
+        type(immutable_lease_t) :: publication
+        character(len=4) :: kinds(1) = ['blob']
+        character(len=HASH_LEN) :: ids(1)
 
         object_id = ''
         ierr = IMMUTABLE_INVALID
@@ -107,7 +146,27 @@ contains
             return
         end if
 
+        ids(1) = object_id
+        call immutable_store_publication_lease_acquire(store, 'fx-publisher', &
+            store%writer_start, 'blob', kinds, ids, publication, status)
+        if (status /= IMMUTABLE_OK) then
+            ierr = IMMUTABLE_IO_ERROR
+            return
+        end if
+        call immutable_store_verify_blob(store, object_id, status)
+        if (status == IMMUTABLE_OK) then
+            call immutable_store_lease_release(store, publication, ierr)
+            return
+        end if
+        if (status /= IMMUTABLE_MISSING) then
+            call immutable_store_lease_release(store, publication, ierr)
+            ierr = status
+            return
+        end if
         call publish_blob_capture(store, source_path, object_id, ierr)
+        call immutable_store_lease_release(store, publication, status)
+        if (ierr == IMMUTABLE_OK .and. status /= IMMUTABLE_OK) &
+            ierr = IMMUTABLE_IO_ERROR
     end subroutine immutable_store_put_blob
 
     subroutine publish_blob_capture(store, source, id, ierr)
@@ -168,6 +227,8 @@ contains
         integer, intent(out) :: ierr
         integer(c_int) :: root, cleanup
         type(c_ptr) :: transaction
+        type(immutable_lease_t) :: read_lease
+        integer :: lease_status
 
         used_clone = .false.
         ierr = IMMUTABLE_INVALID
@@ -176,9 +237,19 @@ contains
         if (mode < 0 .or. mode > 511 .or. strategy < &
             IMMUTABLE_MATERIALIZE_AUTO .or. strategy > &
             IMMUTABLE_MATERIALIZE_CLONE) return
+        call immutable_store_read_lease_acquire(store, 'fx-materialize', &
+            store%writer_start, 'blob-materialize', 'blob', object_id, &
+            read_lease, lease_status)
+        if (lease_status /= IMMUTABLE_OK) then
+            ierr = IMMUTABLE_IO_ERROR
+            return
+        end if
         root = owned_open_store(store%root_dir//c_null_char)
         ierr = IMMUTABLE_CORRUPT
-        if (root < 0) return
+        if (root < 0) then
+            call immutable_store_lease_release(store, read_lease, lease_status)
+            return
+        end if
         transaction = owned_begin_path(trim(dest_path)//c_null_char, 0_c_int)
         ierr = IMMUTABLE_IO_ERROR
         if (c_associated(transaction)) then
@@ -187,7 +258,215 @@ contains
             call owned_dispose(transaction)
         end if
         cleanup = owned_close(root)
+        call immutable_store_lease_release(store, read_lease, lease_status)
+        if (lease_status /= IMMUTABLE_OK) ierr = IMMUTABLE_IO_ERROR
     end subroutine immutable_store_materialize_blob
+
+    subroutine immutable_store_root_set(store, owner, owner_start, reason, &
+            kinds, ids, ierr, epoch)
+        !! Replace one owner's reason roots atomically; repeating equal roots is a no-op.
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: owner, owner_start, reason, kinds(:), ids(:)
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+        integer(c_long_long) :: current_epoch
+        character(kind=c_char) :: ignored(256)
+        character(len=:), allocatable :: roots
+
+        current_epoch = 0_c_long_long
+        call build_root_rows(kinds, ids, roots, ierr)
+        if (ierr /= IMMUTABLE_OK) return
+        call lease_update(store, 1, owner, owner_start, reason, '', '', '', &
+            roots, ignored, current_epoch, ierr)
+        if (present(epoch)) epoch = int(current_epoch, int64)
+    end subroutine immutable_store_root_set
+
+    subroutine immutable_store_reason_release(store, owner, owner_start, reason, &
+            ierr, epoch)
+        !! Release only roots with this exact owner incarnation and reason.
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: owner, owner_start, reason
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+        integer(c_long_long) :: current_epoch
+        character(kind=c_char) :: ignored(1)
+
+        current_epoch = 0_c_long_long
+        call lease_update(store, 2, owner, owner_start, reason, '', '', '', '', &
+            ignored, current_epoch, ierr)
+        if (ierr == IMMUTABLE_MISSING) ierr = IMMUTABLE_OK
+        if (present(epoch)) epoch = int(current_epoch, int64)
+    end subroutine immutable_store_reason_release
+
+    subroutine immutable_store_read_lease_acquire(store, owner, owner_start, &
+            reason, kind, object_id, lease, ierr, epoch)
+        !! Acquire before opening/materializing an object and release this token later.
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: owner, owner_start, reason, kind, object_id
+        type(immutable_lease_t), intent(out) :: lease
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+
+        call acquire_lease(store, 3, owner, owner_start, reason, kind, object_id, &
+            lease, ierr, epoch)
+    end subroutine immutable_store_read_lease_acquire
+
+    subroutine immutable_store_publication_lease_acquire(store, owner, &
+            owner_start, reason, kinds, ids, lease, ierr, epoch)
+        !! Protect anticipated graph roots while payload bytes are copied outside the lock.
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: owner, owner_start, reason
+        character(len=*), intent(in) :: kinds(:), ids(:)
+        type(immutable_lease_t), intent(out) :: lease
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+        character(kind=c_char) :: ignored(256)
+        integer(c_long_long) :: current_epoch
+        character(len=:), allocatable :: roots
+
+        lease%active = .false.
+        current_epoch = 0_c_long_long
+        call build_root_rows(kinds, ids, roots, ierr)
+        if (ierr /= IMMUTABLE_OK) return
+        call lease_update(store, 5, owner, owner_start, reason, '', '', '', &
+            roots, ignored, current_epoch, ierr)
+        if (ierr == IMMUTABLE_OK) then
+            lease%owner = trim(owner)
+            lease%owner_start = trim(owner_start)
+            lease%token = from_c_text(ignored)
+            lease%active = .true.
+        end if
+        if (present(epoch)) epoch = int(current_epoch, int64)
+    end subroutine immutable_store_publication_lease_acquire
+
+    subroutine immutable_store_publication_commit(store, lease, reason, kinds, &
+            ids, ierr, epoch)
+        !! Atomically replace this publication lease with durable owner/reason roots.
+        type(immutable_store_t), intent(in) :: store
+        type(immutable_lease_t), intent(inout) :: lease
+        character(len=*), intent(in) :: reason, kinds(:), ids(:)
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+        integer(c_long_long) :: current_epoch
+        character(kind=c_char) :: ignored(1)
+        character(len=:), allocatable :: roots
+
+        ierr = IMMUTABLE_INVALID
+        if (.not. lease%active) return
+        call build_root_rows(kinds, ids, roots, ierr)
+        if (ierr /= IMMUTABLE_OK) return
+        call lease_update(store, 6, lease%owner, lease%owner_start, reason, &
+            lease%token, '', '', roots, ignored, current_epoch, ierr)
+        if (ierr == IMMUTABLE_OK) lease%active = .false.
+        if (present(epoch)) epoch = int(current_epoch, int64)
+    end subroutine immutable_store_publication_commit
+
+    subroutine immutable_store_lease_release(store, lease, ierr, epoch)
+        type(immutable_store_t), intent(in) :: store
+        type(immutable_lease_t), intent(inout) :: lease
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+        integer(c_long_long) :: current_epoch
+        character(kind=c_char) :: ignored(1)
+
+        ierr = IMMUTABLE_INVALID
+        if (.not. lease%active) return
+        call lease_update(store, 4, lease%owner, lease%owner_start, '', &
+            lease%token, '', '', '', ignored, current_epoch, ierr)
+        if (ierr == IMMUTABLE_OK) lease%active = .false.
+        if (present(epoch)) epoch = int(current_epoch, int64)
+    end subroutine immutable_store_lease_release
+
+    subroutine acquire_lease(store, operation, owner, owner_start, reason, &
+            kind, object_id, lease, ierr, epoch)
+        type(immutable_store_t), intent(in) :: store
+        integer, intent(in) :: operation
+        character(len=*), intent(in) :: owner, owner_start, reason, kind, object_id
+        type(immutable_lease_t), intent(out) :: lease
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+        integer(c_long_long) :: current_epoch
+        character(kind=c_char) :: token(256)
+
+        lease%active = .false.
+        call lease_update(store, operation, owner, owner_start, reason, '', kind, &
+            object_id, '', token, current_epoch, ierr)
+        if (ierr == IMMUTABLE_OK) then
+            lease%owner = trim(owner)
+            lease%owner_start = trim(owner_start)
+            lease%token = from_c_text(token)
+            lease%active = .true.
+        end if
+        if (present(epoch)) epoch = int(current_epoch, int64)
+    end subroutine acquire_lease
+
+    subroutine lease_update(store, operation, owner, owner_start, reason, token, &
+            kind, object_id, roots, out_token, epoch, ierr)
+        type(immutable_store_t), intent(in) :: store
+        integer, intent(in) :: operation
+        character(len=*), intent(in) :: owner, owner_start, reason, token
+        character(len=*), intent(in) :: kind, object_id, roots
+        character(kind=c_char), intent(out) :: out_token(*)
+        integer(c_long_long), intent(out) :: epoch
+        integer, intent(out) :: ierr
+        character(kind=c_char), allocatable :: c_root(:), c_owner(:), c_start(:)
+        character(kind=c_char), allocatable :: c_reason(:), c_token(:), c_kind(:)
+        character(kind=c_char), allocatable :: c_id(:), c_roots(:)
+        integer(c_int) :: status
+
+        ierr = IMMUTABLE_INVALID
+        epoch = 0_c_long_long
+        if (.not. store%initialized) return
+        call to_c_text(store%root_dir, c_root)
+        call to_c_text(owner, c_owner)
+        call to_c_text(owner_start, c_start)
+        call to_c_text(reason, c_reason)
+        call to_c_text(token, c_token)
+        call to_c_text(kind, c_kind)
+        call to_c_text(object_id, c_id)
+        call to_c_text(roots, c_roots)
+        status = c_lease_update(c_root, int(operation, c_int), c_owner, c_start, &
+            c_reason, c_token, c_kind, c_id, c_roots, out_token, &
+            int(256, c_size_t), epoch)
+        ierr = IMMUTABLE_IO_ERROR
+        if (status == 0_c_int) ierr = IMMUTABLE_OK
+        if (status == 1_c_int) ierr = IMMUTABLE_MISSING
+    end subroutine lease_update
+
+    subroutine build_root_rows(kinds, ids, roots, ierr)
+        character(len=*), intent(in) :: kinds(:), ids(:)
+        character(len=:), allocatable, intent(out) :: roots
+        integer, intent(out) :: ierr
+        integer :: i
+
+        roots = ''
+        ierr = IMMUTABLE_INVALID
+        if (size(kinds) /= size(ids)) return
+        do i = 1, size(kinds)
+            if (len_trim(kinds(i)) == 0) return
+            if (len_trim(kinds(i)) > 255) return
+            if (.not. immutable_id_valid(ids(i))) return
+            roots = roots//trim(kinds(i))//':'//trim(ids(i))//achar(10)
+        end do
+        if (len(roots) == 0) return
+        ierr = IMMUTABLE_OK
+    end subroutine build_root_rows
+
+    function from_c_text(bytes) result(text)
+        character(kind=c_char), intent(in) :: bytes(:)
+        character(len=:), allocatable :: text
+        integer :: i, n
+
+        n = 0
+        do i = 1, size(bytes)
+            if (bytes(i) == c_null_char) exit
+            n = n + 1
+        end do
+        allocate(character(len=n) :: text)
+        do i = 1, n
+            text(i:i) = bytes(i)
+        end do
+    end function from_c_text
 
     subroutine immutable_store_file_info(store, object_id, size_bytes, &
             mtime_ns, inode, ierr)

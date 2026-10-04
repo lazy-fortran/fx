@@ -7,7 +7,10 @@ module fx_immutable_tree
         IMMUTABLE_CORRUPT, IMMUTABLE_UNSUPPORTED, &
         IMMUTABLE_MATERIALIZE_AUTO, IMMUTABLE_MATERIALIZE_COPY, &
         IMMUTABLE_MATERIALIZE_CLONE, &
-        immutable_store_tree_path, immutable_store_verify_blob
+        immutable_store_tree_path, immutable_store_verify_blob, &
+        immutable_lease_t, &
+        immutable_store_publication_lease_acquire, &
+        immutable_store_read_lease_acquire, immutable_store_lease_release
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_read_manifest, owned_begin_path, owned_begin_at, owned_fd, &
         owned_pause, owned_materialize_blob, owned_finish, owned_dispose, owned_close, &
@@ -34,8 +37,11 @@ contains
         character(len=HASH_LEN), intent(out) :: tree_id
         integer, intent(out) :: ierr
         type(immutable_tree_entry_t), allocatable :: sorted(:)
+        type(immutable_lease_t) :: publication
+        character(len=4) :: kinds(1) = ['tree']
+        character(len=HASH_LEN) :: ids(1)
         character(len=:), allocatable :: manifest
-        integer :: i, status
+        integer :: i, status, lease_status
 
         tree_id = ''
         ierr = IMMUTABLE_INVALID
@@ -60,7 +66,27 @@ contains
             ierr = status
             return
         end if
+        ids(1) = tree_id
+        call immutable_store_publication_lease_acquire(store, 'fx-publisher', &
+            store%writer_start, 'tree', kinds, ids, publication, lease_status)
+        if (lease_status /= IMMUTABLE_OK) then
+            ierr = IMMUTABLE_IO_ERROR
+            return
+        end if
+        call immutable_store_verify_tree(store, tree_id, status)
+        if (status == IMMUTABLE_OK) then
+            call immutable_store_lease_release(store, publication, ierr)
+            return
+        end if
+        if (status /= IMMUTABLE_MISSING) then
+            call immutable_store_lease_release(store, publication, lease_status)
+            ierr = status
+            return
+        end if
         call publish_tree_capture(store, tree_id, manifest, ierr)
+        call immutable_store_lease_release(store, publication, lease_status)
+        if (ierr == IMMUTABLE_OK .and. lease_status /= IMMUTABLE_OK) &
+            ierr = IMMUTABLE_IO_ERROR
     end subroutine immutable_store_put_tree
 
     subroutine publish_tree_capture(store, id, manifest, ierr)
@@ -155,6 +181,8 @@ contains
         integer, intent(out) :: ierr
         integer(c_int) :: root, cleanup
         type(c_ptr) :: transaction
+        type(immutable_lease_t) :: read_lease
+        integer :: lease_status
 
         used_clone = .false.
         ierr = IMMUTABLE_INVALID
@@ -162,9 +190,19 @@ contains
         if (.not. immutable_id_valid(tree_id)) return
         if (strategy < IMMUTABLE_MATERIALIZE_AUTO .or. &
             strategy > IMMUTABLE_MATERIALIZE_CLONE) return
+        call immutable_store_read_lease_acquire(store, 'fx-materialize', &
+            store%writer_start, 'tree-materialize', 'tree', tree_id, &
+            read_lease, lease_status)
+        if (lease_status /= IMMUTABLE_OK) then
+            ierr = IMMUTABLE_IO_ERROR
+            return
+        end if
         root = owned_open_store(store%root_dir//c_null_char)
         ierr = IMMUTABLE_CORRUPT
-        if (root < 0) return
+        if (root < 0) then
+            call immutable_store_lease_release(store, read_lease, lease_status)
+            return
+        end if
         transaction = owned_begin_path(trim(dest_path)//c_null_char, 1_c_int)
         ierr = IMMUTABLE_IO_ERROR
         if (c_associated(transaction)) then
@@ -174,6 +212,8 @@ contains
             call owned_dispose(transaction)
         end if
         cleanup = owned_close(root)
+        call immutable_store_lease_release(store, read_lease, lease_status)
+        if (lease_status /= IMMUTABLE_OK) ierr = IMMUTABLE_IO_ERROR
     end subroutine immutable_store_materialize_tree
 
     recursive subroutine materialize_tree_contents(root, tree_id, transaction, &

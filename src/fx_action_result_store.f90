@@ -7,9 +7,13 @@ module fx_action_result_store
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_CORRUPT, &
         IMMUTABLE_MISSING
     use fx_immutable_manifest, only: immutable_tree_entry_t, &
-        immutable_id_valid, immutable_manifest_parse
+        immutable_id_valid, immutable_manifest_parse, &
+        immutable_entries_canonical, immutable_manifest_serialize
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
         immutable_store_put_blob, immutable_store_tree_path, &
+        immutable_lease_t, immutable_store_publication_lease_acquire, &
+        immutable_store_publication_commit, immutable_store_lease_release, &
+        immutable_store_reason_release, &
         immutable_store_materialize_blob, IMMUTABLE_MATERIALIZE_AUTO
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_verify_tree
@@ -154,11 +158,15 @@ contains
         integer, intent(out) :: ierr
 
         character(len=HASH_LEN) :: key, current, ids(2), temporary_id
-        character(len=:), allocatable :: record
+        character(len=HASH_LEN) :: root_ids(2)
+        character(len=4) :: root_kinds(2)
+        character(len=:), allocatable :: record, manifest
+        type(immutable_tree_entry_t), allocatable :: sorted_entries(:)
+        type(immutable_lease_t) :: publication_lease
         character(kind=c_char), allocatable :: c_root(:), c_key(:), c_record(:)
         character(kind=c_char) :: existing(RECORD_LIMIT)
         integer(c_int) :: lock, count, rc, unlock_rc
-        integer :: verify_status, parse_status
+        integer :: verify_status, parse_status, root_status
 
         result_id = ''
         ierr = ACTION_RESULT_INVALID
@@ -166,8 +174,27 @@ contains
         key = action_result_action_key(action_id)
         if (.not. immutable_id_valid(key)) return
 
-        call immutable_store_put_tree(store%objects, entries, result_id, verify_status)
+        call immutable_entries_canonical(entries, sorted_entries, verify_status)
         if (verify_status /= IMMUTABLE_OK) then
+            ierr = ACTION_RESULT_CORRUPT
+            return
+        end if
+        manifest = immutable_manifest_serialize(sorted_entries)
+        result_id = sha256_string(manifest)
+        root_kinds = 'tree'
+        root_ids(1) = result_id
+        call immutable_store_publication_lease_acquire(store%objects, key, &
+            'fx-action-v1', 'publication', root_kinds(1:1), root_ids(1:1), &
+            publication_lease, root_status)
+        if (root_status /= IMMUTABLE_OK) then
+            ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        call immutable_store_put_tree(store%objects, sorted_entries, result_id, &
+            verify_status)
+        if (verify_status /= IMMUTABLE_OK) then
+            call immutable_store_lease_release(store%objects, publication_lease, &
+                root_status)
             ierr = ACTION_RESULT_CORRUPT
             return
         end if
@@ -176,6 +203,8 @@ contains
         call to_c_text(key, c_key)
         lock = c_action_lock(c_root, c_key)
         if (lock < 0_c_int) then
+            call immutable_store_lease_release(store%objects, publication_lease, &
+                root_status)
             ierr = ACTION_RESULT_IO_ERROR
             return
         end if
@@ -186,10 +215,21 @@ contains
             unlock_rc = c_action_unlock(lock)
             if (ierr == ACTION_RESULT_OK .and. unlock_rc /= 0_c_int) &
                 ierr = ACTION_RESULT_IO_ERROR
+            if (ierr == ACTION_RESULT_OK) then
+                call immutable_store_publication_commit(store%objects, &
+                    publication_lease, 'bound', root_kinds(1:1), &
+                    root_ids(1:1), root_status)
+                if (root_status /= IMMUTABLE_OK) ierr = ACTION_RESULT_IO_ERROR
+            else
+                call immutable_store_lease_release(store%objects, &
+                    publication_lease, root_status)
+            end if
             return
         end if
         if (rc /= 0_c_int) then
             unlock_rc = c_action_unlock(lock)
+            call immutable_store_lease_release(store%objects, publication_lease, &
+                root_status)
             ierr = ACTION_RESULT_CORRUPT
             return
         end if
@@ -198,18 +238,28 @@ contains
             parse_status)
         if (parse_status == ACTION_RECORD_CONFLICT) then
             unlock_rc = c_action_unlock(lock)
+            root_ids = ids
+            call immutable_store_publication_commit(store%objects, &
+                publication_lease, 'conflict', root_kinds, root_ids, root_status)
             ierr = ACTION_RESULT_QUARANTINED
+            if (root_status /= IMMUTABLE_OK) ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         if (parse_status /= ACTION_RECORD_BOUND) then
             unlock_rc = c_action_unlock(lock)
+            call immutable_store_lease_release(store%objects, publication_lease, &
+                root_status)
             ierr = ACTION_RESULT_CORRUPT
             return
         end if
         if (current == result_id) then
             unlock_rc = c_action_unlock(lock)
-            ierr = merge(ACTION_RESULT_OK, ACTION_RESULT_IO_ERROR, &
-                unlock_rc == 0_c_int)
+            call immutable_store_publication_commit(store%objects, &
+                publication_lease, 'bound', root_kinds(1:1), root_ids(1:1), &
+                root_status)
+            ierr = ACTION_RESULT_OK
+            if (unlock_rc /= 0_c_int .or. root_status /= IMMUTABLE_OK) &
+                ierr = ACTION_RESULT_IO_ERROR
             return
         end if
 
@@ -223,6 +273,20 @@ contains
         record = action_result_conflict_record(key, ids)
         call write_record(c_root, c_key, record, ierr)
         unlock_rc = c_action_unlock(lock)
+        root_ids = ids
+        if (ierr == ACTION_RESULT_OK) then
+            call immutable_store_publication_commit(store%objects, &
+                publication_lease, 'conflict', root_kinds, root_ids, root_status)
+            if (root_status == IMMUTABLE_OK) then
+                call immutable_store_reason_release(store%objects, key, &
+                    'fx-action-v1', 'bound', root_status)
+            else
+                ierr = ACTION_RESULT_IO_ERROR
+            end if
+        else
+            call immutable_store_lease_release(store%objects, publication_lease, &
+                root_status)
+        end if
         if (ierr == ACTION_RESULT_OK .and. unlock_rc == 0_c_int) &
             ierr = ACTION_RESULT_CONFLICT
         if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR

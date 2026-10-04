@@ -1,0 +1,321 @@
+program test_immutable_leases
+    use fx_test, only: test_suite_t, test_suite_init, test_assert, &
+        test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
+        test_suite_exit
+    use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
+        IMMUTABLE_OK, immutable_store_init, immutable_store_put_blob, &
+        immutable_store_blob_path, immutable_store_root_set, &
+        immutable_store_reason_release, &
+        immutable_store_publication_lease_acquire, &
+        immutable_store_publication_commit, immutable_store_read_lease_acquire, &
+        immutable_store_lease_release
+    use fx_proc, only: proc_pid, proc_exec, proc_kill, proc_result_t
+    implicit none
+
+    type(test_suite_t) :: suite
+    type(immutable_store_t) :: store
+    type(immutable_lease_t) :: publication, reader
+    character(len=512) :: root, source, executable, marker, command, pid_text
+    character(len=64) :: object_id, ids(1)
+    character(len=8) :: kinds(1) = ['blob    ']
+    character(len=1) :: bytes(8) = ['l', 'e', 'a', 's', 'e', 's', '!', char(10)]
+    integer(kind=8) :: epoch1, epoch2, epoch3
+    integer :: ierr, status, ios, child_pid
+    logical :: exists
+
+    call get_command_argument(1, command)
+    if (trim(command) == '--barrier-worker') then
+        call barrier_worker()
+        stop 0
+    end if
+    if (trim(command) == '--crash-worker') then
+        call crash_worker()
+        stop 0
+    end if
+    call test_suite_init(suite, 'fx_immutable_leases')
+    write(root, '(A,I0)') '/var/tmp/fx_leases_', proc_pid()
+    call immutable_store_init(store, trim(root), ierr)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'lease store initializes')
+    source = trim(root)//'/source'
+    call write_bytes(trim(source), bytes, ierr)
+    call immutable_store_put_blob(store, trim(source), object_id, ierr)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'lease fixture blob publishes')
+    ids(1) = object_id
+
+    call immutable_store_root_set(store, 'owner_a', 'start_1', 'result', &
+        kinds, ids, ierr, epoch1)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'root owner A registers')
+    call immutable_store_root_set(store, 'owner_a', 'start_1', 'result', &
+        kinds, ids, ierr, epoch2)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'equal root publication succeeds')
+    call test_assert(suite, epoch1 == epoch2, 'equal root publication is idempotent')
+    call immutable_store_root_set(store, 'owner_b', 'start_2', 'result', &
+        kinds, ids, ierr, epoch2)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'root owner B registers')
+    call immutable_store_reason_release(store, 'owner_a', 'stale_start', 'result', &
+        ierr, epoch3)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'stale release is harmless')
+    call test_assert(suite, epoch2 == epoch3, 'stale owner identity changes no roots')
+    call immutable_store_reason_release(store, 'owner_a', 'start_1', 'result', &
+        ierr, epoch3)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'owner A releases its reason')
+    call test_assert(suite, epoch3 > epoch2, 'root release advances the epoch')
+    call assert_metadata_has(suite, trim(root)//'/.fx-metadata/leases', &
+        'R||owner_b|start_2|result|blob|'//trim(object_id), &
+        'owner B root remains after A release')
+
+    call immutable_store_publication_lease_acquire(store, 'owner_c', 'start_3', &
+        'publish', kinds, ids, publication, ierr, epoch1)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'publication lease acquired')
+    call immutable_store_publication_commit(store, publication, 'result', kinds, &
+        ids, ierr, epoch2)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'publication commits atomically')
+    call test_assert(suite, epoch2 > epoch1, 'publication commit advances epoch')
+    call immutable_store_read_lease_acquire(store, 'reader_a', 'reader_start', &
+        'materialize', 'blob', object_id, reader, ierr, epoch1)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'read lease acquired')
+    call immutable_store_lease_release(store, reader, ierr, epoch2)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'read lease releases')
+
+    call test_concurrent_publication_barrier(suite, trim(root), trim(object_id))
+
+    call get_command_argument(0, executable)
+    marker = trim(root)//'/crash-ready'
+    command = '"'//trim(executable)//'" --crash-worker "'//trim(root)// &
+        '" "'//trim(object_id)//'" "'//trim(marker)//'" >/dev/null 2>&1 & echo $!'
+    call run_shell(trim(command), pid_text, status)
+    read(pid_text, *, iostat=ios) child_pid
+    call test_assert(suite, status == 0 .and. ios == 0, &
+        'crash worker starts as a separate process')
+    call wait_for_file(trim(marker), exists)
+    call test_assert(suite, exists, 'crash worker durably commits its root')
+    if (ios == 0) call proc_kill(child_pid, 9, ierr)
+    call test_assert(suite, ierr == 0, 'committed-root worker is killed')
+    call read_metadata_epoch(trim(root)//'/.fx-metadata/leases', epoch3, ierr)
+    call test_assert_equal_int(suite, 0, ierr, &
+        'restarted reader opens committed root metadata')
+    call test_assert(suite, epoch3 >= epoch2, 'recovered epoch is monotonic')
+    call assert_metadata_has(suite, trim(root)//'/.fx-metadata/leases', &
+        'R||crash_owner|crash_start|recovered|blob|'//trim(object_id), &
+        'crash recovery preserves committed root')
+
+    inquire(file=immutable_store_blob_path(store, object_id), exist=exists)
+    call test_assert(suite, exists, 'lease updates and releases delete no blob')
+    call assert_no_deletion_api(suite)
+    call test_suite_summary(suite)
+    call test_suite_exit(suite)
+
+contains
+
+    subroutine crash_worker()
+        type(immutable_store_t) :: child_store
+        character(len=512) :: child_root, ready
+        character(len=64) :: child_id
+        character(len=64) :: child_ids(1)
+        character(len=8) :: child_kinds(1) = ['blob    ']
+        integer :: local_err, unit
+
+        call get_command_argument(2, child_root)
+        call get_command_argument(3, child_id)
+        call get_command_argument(4, ready)
+        call immutable_store_init(child_store, trim(child_root), local_err)
+        child_ids(1) = child_id
+        call immutable_store_root_set(child_store, 'crash_owner', 'crash_start', &
+            'recovered', child_kinds, child_ids, local_err)
+        if (local_err /= IMMUTABLE_OK) stop 41
+        open(newunit=unit, file=trim(ready), status='replace', action='write')
+        write(unit, '(A)') 'ready'
+        close(unit)
+        do
+        end do
+    end subroutine crash_worker
+
+    subroutine barrier_worker()
+        type(immutable_store_t) :: child_store
+        type(immutable_lease_t) :: child_lease
+        character(len=512) :: child_root, owner, owner_start
+        character(len=512) :: ready, release, done
+        character(len=64) :: child_id, child_ids(1)
+        character(len=8) :: child_kinds(1) = ['blob    ']
+        integer :: local_err, unit
+
+        call get_command_argument(2, child_root)
+        call get_command_argument(3, owner)
+        call get_command_argument(4, owner_start)
+        call get_command_argument(5, child_id)
+        call get_command_argument(6, ready)
+        call get_command_argument(7, release)
+        call get_command_argument(8, done)
+        call immutable_store_init(child_store, trim(child_root), local_err)
+        child_ids(1) = child_id
+        call immutable_store_publication_lease_acquire(child_store, trim(owner), &
+            trim(owner_start), 'parallel', child_kinds, child_ids, child_lease, &
+            local_err)
+        if (local_err /= IMMUTABLE_OK) stop 42
+        open(newunit=unit, file=trim(ready), status='replace', action='write')
+        write(unit, '(A)') 'ready'
+        close(unit)
+        call wait_for_file(trim(release), exists)
+        if (.not. exists) stop 43
+        call immutable_store_publication_commit(child_store, child_lease, &
+            'parallel', child_kinds, child_ids, local_err)
+        if (local_err /= IMMUTABLE_OK) stop 44
+        open(newunit=unit, file=trim(done), status='replace', action='write')
+        write(unit, '(A)') 'committed'
+        close(unit)
+    end subroutine barrier_worker
+
+    subroutine test_concurrent_publication_barrier(s, base, id)
+        type(test_suite_t), intent(inout) :: s
+        character(len=*), intent(in) :: base, id
+        character(len=512) :: child, ready_a, ready_b, done_a, done_b
+        character(len=2048) :: release, shell_line
+        character(len=512) :: shell_output
+        integer :: shell_status
+        logical :: ready
+
+        call get_command_argument(0, child)
+        ready_a = trim(base)//'/parallel-a-ready'
+        ready_b = trim(base)//'/parallel-b-ready'
+        done_a = trim(base)//'/parallel-a-done'
+        done_b = trim(base)//'/parallel-b-done'
+        release = trim(base)//'/parallel-release'
+        shell_line = '"'//trim(child)//'" --barrier-worker "'//trim(base)// &
+            '" owner_d start_4 "'//id//'" "'//trim(ready_a)//'" "'// &
+            trim(release)//'" "'//trim(done_a)// &
+            '" >/dev/null 2>&1 & "'//trim(child)// &
+            '" --barrier-worker "'//trim(base)// &
+            '" owner_e start_5 "'//id//'" "'//trim(ready_b)//'" "'// &
+            trim(release)//'" "'//trim(done_b)//'" >/dev/null 2>&1 & exit 0'
+        call run_shell(trim(shell_line), shell_output, shell_status)
+        call wait_for_file(trim(ready_a), ready)
+        call test_assert(s, ready, 'publisher A holds its lease at barrier')
+        call wait_for_file(trim(ready_b), ready)
+        call test_assert(s, ready, 'publisher B holds its lease at barrier')
+        call create_marker(trim(release))
+        call test_assert_equal_int(s, 0, shell_status, 'barrier workers launch')
+        call wait_for_file(trim(done_a), ready)
+        call test_assert(s, ready, 'publisher A commits after the barrier')
+        call wait_for_file(trim(done_b), ready)
+        call test_assert(s, ready, 'publisher B commits after the barrier')
+        call assert_metadata_has(s, trim(base)//'/.fx-metadata/leases', &
+            'R||owner_d|start_4|parallel|blob|'//id, &
+            'concurrent publisher A root is retained')
+        call assert_metadata_has(s, trim(base)//'/.fx-metadata/leases', &
+            'R||owner_e|start_5|parallel|blob|'//id, &
+            'concurrent publisher B root is retained')
+    end subroutine test_concurrent_publication_barrier
+
+    subroutine write_bytes(path, content, local_err)
+        character(len=*), intent(in) :: path
+        character(len=1), intent(in) :: content(:)
+        integer, intent(out) :: local_err
+        integer :: unit, i
+
+        open(newunit=unit, file=path, status='replace', access='stream', &
+            form='unformatted', iostat=local_err)
+        if (local_err /= 0) return
+        do i = 1, size(content)
+            write(unit, iostat=local_err) content(i)
+            if (local_err /= 0) exit
+        end do
+        close(unit)
+    end subroutine write_bytes
+
+    subroutine create_marker(path)
+        character(len=*), intent(in) :: path
+        integer :: unit
+
+        open(newunit=unit, file=path, status='replace', action='write')
+        write(unit, '(A)') 'release'
+        close(unit)
+    end subroutine create_marker
+
+    subroutine run_shell(line, output, exit_code)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exit_code
+        ! Use fx_proc's subprocess wrapper so the oracle does not call shell APIs
+        ! from the production store implementation.
+        character(len=8192) :: argv(3)
+        type(proc_result_t) :: result
+
+        argv(1) = '/bin/sh'
+        argv(2) = '-c'
+        argv(3) = line
+        call proc_exec(argv, 3, result)
+        output = ''
+        if (allocated(result%stdout_text)) output = result%stdout_text
+        exit_code = result%exit_code
+    end subroutine run_shell
+
+    subroutine wait_for_file(path, found)
+        character(len=*), intent(in) :: path
+        logical, intent(out) :: found
+        integer :: i
+
+        found = .false.
+        do i = 1, 500
+            inquire(file=path, exist=found)
+            if (found) return
+            call delay_tick()
+        end do
+    end subroutine wait_for_file
+
+    subroutine delay_tick()
+        integer :: local_err
+
+        call execute_command_line('sleep 0.01', wait=.true., exitstat=local_err)
+    end subroutine delay_tick
+
+    subroutine assert_metadata_has(s, path, needle, label)
+        type(test_suite_t), intent(inout) :: s
+        character(len=*), intent(in) :: path, needle, label
+        character(len=2048) :: line
+        integer :: unit, local_err
+        logical :: found
+
+        found = .false.
+        open(newunit=unit, file=path, status='old', action='read', &
+            iostat=local_err)
+        if (local_err == 0) then
+            do
+                read(unit, '(A)', iostat=local_err) line
+                if (local_err /= 0) exit
+                if (index(line, needle) > 0) found = .true.
+            end do
+            close(unit)
+        end if
+        call test_assert(s, found, label)
+    end subroutine assert_metadata_has
+
+    subroutine read_metadata_epoch(path, value, local_err)
+        character(len=*), intent(in) :: path
+        integer(kind=8), intent(out) :: value
+        integer, intent(out) :: local_err
+        character(len=128) :: line
+        integer :: unit, sep
+
+        value = -1
+        open(newunit=unit, file=path, status='old', action='read', &
+            iostat=local_err)
+        if (local_err /= 0) return
+        read(unit, '(A)', iostat=local_err) line
+        close(unit)
+        if (local_err /= 0) return
+        sep = index(line, '|')
+        if (sep <= 0) then
+            local_err = 1
+            return
+        end if
+        read(line(sep + 1:), *, iostat=local_err) value
+    end subroutine read_metadata_epoch
+
+    subroutine assert_no_deletion_api(s)
+        type(test_suite_t), intent(inout) :: s
+        logical :: found
+
+        inquire(file=immutable_store_blob_path(store, object_id), exist=found)
+        call test_assert(s, found, 'collection-disabled phase exposes no delete operation')
+    end subroutine assert_no_deletion_api
+end program test_immutable_leases
