@@ -47,6 +47,16 @@ int fx_test_find_server(const char *test_binary, char *out, int capacity) {
     }
     if (!slash) return 0;
     size_t directory_len = (size_t)(slash - test_binary);
+    /* fo builds this worktree's app and test into the same bin directory. */
+    const char fo_directory[] = "/build/fo/bin";
+    if (directory_len >= sizeof(fo_directory) - 1 &&
+        memcmp(test_binary + directory_len - (sizeof(fo_directory) - 1),
+               fo_directory, sizeof(fo_directory) - 1) == 0) {
+        if (directory_len + sizeof("/fx-mcp-server") > (size_t)capacity) return 0;
+        memcpy(out, test_binary, directory_len);
+        strcpy(out + directory_len, "/fx-mcp-server");
+        return access(out, X_OK) == 0;
+    }
     if (directory_len + sizeof("/../app/fx-mcp-server") > (size_t)capacity) return 0;
     memcpy(out, test_binary, directory_len);
     strcpy(out + directory_len, "/../app/fx-mcp-server");

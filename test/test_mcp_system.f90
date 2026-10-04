@@ -1,36 +1,9 @@
 program test_mcp_system
     use iso_c_binding, only: c_int,c_char,c_ptr,c_null_ptr,c_null_char,c_associated
     use mcp_test_json, only: document_t,parse_json,child,string_is,atom_is,array_size
+    use fx_mcp_test_os, only: fx_test_spawn, fx_test_find_server, fx_test_write, &
+        fx_test_read, fx_test_close
     implicit none
-    interface
-        type(c_ptr) function fx_test_spawn(path) bind(C)
-            import c_ptr,c_char
-            character(kind=c_char), intent(in) :: path(*)
-        end function
-        integer(c_int) function fx_test_find_server(test_binary,path,n) bind(C)
-            import c_int,c_char
-            character(kind=c_char), intent(in) :: test_binary(*)
-            character(kind=c_char), intent(out) :: path(*)
-            integer(c_int), value :: n
-        end function
-        integer(c_int) function fx_test_write(handle,bytes,n) bind(C)
-            import c_ptr,c_char,c_int
-            type(c_ptr), value :: handle
-            character(kind=c_char), intent(in) :: bytes(*)
-            integer(c_int), value :: n
-        end function
-        integer(c_int) function fx_test_read(handle,bytes,n,timeout) bind(C)
-            import c_ptr,c_char,c_int
-            type(c_ptr), value :: handle
-            character(kind=c_char), intent(out) :: bytes(*)
-            integer(c_int), value :: n,timeout
-        end function
-        integer(c_int) function fx_test_close(handle,timeout) bind(C)
-            import c_ptr,c_int
-            type(c_ptr), value :: handle
-            integer(c_int), value :: timeout
-        end function
-    end interface
     type :: session_t
         type(c_ptr) :: handle=c_null_ptr
         character(len=:), allocatable :: pending
@@ -88,7 +61,9 @@ contains
         if(framed) then; label='Content-Length'; else; label='bare JSON'; end if
         write(*,'(A)') '--- '//trim(label)//' ---'
 
-        request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+        request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":'// &
+            '{"protocolVersion":"2025-03-26","capabilities":{},'// &
+            '"clientInfo":{"name":"test","version":"1.0"}}}'
         call send_request(s,request,framed)
         call receive_response(s,framed,response)
         call parse_json(response,d); root=1
@@ -116,7 +91,8 @@ contains
         call check(array_size(d,tools)>0,'tools/list contains at least one tool')
 
         call send_request(s,'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"fx","arguments":{"action":"check"}}}',framed)
-        call send_request(s,'{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fx","arguments":{"action":"status"}}}',framed)
+        call send_request(s,'{"jsonrpc":"2.0","id":4,"method":"tools/call",'// &
+            '"params":{"name":"fx","arguments":{"action":"status"}}}',framed)
         call receive_response(s,framed,response); call parse_json(response,d)
         call check(atom_is(d,child(d,1,'id'),'4').and.child(d,1,'result')>0, &
             'tools/call notification is silent and request ID is retained')
@@ -140,14 +116,16 @@ contains
         call receive_response(s,framed,response); call parse_json(response,d); error=child(d,1,'error')
         call check(atom_is(d,child(d,error,'code'),'-32601'),'unknown method uses method-not-found')
         if(framed) then
-            call send_raw(s,'Content-Length: 2'//achar(13)//achar(10)//achar(13)//achar(10)//'}{',framed)
+            call send_raw(s,'Content-Length: 2'//achar(13)//achar(10)// &
+                achar(13)//achar(10)//'}{')
         else
-            call send_raw(s,'{"jsonrpc":"2.0","id":13,"method":"broken'//achar(10),framed)
+            call send_raw(s,'{"jsonrpc":"2.0","id":13,"method":"broken'//achar(10))
         end if
         call receive_response(s,framed,response); call parse_json(response,d); error=child(d,1,'error')
         call check(atom_is(d,child(d,error,'code'),'-32700'),'malformed JSON returns parse error')
         if(framed) then
-            call send_raw(s,'Content-Length: abc'//achar(13)//achar(10)//achar(13)//achar(10),framed)
+            call send_raw(s,'Content-Length: abc'//achar(13)//achar(10)// &
+                achar(13)//achar(10))
             call receive_response(s,framed,response); call parse_json(response,d); error=child(d,1,'error')
             call check(atom_is(d,child(d,error,'code'),'-32700'),'malformed length header returns parse error')
             call send_request(s,'{"jsonrpc":"2.0","id":12,"method":"ping"}',framed)
@@ -167,7 +145,8 @@ contains
         character(len=:),allocatable::out,pre,suf
         character(len=12)::idtxt
         write(idtxt,'(I0)') id
-        pre='{"jsonrpc":"2.0","id":'//trim(idtxt)//',"method":"tools/call","params":{"name":"fx","arguments":{"action":"status","payload":"'
+        pre='{"jsonrpc":"2.0","id":'//trim(idtxt)//',"method":"tools/call",'// &
+            '"params":{"name":"fx","arguments":{"action":"status","payload":"'
         suf='"}}}'
         out=pre//repeat('x',max(0,target-len(pre)-len(suf)))//suf
         nbytes=len(out)
@@ -180,16 +159,16 @@ contains
         character(len=32)::num
         if(framed) then
             write(num,'(I0)') len(body)
-            call send_raw(s,'Content-Length: '//trim(num)//achar(13)//achar(10)//achar(13)//achar(10)//body,framed)
+            call send_raw(s,'Content-Length: '//trim(num)//achar(13)//achar(10)// &
+                achar(13)//achar(10)//body)
         else
-            call send_raw(s,body//achar(10),framed)
+            call send_raw(s,body//achar(10))
         end if
     end subroutine
 
-    subroutine send_raw(s,bytes,framed)
+    subroutine send_raw(s,bytes)
         type(session_t),intent(inout)::s
         character(len=*),intent(in)::bytes
-        logical,intent(in)::framed
         integer(c_int)::n
         n=fx_test_write(s%handle,bytes,int(len(bytes),c_int))
         call check(n==len(bytes),'request bytes written')
@@ -233,7 +212,9 @@ contains
         type(session_t),intent(inout)::s
         integer,intent(in)::n
         character(len=:),allocatable,intent(out)::out
-        do while(len(s%pending)<n.and..not.s%io_failed); call more(s); end do
+        do while(len(s%pending)<n.and..not.s%io_failed)
+            call more(s)
+        end do
         if(len(s%pending)<n) then; out=''; return; end if
         out=s%pending(:n); s%pending=s%pending(n+1:)
     end subroutine
@@ -250,7 +231,9 @@ contains
             call check(.false.,'server output arrives before timeout')
             return
         end if
-        do i=1,n; chunk(i:i)=buf(i); end do
+        do i=1,n
+            chunk(i:i)=buf(i)
+        end do
         if(.not.allocated(s%pending)) s%pending=''
         s%pending=s%pending//chunk(:n)
     end subroutine

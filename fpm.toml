@@ -11,6 +11,9 @@ auto-executables = true
 [install]
 library = true
 
+[dev-dependencies]
+fx_mcp_test_os = { path = "test-support/fx_mcp_test_os" }
+
 [[executable]]
 name = "fx-mcp-server"
 source-dir = "app"
