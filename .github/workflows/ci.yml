@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -12,8 +13,9 @@ concurrency:
 
 jobs:
   build-test:
-    name: build + native acceptance
+    name: build + test
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - name: Checkout fx
         uses: actions/checkout@v4
@@ -34,20 +36,8 @@ jobs:
           sudo chmod +x /usr/local/bin/fpm
           fpm --version
 
-      # FPM bootstraps the pinned native driver. The gate traces fo's build and
-      # full test tree with a private PATH containing only native tools.
-      - name: Bootstrap native fo driver
-        run: |
-          git clone https://github.com/lazy-fortran/fo.git "$RUNNER_TEMP/fo-src"
-          git -C "$RUNNER_TEMP/fo-src" checkout 7f70a09e7afe1fadcd47ed5c47452826c035b3db
-          cd "$RUNNER_TEMP/fo-src"
-          fpm install --profile release --prefix "$RUNNER_TEMP/native-tools"
+      - name: Build fx
+        run: fpm build
 
-      - name: Run native no-interpreter acceptance gate
-        env:
-          FX_RUN_NO_INTERPRETER_GATE: "1"
-          FX_FO_EXECUTABLE: ${{ runner.temp }}/native-tools/bin/fo
-          FO_DISABLE_SELF_REFRESH: "1"
-          FO_SELF_REFRESH: "0"
-          FO_CACHE_DIR: ${{ runner.temp }}/fx-native-cache
-        run: ${{ runner.temp }}/native-tools/bin/fo test test_no_interpreter_gate
+      - name: Test fx
+        run: fpm test

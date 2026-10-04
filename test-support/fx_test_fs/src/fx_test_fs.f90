@@ -6,10 +6,7 @@ module fx_test_fs
     public :: fx_test_symlink, fx_test_chmod, fx_test_sleep_ms
     public :: fx_test_lock, fx_test_unlock
     public :: fx_test_descriptor_count
-    public :: fx_test_source_files
     public :: fx_test_lock_directory, fx_test_temp_root
-
-    integer, parameter :: PATH_MAX_LEN = 4096
 
     interface
         integer(c_int) function c_lock(path) bind(C, name='fx_test_fs_lock')
@@ -68,99 +65,9 @@ module fx_test_fs
             import :: c_int, c_int64_t
             integer(c_int64_t), value :: milliseconds
         end function c_sleep_ms
-        integer(c_int) function c_source_count(root, n_paths) &
-                bind(C, name='fx_test_fs_source_count')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: root(*)
-            integer(c_int), intent(out) :: n_paths
-        end function c_source_count
-        integer(c_int) function c_source_collect(root, paths, slot_len, &
-                max_paths, n_paths) bind(C, name='fx_test_fs_source_collect')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: root(*)
-            character(kind=c_char), intent(out) :: paths(*)
-            integer(c_int), intent(in), value :: slot_len, max_paths
-            integer(c_int), intent(out) :: n_paths
-        end function c_source_collect
     end interface
 
 contains
-
-    subroutine fx_test_source_files(root, files, ierr)
-        character(len=*), intent(in) :: root
-        character(len=:), allocatable, intent(out) :: files(:)
-        integer, intent(out) :: ierr
-
-        character(kind=c_char) :: c_root(PATH_MAX_LEN)
-        character(kind=c_char), allocatable :: c_paths(:)
-        integer(c_int) :: c_count, c_collected, c_status
-        integer :: i, slot
-
-        if (len_trim(root) == 0 .or. len_trim(root) >= PATH_MAX_LEN) then
-            ierr = 1
-            allocate(character(len=PATH_MAX_LEN) :: files(0))
-            return
-        end if
-        c_root = c_null_char
-        do i = 1, len_trim(root)
-            c_root(i) = char(iachar(root(i:i)), kind=c_char)
-        end do
-        c_count = 0_c_int
-        c_status = c_source_count(c_root, c_count)
-        if (c_status /= 0_c_int .or. c_count < 0_c_int) then
-            ierr = 1
-            allocate(character(len=PATH_MAX_LEN) :: files(0))
-            return
-        end if
-        if (c_count > int(huge(0) / PATH_MAX_LEN, c_int)) then
-            ierr = 1
-            allocate(character(len=PATH_MAX_LEN) :: files(0))
-            return
-        end if
-
-        allocate(character(len=PATH_MAX_LEN) :: files(int(c_count)))
-        if (c_count == 0_c_int) then
-            ierr = 0
-            return
-        end if
-
-        allocate(c_paths(int(c_count) * PATH_MAX_LEN))
-        c_paths = c_null_char
-        c_collected = 0_c_int
-        c_status = c_source_collect(c_root, c_paths, &
-            int(PATH_MAX_LEN, c_int), c_count, c_collected)
-        if (c_status /= 0_c_int) then
-            ierr = 1
-            return
-        end if
-        if (c_collected /= c_count) then
-            ierr = 1
-            return
-        end if
-        do i = 1, int(c_collected)
-            slot = (i - 1) * PATH_MAX_LEN + 1
-            files(i) = chars_to_text(c_paths(slot:slot + PATH_MAX_LEN - 1))
-        end do
-        ierr = 0
-    end subroutine fx_test_source_files
-
-    function chars_to_text(chars) result(text)
-        character(kind=c_char), intent(in) :: chars(:)
-        character(len=:), allocatable :: text
-        integer :: i, n
-
-        n = size(chars)
-        do i = 1, size(chars)
-            if (chars(i) == c_null_char) then
-                n = i - 1
-                exit
-            end if
-        end do
-        allocate(character(len=n) :: text)
-        do i = 1, n
-            text(i:i) = char(iachar(chars(i)))
-        end do
-    end function chars_to_text
 
     integer function fx_test_lock(path) result(fd)
         character(len=*), intent(in) :: path
