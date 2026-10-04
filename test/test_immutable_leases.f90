@@ -106,7 +106,6 @@ program test_immutable_leases
 
     inquire(file=immutable_store_blob_path(store, object_id), exist=exists)
     call test_assert(suite, exists, 'lease updates and releases delete no blob')
-    call assert_no_deletion_api(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -334,11 +333,4 @@ contains
         read(line(sep + 1:), *, iostat=local_err) value
     end subroutine read_metadata_epoch
 
-    subroutine assert_no_deletion_api(s)
-        type(test_suite_t), intent(inout) :: s
-        logical :: found
-
-        inquire(file=immutable_store_blob_path(store, object_id), exist=found)
-        call test_assert(s, found, 'collection-disabled phase exposes no delete operation')
-    end subroutine assert_no_deletion_api
 end program test_immutable_leases
