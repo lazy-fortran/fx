@@ -34,6 +34,10 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    C-owned FPM policy follow before the final process-tree no-interpreter gate.
    Declarative workflow/TOML files remain data; test programs, scheduling,
    parsing and assertions are Fortran with only narrow C OS primitives.
+6. **Active:** [#50](https://github.com/lazy-fortran/fx/issues/50) restores strict
+   Darwin visibility for action-result no-follow and locking APIs, then proves
+   cold macOS action publication/conflict/recovery behavior without weakening
+   Linux semantics.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
