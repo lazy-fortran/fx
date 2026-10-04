@@ -41,6 +41,10 @@ program test_immutable_leases
     call immutable_store_init(store, trim(root), ierr)
     if (ierr /= IMMUTABLE_OK) write (*, '(A,I0,2A)') &
         'lease init error=', ierr, ' root=', trim(root)
+    if (ierr == IMMUTABLE_OK) then
+        if (store%root_dir /= trim(root)) &
+            write (*, '(2A)') 'resolved lease root=', store%root_dir
+    end if
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'lease store initializes')
     source = trim(root)//'/source'
     call write_bytes(trim(source), bytes, ierr)

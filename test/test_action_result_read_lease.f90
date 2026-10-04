@@ -53,6 +53,10 @@ program test_action_result_read_lease
     call action_result_store_init(store, trim(store_root), ierr)
     if (ierr /= 0) write (*, '(A,I0,2A)') 'action store init error=', &
         ierr, ' root=', trim(store_root)
+    if (ierr == 0) then
+        if (store%root_dir /= trim(store_root)) &
+            write (*, '(2A)') 'resolved action store root=', store%root_dir
+    end if
     call test_assert_equal_int(suite, 0, ierr, 'action result store initializes')
     call get_command_argument(0, executable)
     call test_pending_publication(.false.)

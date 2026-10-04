@@ -124,7 +124,7 @@ contains
 
         call immutable_store_init(store%objects, trim(root_dir), ierr)
         if (ierr /= IMMUTABLE_OK) return
-        store%root_dir = trim(root_dir)
+        store%root_dir = store%objects%root_dir
         store%initialized = .true.
     end subroutine action_result_store_init
 
