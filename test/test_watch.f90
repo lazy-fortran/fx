@@ -430,7 +430,7 @@ contains
         call system_clock(count=count)
         write(count_buf, '(i0)') count
         write(serial_buf, '(i0)') serial
-        path = '/tmp/fx watch;$(fixture)-' // trim(tag) // '-' // &
+        path = '/var/tmp/fx watch;$(fixture)-' // trim(tag) // '-' // &
             trim(count_buf) // &
             '-' // trim(serial_buf)
     end function temp_root
