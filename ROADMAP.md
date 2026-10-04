@@ -6,8 +6,8 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current `main` is `52ddc06`; `6beeec4` is the immutable-store implementation
-checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
+Current integration head is `084bac3`; `6beeec4` is the immutable-store
+implementation checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
 
@@ -19,15 +19,18 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    roots plus read/publication leases and a monotonic epoch with collection
    disabled. After fo exposes complete semantic roots, its second phase collects
    only unreachable objects with bounded, crash-safe work.
-4. **Reopened:** [#45](https://github.com/lazy-fortran/fx/issues/45) replaces the
-   remaining JavaScript MCP system fixture with an independent Fortran process
-   oracle. Cold focused and full Node-free FPM profiles pass, but fo's consumer
-   linker omits the test-only C process shim. A task-specific Sol repair owns
-   consistent mixed-language discovery before completion is reclaimed.
+4. **Complete through `084bac3`:** [#45](https://github.com/lazy-fortran/fx/issues/45)
+   replaces the remaining JavaScript MCP system fixture with an independent
+   Fortran process oracle. Its narrow C process shim lives in a static test-only
+   development dependency: cold FPM, four protocol mutants and the exact fo
+   consumer pipeline pass while production fx contains no test symbols.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
-low-churn semantic retention. fx does not acquire Gremlin scheduling policy.
+low-churn semantic retention. #44 Phase A is an explicit prerequisite of fo
+#166; collection stays disabled while fo #168 Phase A adopts every owner/reason
+root and is enabled only by the audited #168/#44 Phase B. fx does not acquire
+Gremlin scheduling policy.
 
 ## Compiler integration boundary
 
