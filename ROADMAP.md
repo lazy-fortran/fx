@@ -6,7 +6,7 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current integration head is `93ee0d8`; `6beeec4` is the immutable-store
+Current code audit checkpoint is `8730572`; `6beeec4` is the immutable-store
 implementation checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
@@ -59,6 +59,36 @@ low-churn semantic retention. #44 Phase A is an explicit prerequisite of fo
 #166; collection stays disabled while fo #168 Phase A adopts every owner/reason
 root and is enabled only by the audited #168/#44 Phase B. fx does not acquire
 Gremlin scheduling policy.
+
+## Test cost and remaining architecture
+
+At `8730572`, tracked production source has 14,331 physical lines and native
+tests/support/bench have 12,066, including blanks/comments. `fx_sys.c` (1,895)
+mixes OS services; source size alone does not justify a blanket rewrite. Keep
+generic OS primitives narrow and Fortran policy cohesive as actual callers move.
+Legacy cache replacement APIs and the new immutable store temporarily coexist;
+retire duplicate fo use through fo #165--#167 without breaking other consumers.
+
+[#52](https://github.com/lazy-fortran/fx/issues/52) owns concrete test-cost and
+oracle cleanup. Remove duplicate assertions, arbitrary waits and repository-doc
+conformity tests if found, preserving observable retention/publication/recovery
+contracts. The first confirmed redundancy is a repeated retained-blob assertion
+in `test_immutable_leases` whose name incorrectly claims absence of a delete API.
+The prior assertion already follows the complete lifecycle and stays intact.
+Native Git-free source-export inventory is on pending task commit `24cf52c`;
+it is not yet delivered at this checkpoint. No special Gremlin Git artifact.
+
+[#53](https://github.com/lazy-fortran/fx/issues/53) removes production watcher
+test failure counters/descriptor entry points; #51 owns immutable-store hooks.
+Keep test-only measurement and real external errors. Do not recreate internal
+phases using interception frameworks. fo #150 consumes one shared strict JSON
+parser; generic grammar fixes belong here rather than another fo scanner.
+
+Luna workers use isolated task worktrees, warm focused behavioral gates and
+bounded readiness deadlines. Record before/after work and the concrete faults
+still detected. No new permanent quality/doc meta gate, no CI orchestration,
+and no unrelated cleanup blocker for small green increments. Two substantive
+failed repairs trigger a task-specific Sol handoff, not a team-wide escalation.
 
 ## Compiler integration boundary
 
