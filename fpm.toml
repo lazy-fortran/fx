@@ -45,7 +45,7 @@ name = "test_immutable_store"
 main = "test_immutable_store.f90"
 
 [[test]]
-name = "test_immutable_materialization"
+name = "test_immutable_materialization_slow"
 main = "test_immutable_materialization.f90"
 
 [[test]]

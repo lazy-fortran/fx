@@ -389,11 +389,11 @@ contains
         status = owned_write(capture, BAD, int(len(BAD), c_int))
         if (status == 0_c_int) status = owned_publish(capture)
         if (status /= 0_c_int) stop 27
-        call write_text(base//'/ready', 'published')
-        call wait_marker(base//'/release', released)
+        call write_text(trim(base)//'/ready', 'published')
+        call wait_marker(trim(base)//'/release', released)
         if (.not. released) stop 28
         status = owned_reject(capture)
-        open (newunit=unit, file=base//'/result', status='replace', iostat=ierr)
+        open (newunit=unit, file=trim(base)//'/result', status='replace', iostat=ierr)
         if (ierr == 0) then
             write (unit, *, iostat=ierr) status
             close (unit)
