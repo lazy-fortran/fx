@@ -263,3 +263,20 @@ int fx_action_result_test_configure(int phase, const char *ready,
     test_pause_phase = phase;
     return 0;
 }
+
+int fx_action_result_test_barrier(const char *ready, const char *release)
+{
+    int fd = open(ready, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    if (write(fd, "ready\n", 6) != 6 || fsync(fd) != 0) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    struct timespec delay = {0, 10000000};
+    for (int i = 0; i < 30000; ++i) {
+        if (access(release, F_OK) == 0) return 0;
+        (void)nanosleep(&delay, NULL);
+    }
+    return -1;
+}
