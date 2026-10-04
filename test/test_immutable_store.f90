@@ -19,6 +19,9 @@ program test_immutable_store
     use fx_immutable_manifest, only: immutable_manifest_serialize
     use fx_proc, only: proc_pid, proc_exec_silent, &
         proc_watch_init, proc_watch_add, proc_watch_poll, proc_watch_close
+    use fx_test_process, only: test_process_spawn, test_process_wait_once, &
+        test_process_signal, test_process_identity, test_process_clock_ms, &
+        test_process_sleep_ms
     use fx_path, only: path_dirname
     implicit none
 
@@ -102,6 +105,10 @@ program test_immutable_store
     end if
     if (trim(arg) == '--mkdir-barrier') then
         call run_mkdir_worker()
+        stop 0
+    end if
+    if (trim(arg) == '--wait-release') then
+        call run_worker_wait_release()
         stop 0
     end if
     call test_suite_init(suite, 'fx_immutable_store')
@@ -207,12 +214,14 @@ contains
         character(len=512) :: paths(NWRITERS), ready(NWRITERS)
         character(len=512) :: publish_ready(NWRITERS), eexist(NWRITERS)
         character(len=64) :: ref_id
-        character(len=512) :: child_exe, number, source_path
-        character(len=8192) :: command
-        character(len=8192) :: worker_argv(3)
+        character(len=512) :: child_exe, source_path, child_path
+        character(len=4096) :: worker_argv(9)
         character(len=512) :: copy_release, publish_release
         character(len=1) :: bytes(NBYTES)
-        integer :: t, local_err, file_err, child_status, eexist_count
+        integer :: t, local_err, file_err, eexist_count, child_pid(NWRITERS)
+        integer :: child_status, spawn_err, child_parent
+        integer(int64) :: child_start
+        integer(int64) :: child_starts(NWRITERS)
         logical :: marker_exists
 
         do t = 1, size(bytes)
@@ -232,37 +241,38 @@ contains
         copy_release = trim(base)//'/copy-release'
         publish_release = trim(base)//'/publish-release'
         call get_command_argument(0, child_exe)
-        command = 'status=0; '
         do t = 1, NWRITERS
-            write(number, '(I0)') t
-            command = trim(command)//quote(trim(child_exe))// &
-                ' --put-blob-barrier '//quote(trim(cache%root_dir))//' '// &
-                quote(trim(paths(t)))//' '//quote(trim(ready(t)))//' '// &
-                quote(trim(copy_release))//' '// &
-                quote(trim(publish_ready(t)))//' '// &
-                quote(trim(publish_release))//' '//quote(trim(eexist(t)))// &
-                ' & p'//trim(number)//'=$!; '
+            worker_argv = ''
+            worker_argv(1:9) = [character(len=4096) :: trim(child_exe), &
+                '--put-blob-barrier', trim(cache%root_dir), trim(paths(t)), &
+                trim(ready(t)), trim(copy_release), trim(publish_ready(t)), &
+                trim(publish_release), trim(eexist(t))]
+            call test_process_spawn(worker_argv(1:9), child_pid(t), spawn_err)
+            call test_assert_equal_int(s, 0, spawn_err, &
+                'native process API starts an exact Fortran publisher')
         end do
         do t = 1, NWRITERS
-            command = trim(command)//wait_for_marker(trim(ready(t)))
+            call wait_for_file(trim(ready(t)), 15000, marker_exists)
+            call test_assert(s, marker_exists, &
+                'publisher reaches native copy barrier before release')
+            call assert_fortran_child(s, child_pid(t), child_start, &
+                child_parent, child_path)
+            child_starts(t) = child_start
         end do
-        command = trim(command)//'touch '//quote(trim(copy_release))//'; '
+        call write_text(trim(copy_release), 'release-copy')
         do t = 1, NWRITERS
-            command = trim(command)//wait_for_marker(trim(publish_ready(t)))
+            call wait_for_file(trim(publish_ready(t)), 15000, marker_exists)
+            call test_assert(s, marker_exists, &
+                'publisher reaches native publication barrier before release')
         end do
-        command = trim(command)//'touch '//quote(trim(publish_release))//'; '
+        call write_text(trim(publish_release), 'release-publish')
         do t = 1, NWRITERS
-            write(number, '(I0)') t
-            command = trim(command)//'wait $p'//trim(number)// &
-                ' || status=1; '
+            call wait_for_child(child_pid(t), 15000, child_status, marker_exists)
+            call test_assert(s, marker_exists .and. child_status == 0, &
+                'barrier-released identical publisher exits successfully')
         end do
-        command = trim(command)//'exit $status'
-        worker_argv(1) = 'sh'
-        worker_argv(2) = '-c'
-        worker_argv(3) = trim(command)
-        call execute_command_line(trim(command), exitstat=child_status)
-        call test_assert_equal_int(s, 0, child_status, &
-            'barrier-released identical publishers all succeed')
+        call test_assert(s, all(child_starts > 0_int64), &
+            'publisher identity includes a kernel process start token')
         eexist_count = 0
         do t = 1, NWRITERS
             inquire(file=trim(eexist(t)), exist=marker_exists)
@@ -282,10 +292,12 @@ contains
         type(test_suite_t), intent(inout) :: s
         character(len=*), intent(in) :: base
         character(len=512) :: target, ready, release, existing, child_exe
-        character(len=8192) :: command
-        character(len=8192) :: worker_argv(3)
+        character(len=512) :: child_path
+        character(len=4096) :: worker_argv(6)
         character(len=17) :: observed
-        integer :: child_status, local_err
+        integer :: child_status, local_err, creator_pid, observer_pid, spawn_err
+        integer :: child_parent
+        integer(int64) :: child_start
         logical :: exists
 
         target = trim(base)//'/mkdir-race/shared/leaf'
@@ -293,23 +305,28 @@ contains
         release = trim(base)//'/mkdir-release'
         existing = trim(base)//'/mkdir-existing-sync'
         call get_command_argument(0, child_exe)
-        command = quote(trim(child_exe))//' --mkdir-barrier '// &
-            quote(trim(target))//' '//quote(trim(ready))//' '// &
-            quote(trim(release))//' '//quote('')//' & creator=$!; '
-        command = trim(command)//wait_for_marker(trim(ready))
-        command = trim(command)//quote(trim(child_exe))// &
-            ' --mkdir-barrier '//quote(trim(target))//' '//quote('')//' '// &
-            quote('')//' '// &
-            quote(trim(existing))//'; status=$?; '
-        command = trim(command)//'touch '//quote(trim(release))//'; '
-        command = trim(command)//'wait $creator; creator_status=$?; '
-        command = trim(command)//'[ $status -eq 0 ] && [ $creator_status -eq 0 ]'
-        worker_argv(1) = 'sh'
-        worker_argv(2) = '-c'
-        worker_argv(3) = trim(command)
-        call proc_exec_silent(worker_argv, 3, child_status)
-        call test_assert_equal_int(s, 0, child_status, &
-            'concurrent existing directory use completes during creator pause')
+        worker_argv(1:6) = [character(len=4096) :: trim(child_exe), &
+            '--mkdir-barrier', trim(target), trim(ready), trim(release), '']
+        call test_process_spawn(worker_argv(1:6), creator_pid, spawn_err)
+        call test_assert_equal_int(s, 0, spawn_err, &
+            'native process API starts mkdir creator')
+        call wait_for_file(trim(ready), 15000, exists)
+        call test_assert(s, exists, 'mkdir creator reaches native pause marker')
+        call assert_fortran_child(s, creator_pid, child_start, child_parent, &
+            child_path)
+
+        worker_argv(1:6) = [character(len=4096) :: trim(child_exe), &
+            '--mkdir-barrier', trim(target), '', '', trim(existing)]
+        call test_process_spawn(worker_argv(1:6), observer_pid, spawn_err)
+        call test_assert_equal_int(s, 0, spawn_err, &
+            'native process API starts existing-directory observer')
+        call wait_for_child(observer_pid, 15000, child_status, exists)
+        call test_assert(s, exists .and. child_status == 0, &
+            'existing directory use completes during creator pause')
+        call write_text(trim(release), 'release-mkdir')
+        call wait_for_child(creator_pid, 15000, child_status, exists)
+        call test_assert(s, exists .and. child_status == 0, &
+            'native mkdir creator exits after barrier release')
         inquire(file=trim(existing), exist=exists)
         call test_assert(s, exists, &
             'existing shard user records its parent fsync before success')
@@ -649,12 +666,15 @@ contains
         type(immutable_store_t), intent(in) :: cache
         character(len=*), intent(in) :: base
         character(len=512) :: path, temp_path, source_path, ready, release
-        character(len=512) :: child_exe
-        character(len=8192) :: child_argv(3), command
+        character(len=512) :: child_exe, child_path, sentinel_release
+        character(len=4096) :: child_argv(9), sentinel_argv(3)
         character(len=1) :: bytes(262144)
         character(len=64) :: missing_id
-        integer :: local_err, child_status, file_err, i
+        integer :: local_err, child_status, file_err, i, writer_pid
+        integer :: sentinel_pid, spawn_err, signal_err, state, child_parent
         integer(int64) :: partial_size
+        integer(int64) :: child_start, sentinel_start
+        integer(int64) :: sentinel_start_after
         logical :: exists
         character(len=8192) :: marker_path
 
@@ -669,21 +689,45 @@ contains
         path = immutable_store_blob_path(cache, missing_id)
         ready = trim(base)//'/killed-copy-ready'
         release = trim(base)//'/killed-copy-release-never'
+        sentinel_release = trim(base)//'/unrelated-sentinel-release'
         call get_command_argument(0, executable)
-        command = quote(trim(executable))//' --put-blob-barrier '// &
-            quote(trim(cache%root_dir))//' '//quote(trim(source_path))//' '// &
-            quote(trim(ready))//' '//quote(trim(release))//' '// &
-            quote('')//' '//quote('')//' '//quote('')// &
-            ' & writer=$!; '
-        command = trim(command)//wait_for_marker(trim(ready))
-        command = trim(command)//'kill -9 $writer; wait $writer 2>/dev/null; '// &
-            'status=$?; [ $status -ge 128 ]'
-        child_argv(1) = 'sh'
-        child_argv(2) = '-c'
-        child_argv(3) = trim(command)
-        call proc_exec_silent(child_argv, 3, child_status)
-        call test_assert_equal_int(s, 0, child_status, &
-            'real immutable_store_put_blob worker is killed at partial temp write')
+        sentinel_argv(1:3) = [character(len=4096) :: trim(executable), &
+            '--wait-release', trim(sentinel_release)]
+        call test_process_spawn(sentinel_argv(1:3), sentinel_pid, spawn_err)
+        call test_assert_equal_int(s, 0, spawn_err, &
+            'native process API starts unrelated sentinel')
+        call assert_fortran_child(s, sentinel_pid, sentinel_start, &
+            child_parent, child_path)
+
+        child_argv(1:9) = [character(len=4096) :: trim(executable), &
+            '--put-blob-barrier', trim(cache%root_dir), trim(source_path), &
+            trim(ready), trim(release), '', '', '']
+        call test_process_spawn(child_argv(1:9), writer_pid, spawn_err)
+        call test_assert_equal_int(s, 0, spawn_err, &
+            'native process API starts partial blob writer')
+        call wait_for_file(trim(ready), 15000, exists)
+        call test_assert(s, exists, 'partial writer reaches copy barrier')
+        call assert_fortran_child(s, writer_pid, child_start, child_parent, &
+            child_path)
+        call test_process_signal(writer_pid, 9, signal_err)
+        call test_assert_equal_int(s, 0, signal_err, &
+            'SIGKILL targets only the exact owned writer PID')
+        call wait_for_child(writer_pid, 5000, child_status, exists)
+        call test_assert(s, exists .and. child_status == 137, &
+            'partial blob writer is killed and reaped by its owner')
+        call test_process_wait_once(sentinel_pid, child_status, state)
+        call test_assert_equal_int(s, 0, state, &
+            'unrelated sentinel remains alive after exact writer signal')
+        call test_process_identity(sentinel_pid, sentinel_start_after, &
+            child_parent, child_path, local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'unrelated sentinel retains its original process identity')
+        call test_assert(s, sentinel_start_after == sentinel_start, &
+            'unrelated sentinel PID still has its original start identity')
+        call write_text(trim(sentinel_release), 'release-sentinel')
+        call wait_for_child(sentinel_pid, 5000, child_status, exists)
+        call test_assert(s, exists .and. child_status == 0, &
+            'unrelated sentinel is released and reaped')
         call read_line(trim(ready), marker_path, local_err)
         call test_assert_equal_int(s, 0, local_err, &
             'copy barrier identifies the owned temporary file')
@@ -849,6 +893,14 @@ contains
         if (status /= 0_c_int) stop 13
     end subroutine run_mkdir_worker
 
+    subroutine run_worker_wait_release()
+        character(len=4096) :: release
+        logical :: exists
+        call get_command_argument(2, release)
+        call wait_for_file(trim(release), 30000, exists)
+        if (.not. exists) stop 14
+    end subroutine run_worker_wait_release
+
     subroutine configure_test_hooks(ready, copy_release, publish_ready, &
             publish_release, eexist)
         character(len=*), intent(in) :: ready, copy_release, publish_ready
@@ -947,17 +999,74 @@ contains
         end do
     end subroutine drain_events
 
-    function quote(text) result(quoted)
-        character(len=*), intent(in) :: text
-        character(len=:), allocatable :: quoted
-        quoted = "'"//trim(text)//"'"
-    end function quote
+    subroutine assert_fortran_child(s, pid, start, parent, path)
+        type(test_suite_t), intent(inout) :: s
+        integer, intent(in) :: pid
+        integer(int64), intent(out) :: start
+        integer, intent(out) :: parent
+        character(len=*), intent(out) :: path
+        character(len=1024) :: self_path
+        integer(int64) :: self_start
+        integer :: self_parent
+        integer :: ierr
+        call test_process_identity(pid, start, parent, path, ierr)
+        call test_assert_equal_int(s, 0, ierr, &
+            'child PID and kernel start identity are readable')
+        call test_process_identity(proc_pid(), self_start, self_parent, &
+            self_path, ierr)
+        call test_assert_equal_int(s, 0, ierr, &
+            'test process identity is readable')
+        call test_assert_equal_str(s, trim(self_path), trim(path), &
+            'spawned child executes this Fortran test binary directly')
+        call test_assert(s, pid /= proc_pid() .and. start > 0_int64 .and. &
+            start /= self_start, 'child identity is distinct and exact')
+        call test_assert_equal_int(s, proc_pid(), parent, &
+            'child parent PID is the test process, with no shell intermediary')
+    end subroutine assert_fortran_child
 
-    function wait_for_marker(path) result(command_text)
+    subroutine wait_for_file(path, timeout_ms, found)
         character(len=*), intent(in) :: path
-        character(len=:), allocatable :: command_text
-        command_text = 'i=0; while [ ! -f '//quote(path)//' ]; do '// &
-            'i=$((i+1)); [ $i -lt 500 ] || exit 91; sleep 0.01; done; '
-    end function wait_for_marker
+        integer, intent(in) :: timeout_ms
+        logical, intent(out) :: found
+        integer(int64) :: deadline
+        found = .false.
+        deadline = test_process_clock_ms() + int(timeout_ms, int64)
+        do
+            inquire(file=trim(path), exist=found)
+            if (found .or. test_process_clock_ms() >= deadline) exit
+            call test_process_sleep_ms(5)
+        end do
+    end subroutine wait_for_file
+
+    subroutine wait_for_child(pid, timeout_ms, exit_status, completed)
+        integer, intent(in) :: pid, timeout_ms
+        integer, intent(out) :: exit_status
+        logical, intent(out) :: completed
+        integer :: state, signal_err
+        integer(int64) :: deadline
+        completed = .false.
+        exit_status = -1
+        deadline = test_process_clock_ms() + int(timeout_ms, int64)
+        do
+            call test_process_wait_once(pid, exit_status, state)
+            if (state == 1) then
+                completed = .true.
+                return
+            end if
+            if (state < 0 .or. test_process_clock_ms() >= deadline) exit
+            call test_process_sleep_ms(5)
+        end do
+        call test_process_signal(pid, 9, signal_err)
+        deadline = test_process_clock_ms() + 5000_int64
+        do
+            call test_process_wait_once(pid, exit_status, state)
+            if (state == 1) then
+                completed = .true.
+                return
+            end if
+            if (state < 0 .or. test_process_clock_ms() >= deadline) exit
+            call test_process_sleep_ms(5)
+        end do
+    end subroutine wait_for_child
 
 end program test_immutable_store
