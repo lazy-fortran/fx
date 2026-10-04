@@ -55,6 +55,7 @@ program test_no_interpreter_gate
     call check_equal(fx_test_remove_tree(root), 0, 'old gate fixture is removed')
     call check_equal(fx_test_mkdir_p(bin_path), 0, 'private gate PATH is created')
 
+    call check_shebang_forms()
     call check_checked_in_inventory()
     call check_generated_inventory()
     call check_generated_outputs()
@@ -104,6 +105,50 @@ contains
         write (text, '(I0)') value
     end function integer_text
 
+    subroutine check_shebang_forms()
+        character(len=256), parameter :: forbidden(22) = [character(len=256) :: &
+            '#!/usr/bin/env FOO=bar python3', &
+            '#!/usr/bin/env FOO="bar baz" python3', &
+            '#!/usr/bin/env -P /usr/bin python3', &
+            '#!/usr/bin/env -u FOO python3', &
+            '#!/usr/bin/env -uFOO python3', &
+            '#!/usr/bin/env --unset FOO python3', &
+            '#!/usr/bin/env --unset=FOO FOO=bar python3', &
+            '#!/usr/bin/env -C /tmp python3', &
+            '#!/usr/bin/env --chdir=/tmp python3', &
+            '#!/usr/bin/env -a chosen-name python3', &
+            '#!/usr/bin/env --argv0=chosen-name python3', &
+            '#!/usr/bin/env -i FOO=bar python3', &
+            '#!/usr/bin/env -iu FOO python3', &
+            '#!/usr/bin/env -S "FOO=bar python3"', &
+            '#!/usr/bin/env -S "-u FOO python3"', &
+            '#!/usr/bin/env --split-string="FOO=bar python3"', &
+            '#!/usr/bin/env -Spython3', &
+            '#!/usr/bin/env -- FOO=bar python3', &
+            '#!/usr/bin/env env FOO=bar python3', &
+            '#!/usr/bin/env -a "" python3', &
+            '#!/usr/bin/env --unset FOO node', &
+            '#!/usr/bin/env -u FOO ruby']
+        character(len=256), parameter :: allowed(8) = [character(len=256) :: &
+            '#!/usr/bin/env FOO=python3 gfortran', &
+            '#!/usr/bin/env -u python3 gfortran', &
+            '#!/usr/bin/env --unset=python3 gfortran', &
+            '#!/usr/bin/env -C /python3 gfortran', &
+            '#!/usr/bin/env -P /python3 gfortran', &
+            '#!/usr/bin/env -a python3 gfortran', &
+            '#!/usr/bin/env --argv0=python3 gfortran', &
+            '#!/usr/bin/env -S "FOO=python3 gfortran"']
+        integer :: i
+        do i = 1, size(forbidden)
+            call check(forbidden_executable('extensionless', trim(forbidden(i))), &
+                'env interpreter command is rejected: '//trim(forbidden(i)))
+        end do
+        do i = 1, size(allowed)
+            call check(.not. forbidden_executable('extensionless', trim(allowed(i))), &
+                'env option and assignment data is allowed: '//trim(allowed(i)))
+        end do
+    end subroutine check_shebang_forms
+
     subroutine check_checked_in_inventory()
         type(proc_result_t) :: listing
         character(len=:), allocatable :: line, path, mode
@@ -148,7 +193,7 @@ contains
             if (next_line == 0) exit
             start = finish + 2
         end do
-        call check(mutant_count == 5, 'all checked-in language mutants are inventoried')
+        call check(mutant_count == 7, 'all checked-in language mutants are inventoried')
     end subroutine check_checked_in_inventory
 
     subroutine check_generated_inventory()
@@ -172,6 +217,10 @@ contains
             call check_equal(fx_test_chmod(path, 493), 0, &
                 'generated mutant is executable: '//trim(mutant_classes(i)))
         end do
+        call write_generated_control(fixture_path//'/env_assignment.fixture', &
+            '#!/usr/bin/env FOO=bar python3')
+        call write_generated_control(fixture_path//'/env_unset.fixture', &
+            '#!/usr/bin/env -u FOO python3')
         call proc_scan_files(fixture_path, files, count, ierr)
         call check_equal(ierr, 0, 'generated executable inventory succeeds')
         do i = 1, count
@@ -187,6 +236,16 @@ contains
         call check(test_process_is_executable(fixture_path//'/'// &
             'generated_shell.sh') == 1, 'generated mutant has executable mode')
     end subroutine check_generated_inventory
+
+    subroutine write_generated_control(path, shebang)
+        character(len=*), intent(in) :: path, shebang
+        integer :: unit
+        open (newunit=unit, file=path, status='replace', action='write')
+        write (unit, '(A)') shebang
+        close (unit)
+        call check_equal(fx_test_chmod(path, 493), 0, &
+            'generated env mutant is executable: '//path)
+    end subroutine write_generated_control
 
     subroutine check_generated_outputs()
         character(len=:), allocatable :: files(:), path
