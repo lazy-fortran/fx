@@ -88,6 +88,15 @@ phases using interception frameworks. [#54](https://github.com/lazy-fortran/fx/i
 provides the shared strict JSON codec consumed by fo #150; generic grammar fixes
 belong here rather than another fo scanner.
 
+#53's cleanup is integrated at `fc9a1ec`: production watcher controls, including
+the old synthetic ENOSPC trigger, are removed. Descriptor measurement lives in
+the static test-only filesystem helper; native tests exercise real missing-root
+errors, recovery/events and 32 complete start/stop cycles. The combined Linux
+watch/lifecycle gate passes 2/2 in 0.93s. Forced registration-phase/ENOSPC tests
+were removed without recreating interception machinery. Real kernel error paths
+remain; the forced windows and this new test slice are not macOS-verified yet.
+The platform milestone tracks that remaining evidence.
+
 Luna workers use isolated task worktrees, warm focused behavioral gates and
 bounded readiness deadlines. Record before/after work and the concrete faults
 still detected. No new permanent quality/doc meta gate, no CI orchestration,
