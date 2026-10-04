@@ -19,7 +19,7 @@ module fx_action_cache
         action_result_publish_files, action_result_lookup, &
         action_result_materialize_blob, action_result_file_mode, &
         action_result_compile_action_key, &
-        ACTION_RESULT_OK, ACTION_RESULT_MISSING
+        ACTION_RESULT_OK, ACTION_RESULT_MISSING, ACTION_RESULT_IO_ERROR
     implicit none
     private
 

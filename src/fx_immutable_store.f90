@@ -321,7 +321,7 @@ contains
         integer, intent(out) :: ierr
         integer(int64), intent(out), optional :: epoch
 
-        call acquire_lease(store, 7, owner, owner_start, reason, '', '', '', &
+        call acquire_lease(store, 7, owner, owner_start, reason, '', '', &
             lease, ierr, epoch)
     end subroutine immutable_store_graph_read_lease_acquire
 
