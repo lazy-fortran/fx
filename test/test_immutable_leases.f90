@@ -39,6 +39,8 @@ program test_immutable_leases
     call test_suite_init(suite, 'fx_immutable_leases')
     write(root, '(A,I0)') '/var/tmp/fx_leases_', proc_pid()
     call immutable_store_init(store, trim(root), ierr)
+    if (ierr /= IMMUTABLE_OK) write (*, '(A,I0,2A)') &
+        'lease init error=', ierr, ' root=', trim(root)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'lease store initializes')
     source = trim(root)//'/source'
     call write_bytes(trim(source), bytes, ierr)
@@ -151,11 +153,17 @@ contains
         call get_command_argument(7, release)
         call get_command_argument(8, done)
         call immutable_store_init(child_store, trim(child_root), local_err)
+        if (local_err /= IMMUTABLE_OK) write (*, '(A,I0,2A)') &
+            'barrier store init error=', local_err, ' root=', trim(child_root)
         child_ids(1) = child_id
         call immutable_store_publication_lease_acquire(child_store, trim(owner), &
             trim(owner_start), 'parallel', child_kinds, child_ids, child_lease, &
             local_err)
-        if (local_err /= IMMUTABLE_OK) stop 42
+        if (local_err /= IMMUTABLE_OK) then
+            write (*, '(A,I0,2A)') 'publication lease error=', local_err, &
+                ' root=', trim(child_root)
+            stop 42
+        end if
         open(newunit=unit, file=trim(ready), status='replace', action='write')
         write(unit, '(A)') 'ready'
         close(unit)
@@ -174,8 +182,8 @@ contains
         character(len=*), intent(in) :: base, id
         character(len=512) :: child, ready_a, ready_b, done_a, done_b
         character(len=512) :: release, arguments(9)
-        integer :: launch_error, pid_a, pid_b, exit_a, exit_b
-        logical :: ready, complete_a, complete_b
+        integer :: launch_error, pid_a, pid_b, exit_a, exit_b, signal_error
+        logical :: ready, complete_a, complete_b, exited
 
         call get_command_argument(0, child)
         ready_a = trim(base)//'/parallel-a-ready'
@@ -194,9 +202,23 @@ contains
         arguments(9) = trim(done_b)
         call test_process_spawn(arguments, pid_b, launch_error)
         call test_assert_equal_int(s, 0, launch_error, 'publisher B launches')
-        call wait_for_file(trim(ready_a), ready)
+        call wait_for_file(trim(ready_a), ready, pid_a, exit_a, exited)
+        if (exited) then
+            call test_assert(s, .false., &
+                'publisher A exited before its readiness marker')
+            call test_process_signal(pid_b, 9, signal_error)
+            call wait_for_child(pid_b, 1000, exit_b, complete_b)
+            return
+        end if
         call test_assert(s, ready, 'publisher A holds its lease at barrier')
-        call wait_for_file(trim(ready_b), ready)
+        call wait_for_file(trim(ready_b), ready, pid_b, exit_b, exited)
+        if (exited) then
+            call test_assert(s, .false., &
+                'publisher B exited before its readiness marker')
+            call test_process_signal(pid_a, 9, signal_error)
+            call wait_for_child(pid_a, 1000, exit_a, complete_a)
+            return
+        end if
         call test_assert(s, ready, 'publisher B holds its lease at barrier')
         call create_marker(trim(release))
         call test_assert_equal_int(s, 0, launch_error, 'barrier workers launch')
@@ -243,15 +265,27 @@ contains
         close(unit)
     end subroutine create_marker
 
-    subroutine wait_for_file(path, found)
+    subroutine wait_for_file(path, found, child_pid, child_status, child_exited)
         character(len=*), intent(in) :: path
         logical, intent(out) :: found
-        integer :: i
+        integer, intent(in), optional :: child_pid
+        integer, intent(out), optional :: child_status
+        logical, intent(out), optional :: child_exited
+        integer :: i, state, status
 
         found = .false.
+        if (present(child_exited)) child_exited = .false.
         do i = 1, 500
             inquire(file=path, exist=found)
             if (found) return
+            if (present(child_pid)) then
+                call test_process_wait_once(child_pid, status, state)
+                if (state /= 0) then
+                    if (present(child_status)) child_status = status
+                    if (present(child_exited)) child_exited = .true.
+                    return
+                end if
+            end if
             call test_process_sleep_ms(10)
         end do
     end subroutine wait_for_file
