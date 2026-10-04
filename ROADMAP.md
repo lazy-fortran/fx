@@ -6,7 +6,7 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current integration head is `bca1693`; `6beeec4` is the immutable-store
+Current integration head is `679f692`; `6beeec4` is the immutable-store
 implementation checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
@@ -26,14 +26,16 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    Fortran process oracle. Its narrow C process shim lives in a static test-only
    development dependency: cold FPM, four protocol mutants and the exact fo
    consumer pipeline pass while production fx contains no test symbols.
-5. **#46 complete through `b102904`, #47 through `f6cfc0b`, #48 through
-   `9585a7b`; #49 active:**
+5. **Complete through `679f692`:**
    [#46](https://github.com/lazy-fortran/fx/issues/46)--[#49](https://github.com/lazy-fortran/fx/issues/49)
    finish the all-Fortran executable-test contract. Immutable-store race control
    is now Fortran with narrow exact-PID OS primitives; cache/watcher fixtures
    now use a native test-only filesystem API. Self-capture and MCP orchestration
    are Fortran over the shared narrow process API; C owns no FPM/build policy.
-   The final process-tree no-interpreter gate remains.
+   The final no-interpreter gate has no tracked script fixtures or interpreter
+   packages: Fortran creates temporary inventory controls and copies its native
+   image under forbidden names for descendant tracing. The exact-head strict
+   build/focused/full trace and five behavioral mutants pass independent review.
    Declarative workflow/TOML files remain data; test programs, scheduling,
    parsing and assertions are Fortran with only narrow C OS primitives.
 6. **Complete through `bca1693`:**
