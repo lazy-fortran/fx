@@ -84,6 +84,11 @@ program test_immutable_leases
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'read lease releases')
 
     call test_concurrent_publication_barrier(suite, trim(root), trim(object_id))
+    if (suite%n_fail > 0) then
+        call test_suite_summary(suite)
+        call test_suite_exit(suite)
+        stop
+    end if
 
     call get_command_argument(0, executable)
     marker = trim(root)//'/crash-ready'
@@ -322,8 +327,8 @@ contains
             end if
             if (child_state < 0) exit
             if (test_process_clock_ms() >= deadline) exit
-            call test_process_sleep_ms(5)
-        end do
+    call test_process_sleep_ms(5)
+    end do
         call test_process_signal(pid, 9, signal_error)
         deadline = test_process_clock_ms() + 5000_int64
         do
