@@ -9,9 +9,14 @@ program test_action_cache
     use fx_cache, only: cache_init, cache_store_bytes
     use fx_cache_key, only: cache_file_content_key
     use fx_cache_fs, only: cache_entry_path, CACHE_PATH_LEN
-    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree
+    use fx_action_result_store, only: action_result_store_t, &
+        action_result_store_init, action_result_preview, ACTION_RESULT_OK
+    use fx_immutable_manifest, only: immutable_tree_entry_t
+    use fx_immutable_store, only: immutable_store_blob_path
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_chmod
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
-        test_assert_equal_str, test_suite_summary, test_suite_exit
+        test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
+        test_suite_exit
     implicit none
 
     type(test_suite_t) :: suite
@@ -21,6 +26,7 @@ program test_action_cache
     call test_root_resolution(suite)
     call test_action_round_trip(suite)
     call test_smod_round_trip(suite)
+    call test_action_result_warm_validation(suite)
     call test_smod_payload_rejection(suite)
     call test_smod_metadata_rejection(suite)
     call test_binary_fingerprint(suite)
@@ -146,6 +152,83 @@ contains
             'repair restores the recorded submodule content')
         call cleanup_tree(root)
     end subroutine test_smod_round_trip
+
+    subroutine test_action_result_warm_validation(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(cache_t) :: c
+        type(action_result_store_t) :: result_store
+        type(immutable_tree_entry_t), allocatable :: entries(:)
+        character(len=:), allocatable :: root, object_file, blob_path
+        character(len=HASH_LEN) :: result_id
+        integer :: ierr, cleanup, epoch_before, epoch_after
+        logical :: restored
+
+        root = temp_root('action-result-warm')
+        call cleanup_tree(root)
+        call make_dir(root)
+        object_file = root//'/object.o'
+        call write_file(object_file, 'WARM OBJECT BYTES')
+        call cache_init(c, root//'/cache')
+        call cache_store_action(c, 'warm-result', object_file, root, '', &
+            result_id, ierr)
+        call test_assert(suite, ierr == 0, 'publish the warm action result')
+        call action_result_store_init(result_store, &
+            root//'/cache/store/v2', ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+            'warm action result store opens')
+        call action_result_preview(result_store, 'warm-result', entries, &
+            result_id, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+            'warm result manifest validates')
+        if (.not. allocated(entries)) then
+            call test_assert(suite, .false., &
+                'warm result manifest contains its output entry')
+            call cleanup_tree(root)
+            return
+        end if
+        if (size(entries) == 0) then
+            call test_assert(suite, .false., &
+                'warm result manifest contains its output entry')
+            call cleanup_tree(root)
+            return
+        end if
+        blob_path = immutable_store_blob_path(result_store%objects, &
+            entries(1)%object_id)
+
+        epoch_before = read_lease_epoch(root//'/cache/store/v2')
+        call test_assert(suite, epoch_before >= 0, &
+            'warm fixture has readable lease metadata')
+        call cache_restore_action(c, 'warm-result', object_file, root, restored)
+        call test_assert(suite, restored, &
+            'matching local object validates against the action result')
+        call test_assert(suite, file_has_bytes(object_file, 'WARM OBJECT BYTES'), &
+            'warm validation preserves the actual local object')
+        epoch_after = read_lease_epoch(root//'/cache/store/v2')
+        call test_assert(suite, epoch_after == epoch_before, &
+            'warm local validation does not mutate graph lease metadata')
+
+        cleanup = fx_test_chmod(blob_path, 420)
+        call test_assert_equal_int(suite, 0, cleanup, &
+            'test makes the immutable payload writable for corruption')
+        call write_file(blob_path, 'CORRUPTED RESULT OBJECT')
+        cleanup = fx_test_chmod(blob_path, 292)
+        call test_assert_equal_int(suite, 0, cleanup, &
+            'test restores immutable payload permissions')
+        call cache_restore_action(c, 'warm-result', object_file, root, restored)
+        call test_assert(suite, .not. restored, &
+            'corrupt immutable object cannot produce a warm result hit')
+        call test_assert(suite, file_has_bytes(object_file, 'WARM OBJECT BYTES'), &
+            'corrupt immutable object does not replace the local output')
+
+        cleanup = fx_test_remove_tree(blob_path)
+        call test_assert(suite, cleanup == 0, 'test removes the immutable object')
+        call cache_restore_action(c, 'warm-result', object_file, root, restored)
+        call test_assert(suite, .not. restored, &
+            'missing immutable object falls through without a warm hit')
+        call test_assert(suite, file_has_bytes(object_file, 'WARM OBJECT BYTES'), &
+            'missing immutable object leaves the local output intact')
+        call cleanup_tree(root)
+    end subroutine test_action_result_warm_validation
 
     subroutine test_smod_payload_rejection(suite)
         type(test_suite_t), intent(inout) :: suite
@@ -386,6 +469,24 @@ contains
         write (u) content
         close (u)
     end subroutine write_file
+
+    integer function read_lease_epoch(store_root) result(epoch)
+        character(len=*), intent(in) :: store_root
+        character(len=128) :: header
+        integer :: unit, ios, separator
+
+        epoch = -1
+        open(newunit=unit, file=trim(store_root)//'/.fx-metadata/leases', &
+            status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        read(unit, '(A)', iostat=ios) header
+        close(unit)
+        if (ios /= 0) return
+        separator = index(header, '|')
+        if (separator <= 0) return
+        read(header(separator + 1:), *, iostat=ios) epoch
+        if (ios /= 0) epoch = -1
+    end function read_lease_epoch
 
     subroutine delete_file(path)
         character(len=*), intent(in) :: path
