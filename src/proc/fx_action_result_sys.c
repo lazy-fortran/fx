@@ -79,7 +79,9 @@ int fx_action_result_lock(const char *root, const char *id)
 {
     char dir[PATH_MAX], path[PATH_MAX];
     if (action_dir(root, id, dir, sizeof(dir)) != 0) return -1;
-    (void)sync_directory(dir);
+    /* Lock files are transient coordination state. The action record and its
+     * parent directory are synchronized by publication, so syncing this
+     * directory before each read-side lock adds no durability guarantee. */
     int n = snprintf(path, sizeof(path), "%s/%s.lock", dir, id);
     if (n < 0 || (size_t)n >= sizeof(path)) return -1;
     int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);

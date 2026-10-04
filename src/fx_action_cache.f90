@@ -346,19 +346,21 @@ contains
             if (ierr == 0) output_id = old_output
         end if
         local_ok = local_result_matches(entries, obj_path, mod_dir)
-        if (.not. local_ok) then
-            do i = 1, size(entries)
-                if (local_result_entry_matches(entries(i), obj_path, mod_dir)) &
-                    cycle
-                call action_result_materialize_blob(store, entries(i)%object_id, &
-                    compile_destination(entries(i), obj_path, mod_dir), &
-                    entries(i)%mode, ierr)
-                if (ierr /= ACTION_RESULT_OK) exit
-            end do
-            if (ierr /= ACTION_RESULT_OK) then
-                call action_result_read_release(store, read, release_status)
-                return
-            end if
+        if (local_ok) then
+            call action_result_read_release(store, read, release_status)
+            restored = release_status == ACTION_RESULT_OK
+            return
+        end if
+        do i = 1, size(entries)
+            if (local_result_entry_matches(entries(i), obj_path, mod_dir)) cycle
+            call action_result_materialize_blob(store, entries(i)%object_id, &
+                compile_destination(entries(i), obj_path, mod_dir), &
+                entries(i)%mode, ierr)
+            if (ierr /= ACTION_RESULT_OK) exit
+        end do
+        if (ierr /= ACTION_RESULT_OK) then
+            call action_result_read_release(store, read, release_status)
+            return
         end if
         restored = local_result_matches(entries, obj_path, mod_dir)
         call action_result_read_release(store, read, release_status)
