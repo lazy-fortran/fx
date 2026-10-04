@@ -1,8 +1,8 @@
 program test_mcp_system
     use iso_c_binding, only: c_int,c_char,c_ptr,c_null_ptr,c_null_char,c_associated
     use mcp_test_json, only: document_t,parse_json,child,string_is,atom_is,array_size
-    use fx_mcp_test_os, only: fx_test_spawn, fx_test_find_server, fx_test_write, &
-        fx_test_read, fx_test_close
+    use fx_mcp_test_os, only: fx_test_spawn_argv, fx_test_is_executable, &
+        fx_test_write, fx_test_read, fx_test_close
     implicit none
     type :: session_t
         type(c_ptr) :: handle=c_null_ptr
@@ -10,12 +10,15 @@ program test_mcp_system
         logical :: io_failed=.false.
     end type
     integer :: failures
-    character(len=4096) :: server
+    character(len=4096) :: server, requested
+    logical :: server_found
     failures=0
-    call get_command_argument(1,server)
-    if(len_trim(server)==0) call find_server(server)
-    if(len_trim(server)==0) then
-        write(*,'(A)') 'FAIL: could not locate worktree-built fx-mcp-server'
+    requested=' '
+    call get_command_argument(1,requested)
+    if(len_trim(requested)==0) call get_environment_variable('FX_MCP_SERVER',requested)
+    call find_server(trim(requested),server,server_found)
+    if(.not.server_found) then
+        write(*,'(A)') 'FAIL: exact sibling fx-mcp-server is missing or not executable'
         stop 1
     end if
     write(*,'(A)') 'fx MCP independent Fortran process oracle'
@@ -35,17 +38,43 @@ contains
         end if
     end subroutine
 
-    subroutine find_server(path)
+    subroutine find_server(requested,path,found)
+        character(len=*),intent(in)::requested
         character(len=*),intent(out)::path
+        logical,intent(out)::found
         character(len=4096)::test_binary
-        integer(c_int)::found
-        integer::n
-        path=' '
+        character(len=4096)::sibling
+        integer::n,slash,dir_length
+        path=' '; sibling=' '; found=.false.
         test_binary=' '
         call get_command_argument(0,test_binary,length=n)
-        found=fx_test_find_server(trim(test_binary)//c_null_char,path,int(len(path),c_int))
-        if(found==0) path=' '
+        if(n<=0.or.n>len(test_binary)) return
+        slash=scan(trim(test_binary), '/', back=.true.)
+        if(slash<=1) return
+        dir_length=slash-1
+        if(ends_with(test_binary(:dir_length),'/build/fo/bin')) then
+            sibling=test_binary(:dir_length)//'/fx-mcp-server'
+        else if(ends_with(test_binary(:dir_length),'/test')) then
+            sibling=test_binary(:dir_length-5)//'/app/fx-mcp-server'
+        else
+            sibling=test_binary(:dir_length)//'/fx-mcp-server'
+        end if
+        if(len_trim(requested)>0) then
+            path=requested
+        else
+            path=sibling
+        end if
+        found=fx_test_is_executable(trim(path)//c_null_char)==1
     end subroutine
+
+    logical function ends_with(text,suffix)
+        character(len=*),intent(in)::text,suffix
+        integer::text_length,suffix_length
+        text_length=len_trim(text); suffix_length=len(suffix)
+        ends_with=.false.
+        if(text_length<suffix_length) return
+        ends_with=text(text_length-suffix_length+1:text_length)==suffix
+    end function ends_with
 
     subroutine run_mode(path,framed)
         character(len=*),intent(in)::path
@@ -53,9 +82,17 @@ contains
         type(session_t)::s
         type(document_t)::d
         character(len=:),allocatable::response,request
+        character(kind=c_char),allocatable::arguments(:)
+        integer::position,i
         integer::root,result,tools,error,code,bytes
         character(len=32)::label
-        s%handle=fx_test_spawn(trim(path)//c_null_char)
+        allocate(arguments(len_trim(path)+1))
+        position=1
+        do i=1,len_trim(path)
+            arguments(position)=path(i:i); position=position+1
+        end do
+        arguments(position)=c_null_char
+        s%handle=fx_test_spawn_argv(arguments,1_c_int,0_c_int)
         call check(c_associated(s%handle),'server process starts')
         if(.not.c_associated(s%handle)) return
         if(framed) then; label='Content-Length'; else; label='bare JSON'; end if

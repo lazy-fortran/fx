@@ -1,6 +1,9 @@
 program test_fx_test
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr, &
+        c_null_char, c_associated
     use, intrinsic :: iso_fortran_env, only: real64, error_unit, output_unit
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+    use fx_mcp_test_os, only: fx_test_spawn_argv, fx_test_read, fx_test_close
     use fx_test, only: test_suite_t, test_suite_init, &
         test_assert, test_assert_equal_int, &
         test_assert_equal_str, test_assert_equal_real, &
@@ -33,8 +36,7 @@ contains
 
     subroutine emit_noise(fixture)
         !! Drive one failing assertion and a summary through a suite of the
-        !! requested kind. The parent process runs this with stdout and stderr
-        !! redirected to a file and inspects what came out.
+        !! requested kind. The parent process captures both output streams.
         logical, intent(in) :: fixture
         type(test_suite_t) :: s
 
@@ -671,61 +673,75 @@ contains
     end subroutine test_normal_suite_emits_failure
 
     subroutine run_capture(mode_arg, captured, ok)
-        !! Re-run this program in the given mode with both streams redirected
-        !! to a scratch file, and hand back the file's contents.
+        !! Re-run this program in the given mode and capture both output streams.
         character(len=*), intent(in) :: mode_arg
         character(len=:), allocatable, intent(out) :: captured
         logical, intent(out) :: ok
+        integer :: exit_code
 
-        character(len=512) :: exe
-        character(len=512) :: tmp_dir
-        character(len=:), allocatable :: out_file
-        character(len=512) :: line
-        integer :: cmdstat, exit_code, unit, iostat
+        call run_child(mode_arg, captured, exit_code, ok)
+        if (ok) ok = exit_code == 0
+    end subroutine run_capture
+
+    subroutine run_child(mode_arg, captured, exit_code, ok)
+        character(len=*), intent(in) :: mode_arg
+        character(len=:), allocatable, intent(out) :: captured
+        integer, intent(out) :: exit_code
+        logical, intent(out) :: ok
+        character(len=512) :: executable
+        character(kind=c_char), allocatable :: arguments(:)
+        character(kind=c_char) :: bytes(4096)
+        type(c_ptr) :: handle
+        integer :: argument_length, argument_status, position, i
+        integer(c_int) :: nread
 
         captured = ''
+        exit_code = -1
         ok = .false.
-
-        tmp_dir = ''
-        call get_environment_variable('TMPDIR', tmp_dir)
-        if (len_trim(tmp_dir) == 0) tmp_dir = '/tmp'
-        out_file = trim(tmp_dir) // '/fx_test_emit_' // trim(mode_arg(3:)) // &
-            '.out'
-
-        exe = ''
-        call get_command_argument(0, exe)
-        call execute_command_line(trim(exe) // ' ' // mode_arg // ' > ' // &
-            out_file // ' 2>&1', exitstat=exit_code, cmdstat=cmdstat)
-        if (cmdstat /= 0) return
-        if (exit_code /= 0) return
-
-        open (newunit=unit, file=out_file, status='old', action='read', &
-            iostat=iostat)
-        if (iostat /= 0) return
+        executable = ''
+        call get_command_argument(0, executable, length=argument_length, &
+            status=argument_status)
+        if (argument_status /= 0 .or. argument_length > len(executable)) return
+        allocate(arguments(argument_length + len_trim(mode_arg) + 2))
+        position = 1
+        call append_argument(arguments, position, executable(:argument_length))
+        call append_argument(arguments, position, trim(mode_arg))
+        handle = fx_test_spawn_argv(arguments, 2_c_int, 1_c_int)
+        if (.not. c_associated(handle)) return
         do
-            read (unit, '(A)', iostat=iostat) line
-            if (iostat /= 0) exit
-            captured = captured // trim(line) // new_line('a')
+            nread = fx_test_read(handle, bytes, int(size(bytes), c_int), 10000_c_int)
+            if (nread <= 0_c_int) exit
+            do i = 1, int(nread)
+                captured = captured // achar(iachar(bytes(i)))
+            end do
         end do
-        close (unit, status='delete')
-        ok = .true.
-    end subroutine run_capture
+        exit_code = int(fx_test_close(handle, 5000_c_int))
+        ok = exit_code >= 0
+    end subroutine run_child
+
+    subroutine append_argument(buffer, position, argument)
+        character(kind=c_char), intent(inout) :: buffer(:)
+        integer, intent(inout) :: position
+        character(len=*), intent(in) :: argument
+        integer :: i
+
+        do i = 1, len(argument)
+            buffer(position) = argument(i:i)
+            position = position + 1
+        end do
+        buffer(position) = c_null_char
+        position = position + 1
+    end subroutine append_argument
 
     subroutine test_suite_exit_failure_path(suite)
         type(test_suite_t), intent(inout) :: suite
-        character(len=256) :: exe
+        character(len=:), allocatable :: captured
         integer :: exit_code
-        integer :: cmdstat
-        character(len=256) :: cmdmsg
+        logical :: ok
 
-        exe = ''
-        call get_command_argument(0, exe)
-        call execute_command_line(trim(exe) // ' --exit-fail', &
-            exitstat=exit_code, cmdstat=cmdstat, &
-            cmdmsg=cmdmsg)
-        call test_assert(suite, cmdstat == 0, 'exit_failure_spawn_command', &
-            trim(cmdmsg))
-        if (cmdstat == 0) then
+        call run_child('--exit-fail', captured, exit_code, ok)
+        call test_assert(suite, ok, 'exit_failure_spawn_command')
+        if (ok) then
             call test_assert(suite, exit_code == 1, 'exit_failure_exit_code')
         end if
     end subroutine test_suite_exit_failure_path
