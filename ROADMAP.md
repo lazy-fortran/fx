@@ -65,12 +65,20 @@ Main `537a165` removes per-blob lease snapshot rewrites from verified
 materialization. The held source descriptor survives unlink; missing/corrupt
 input preserves the prior destination. Four focused native checks pass, including
 multi-file graph lease lifetime. Actual Fo dogfood exposed over 1 GB of metadata
-writes for an approximately 11 MB source bundle; the Fo consumer recheck remains
-pending. Graph/publication leases and durable roots are retained.
+writes for an approximately 11 MB source bundle. Fo rebuilt with that dependency and its
+manifest/execution-view consumer checks pass; full resident feedback still exposed
+a separate native nested-launch defect under repair in Fo. Graph/publication leases and durable roots are retained.
 
-[#57](https://github.com/lazy-fortran/fx/issues/57) remains open for safe validated
-warm local-hit preflight and initialized-store reuse. These repairs belong in the
-shared cache service; do not add Fo-private cache logic or a second store.
+Validated warm local-hit preflight is delivered through `76bdfbd`. Four focused
+native checks pass: action cache, action-result read leases, action-result store
+and immutable leases. Verified private outputs avoid graph-lease metadata writes;
+restoration retains its leased path. The source includes missing/corrupt graph
+and changed-binding negatives. The original Fo warm/resident consumer recheck
+is next; no end-to-end latency claim is made.
+
+[#57](https://github.com/lazy-fortran/fx/issues/57) remains open for initialized-store
+reuse and any remaining demonstrated consumer hot-path cost. These repairs belong
+in the shared cache service; do not add Fo-private cache logic or a second store.
 
 ## Test cost and remaining architecture
 
