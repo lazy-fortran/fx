@@ -6,8 +6,8 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current `main` is `6beeec4`; `c1da80d` is the watcher-lifecycle implementation
-checkpoint. The digest-part concurrency issue #36 and watcher
+Current `main` is `52ddc06`; `6beeec4` is the immutable-store implementation
+checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
 
@@ -15,8 +15,13 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    verified raw blobs and canonical trees without rewriting existing content.
 2. [#43](https://github.com/lazy-fortran/fx/issues/43) publishes complete action
    results and reports conflicting outputs for one action instead of overwriting.
-3. [#44](https://github.com/lazy-fortran/fx/issues/44) collects only unreachable
-   store objects from explicit leased roots with bounded, crash-safe work.
+3. [#44](https://github.com/lazy-fortran/fx/issues/44) first lands owner/reason
+   roots plus read/publication leases and a monotonic epoch with collection
+   disabled. After fo exposes complete semantic roots, its second phase collects
+   only unreachable objects with bounded, crash-safe work.
+4. [#45](https://github.com/lazy-fortran/fx/issues/45) replaces the remaining
+   JavaScript MCP system fixture with an independent Fortran process oracle and
+   removes Node from fx's repository-owned test contract.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
@@ -60,7 +65,9 @@ write private temporaries; existing verified payloads are never rewritten.
 Keep legacy `fx_cache` replacement semantics isolated. New store writes use a
 versioned namespace; eligible store/v1 payloads may be lazily imported only
 after independent hashing/validation. `nopayload` link records never become
-executable hits. Collection begins only after fo provides owner-specific roots;
+executable hits. The #44 ownership/publication protocol lands before collection
+so #43 result graphs and fo manifests can acquire durable roots without another
+retention mechanism. Collection begins only after fo provides owner-specific roots;
 the current one-bit Gremlin pin is not sufficient retention authority.
 Root/lease acquisition, final graph/action publication and collection use one
 short metadata synchronization boundary; payload copying happens outside it.
