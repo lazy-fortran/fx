@@ -1,7 +1,7 @@
 name = "fx_mcp_test_os"
 version = "0.1.0"
 license = "MIT"
-description = "Test-only process and pipe interfaces for the fx MCP oracle"
+description = "Test-only process, pipe, signal, and identity interfaces for fx tests"
 
 [library]
 type = "static"
