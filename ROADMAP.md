@@ -19,9 +19,10 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    roots plus read/publication leases and a monotonic epoch with collection
    disabled. After fo exposes complete semantic roots, its second phase collects
    only unreachable objects with bounded, crash-safe work.
-4. [#45](https://github.com/lazy-fortran/fx/issues/45) replaces the remaining
-   JavaScript MCP system fixture with an independent Fortran process oracle and
-   removes Node from fx's repository-owned test contract.
+4. **Complete:** [#45](https://github.com/lazy-fortran/fx/issues/45) replaces the
+   remaining JavaScript MCP system fixture with an independent Fortran process
+   oracle. Cold focused and full Node-free profiles build and drive their exact
+   worktree server without installed or stale-profile discovery.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
