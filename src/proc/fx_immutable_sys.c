@@ -475,24 +475,3 @@ int fx_immutable_publish_tree(const char *tmp, const char *dst)
     if (rc != 0) return -1;
     return 0;
 }
-
-static int owned_pause_phase;
-static char owned_pause_ready[PATH_MAX], owned_pause_release[PATH_MAX];
-void fx_immutable_owned_test_configure(int phase, const char *ready,
-                                     const char *release)
-{
-    owned_pause_phase = phase;
-    copy_path(owned_pause_ready, sizeof(owned_pause_ready), ready);
-    copy_path(owned_pause_release, sizeof(owned_pause_release), release);
-}
-void fx_immutable_owned_pause(int phase, const char *path)
-{
-    struct timespec delay = {0, 10000000};
-    if (phase != owned_pause_phase || !owned_pause_ready[0] || !path[0]) return;
-    record_test_marker(owned_pause_ready, path);
-    for (int i = 0; i < 3000; ++i) {
-        if (access(owned_pause_release, F_OK) == 0) break;
-        (void)nanosleep(&delay, NULL);
-    }
-    owned_pause_phase = 0;
-}

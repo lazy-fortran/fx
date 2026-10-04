@@ -84,13 +84,14 @@ contains
                 if (actual == id) then
                     status = owned_publish(capture)
                     ierr = IMMUTABLE_IO_ERROR
+                    if (status == 2_c_int) ierr = IMMUTABLE_UNSUPPORTED
                     if (status == 0_c_int .or. status == 1_c_int) then
                         call immutable_store_verify_tree(store, id, ierr)
-                        if (ierr /= IMMUTABLE_OK) cleanup = owned_reject(capture)
                     end if
                 end if
             end if
         end if
+        if (ierr /= IMMUTABLE_OK) cleanup = owned_reject(capture)
         call owned_dispose(capture)
     end subroutine publish_tree_capture
 
