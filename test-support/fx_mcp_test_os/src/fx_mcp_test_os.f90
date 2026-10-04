@@ -2,18 +2,18 @@ module fx_mcp_test_os
     use iso_c_binding, only: c_int, c_char, c_ptr
     implicit none
     private
-    public :: fx_test_spawn, fx_test_find_server, fx_test_write
+    public :: fx_test_spawn_argv, fx_test_is_executable, fx_test_write
     public :: fx_test_read, fx_test_close
     interface
-        type(c_ptr) function fx_test_spawn(path) bind(C)
-            import c_ptr, c_char
-            character(kind=c_char), intent(in) :: path(*)
+        type(c_ptr) function fx_test_spawn_argv(arguments, count, capture_stderr) &
+                bind(C)
+            import c_ptr, c_char, c_int
+            character(kind=c_char), intent(in) :: arguments(*)
+            integer(c_int), value :: count, capture_stderr
         end function
-        integer(c_int) function fx_test_find_server(test_binary, path, n) bind(C)
-            import c_int, c_char
-            character(kind=c_char), intent(in) :: test_binary(*)
-            character(kind=c_char), intent(out) :: path(*)
-            integer(c_int), value :: n
+        integer(c_int) function fx_test_is_executable(path) bind(C)
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
         end function
         integer(c_int) function fx_test_write(handle, bytes, n) bind(C)
             import c_ptr, c_char, c_int
