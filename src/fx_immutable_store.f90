@@ -2,6 +2,7 @@ module fx_immutable_store
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_size_t, &
         c_null_char, c_ptr, c_associated
     use, intrinsic :: iso_fortran_env, only: int64
+    use fx_path, only: path_normalize
     use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_close, owned_begin_path, owned_dispose, owned_materialize_blob, &
@@ -55,6 +56,13 @@ module fx_immutable_store
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function c_mkdirs
+        integer(c_int) function c_resolve_root(path, resolved, capacity) &
+                bind(C, name='fx_immutable_resolve_root')
+            import :: c_char, c_int, c_size_t
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: resolved(*)
+            integer(c_size_t), value :: capacity
+        end function c_resolve_root
         integer(c_int) function c_getpid() bind(C, name='getpid')
             import :: c_int
         end function c_getpid
@@ -85,6 +93,7 @@ contains
         character(len=*), intent(in) :: root_dir
         integer, intent(out) :: ierr
         character(kind=c_char), allocatable :: c_root(:)
+        character(kind=c_char) :: c_resolved(PATH_LIMIT)
         character(len=:), allocatable :: clean
         integer(int64) :: start_tick
         integer(c_int) :: pid
@@ -92,6 +101,14 @@ contains
 
         ierr = IMMUTABLE_INVALID
         clean = trim(root_dir)
+        if (len(clean) == 0 .or. len(clean) >= PATH_LIMIT) return
+        call to_c_text(clean, c_root)
+        if (c_resolve_root(c_root, c_resolved, int(PATH_LIMIT, c_size_t)) /= &
+                0_c_int) then
+            ierr = IMMUTABLE_IO_ERROR
+            return
+        end if
+        clean = path_normalize(from_c_text(c_resolved))
         if (len(clean) == 0 .or. len(clean) >= PATH_LIMIT) return
         call to_c_text(clean, c_root)
         if (c_mkdirs(c_root) /= 0_c_int) then

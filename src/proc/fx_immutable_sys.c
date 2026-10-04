@@ -1,5 +1,9 @@
 /* Filesystem primitives for fx's immutable blob/tree store. */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#else
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -202,6 +206,60 @@ int fx_immutable_mkdirs_sync(const char *path)
 fail:
     close(fd);
     return -1;
+}
+
+int fx_immutable_resolve_root(const char *path, char *resolved, size_t capacity)
+{
+    char candidate[PATH_MAX], canonical[PATH_MAX], suffix[PATH_MAX] = "";
+    char cwd[PATH_MAX];
+    int n;
+    if (!path || !*path || !resolved || capacity == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (path[0] == '/') {
+        n = snprintf(candidate, sizeof(candidate), "%s", path);
+    } else {
+        if (!getcwd(cwd, sizeof(cwd))) return -1;
+        n = snprintf(candidate, sizeof(candidate), "%s/%s", cwd, path);
+    }
+    if (n < 0 || (size_t)n >= sizeof(candidate)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    while (n > 1 && candidate[n - 1] == '/') candidate[--n] = '\0';
+
+    for (;;) {
+        if (realpath(candidate, canonical)) break;
+        if (errno != ENOENT && errno != ENOTDIR) return -1;
+        char *slash = strrchr(candidate, '/');
+        if (!slash || slash[1] == '\0') {
+            errno = EINVAL;
+            return -1;
+        }
+        size_t component_len = strlen(slash + 1);
+        size_t suffix_len = strlen(suffix);
+        if (component_len + suffix_len + (suffix_len ? 2 : 1) > sizeof(suffix)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        memmove(suffix + component_len + (suffix_len ? 1 : 0), suffix,
+                suffix_len + 1);
+        memcpy(suffix, slash + 1, component_len);
+        if (suffix_len) suffix[component_len] = '/';
+        if (slash == candidate) candidate[1] = '\0';
+        else *slash = '\0';
+    }
+
+    if (suffix[0] == '\0') n = snprintf(resolved, capacity, "%s", canonical);
+    else if (strcmp(canonical, "/") == 0)
+        n = snprintf(resolved, capacity, "/%s", suffix);
+    else n = snprintf(resolved, capacity, "%s/%s", canonical, suffix);
+    if (n < 0 || (size_t)n >= capacity) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
 }
 
 int fx_immutable_mkdir_mode(const char *path, int mode)
