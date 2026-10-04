@@ -26,6 +26,12 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    Fortran process oracle. Its narrow C process shim lives in a static test-only
    development dependency: cold FPM, four protocol mutants and the exact fo
    consumer pipeline pass while production fx contains no test symbols.
+5. [#46](https://github.com/lazy-fortran/fx/issues/46)--[#49](https://github.com/lazy-fortran/fx/issues/49)
+   finish the all-Fortran executable-test contract: replace immutable-store
+   shell race control, cache/watcher shell utilities, self-capture redirection
+   and C-owned FPM policy, then enforce a process-tree no-interpreter gate.
+   Declarative workflow/TOML files remain data; test programs, scheduling,
+   parsing and assertions are Fortran with only narrow C OS primitives.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
