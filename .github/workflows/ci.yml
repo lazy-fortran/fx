@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build-test:
-    name: build + fpm test
+    name: build + native acceptance
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fx
@@ -21,7 +21,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gfortran-14 gcc-14 curl nodejs python3 perl ruby
+          sudo apt-get install -y gfortran-14 gcc-14 curl
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
           sudo update-alternatives --install /usr/bin/gfortran gfortran /usr/bin/gfortran-14 100
           gcc --version | head -1

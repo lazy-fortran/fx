@@ -17,8 +17,10 @@ program test_no_interpreter_gate
         [character(len=64) :: 'shell', 'python', 'node', 'perl', 'ruby']
     character(len=256), parameter :: mutant_extensions(5) = &
         [character(len=256) :: '.sh', '.py', '.js', '.pl', '.rb']
-    character(len=64), parameter :: mutant_names(5) = &
-        [character(len=64) :: 'sh', 'python3', 'node', 'perl', 'ruby']
+    character(len=64), parameter :: mutant_names(25) = [character(len=64) :: &
+        'sh', 'bash', 'dash', 'ash', 'zsh', 'ksh', 'csh', 'tcsh', 'fish', &
+        'python3', 'node', 'nodejs', 'npm', 'npx', 'perl', 'ruby', 'lua', &
+        'php', 'awk', 'mawk', 'gawk', 'tclsh', 'wish', 'R', 'Rscript']
     type(test_suite_t) :: suite
     character(len=:), allocatable :: root, bin_path, driver_path, clean_path
     logical :: gate_run, gate_skip, trace_supported
@@ -28,6 +30,7 @@ program test_no_interpreter_gate
 
     call get_command_argument(0, self_path)
     call get_command_argument(1, mode)
+    if (trim(mode) == '--runtime-native') stop
     if (trim(mode) == '--runtime-launch') then
         call launch_runtime_mutant(runtime_status)
         if (runtime_status /= 0) stop 1
@@ -50,14 +53,15 @@ program test_no_interpreter_gate
 
     call get_environment_variable('FX_RUN_NO_INTERPRETER_GATE', env_value)
     gate_run = trim(env_value) == '1'
-    root = '/var/tmp/fx-no-interpreter-'//integer_text(proc_pid())
+    root = '/var/tmp/fx-no-interpreter-'//trim(integer_text(proc_pid()))
     bin_path = root//'/bin'
     call check_equal(fx_test_remove_tree(root), 0, 'old gate fixture is removed')
     call check_equal(fx_test_mkdir_p(bin_path), 0, 'private gate PATH is created')
 
     call check_command_names()
     call check_shebang_forms()
-    call check_checked_in_inventory()
+    call check_tracked_inventory('.', 0, 'repository')
+    call check_temporary_tracked_mutants()
     call check_generated_inventory()
     call check_generated_outputs()
     trace_supported = test_process_trace_supported()
@@ -178,62 +182,92 @@ contains
         end do
     end subroutine check_shebang_forms
 
-    subroutine check_checked_in_inventory()
+    subroutine check_tracked_inventory(directory, expected, label)
+        character(len=*), intent(in) :: directory, label
+        integer, intent(in) :: expected
         type(proc_result_t) :: listing
-        character(len=:), allocatable :: line, path, mode
-        integer :: start, finish, tab, next_line, mutant_count, i
-        logical :: mutant_path, forbidden
-        character(len=16) :: arguments(3)
-
+        character(len=:), allocatable :: path
+        character(len=4096) :: arguments(4)
+        integer :: start, finish, next_line, forbidden_count, file_count
         arguments(1) = 'git'
-        arguments(2) = 'ls-files'
-        arguments(3) = '-s'
-        call proc_exec(arguments, 3, listing)
-        call check(listing%exit_code == 0, 'tracked source inventory command succeeds')
-        mutant_count = 0
+        arguments(2) = '-C'
+        arguments(3) = directory
+        arguments(4) = 'ls-files'
+        call proc_exec(arguments, 4, listing)
+        call check_equal(listing%exit_code, 0, label//' tracked inventory succeeds')
+        forbidden_count = 0
+        file_count = 0
         start = 1
         do while (start <= len(listing%stdout_text))
             next_line = index(listing%stdout_text(start:), achar(10))
-            if (next_line == 0) then
-                finish = len(listing%stdout_text)
-            else
-                finish = start + next_line - 2
-            end if
+            finish = len(listing%stdout_text)
+            if (next_line > 0) finish = start + next_line - 2
             if (finish >= start) then
-                line = listing%stdout_text(start:finish)
-                tab = index(line, achar(9))
-                if (tab > 0) then
-                    mode = line(:6)
-                    path = line(tab + 1:)
-                    mutant_path = index(path, &
-                        'test/fixtures/no_interpreter_mutants/checked_in_') == 1
-                    forbidden = forbidden_executable(path, read_shebang(path))
-                    if (mutant_path) then
-                        mutant_count = mutant_count + 1
-                        call check(forbidden, 'checked-in interpreter mutant is rejected: '//path)
-                    else if (forbidden) then
-                        call check(.false., 'tracked interpreter executable: '//path)
-                    end if
-                    if (mode == '100755' .and. mutant_path) then
-                        call check(forbidden, 'executable bit mutant is rejected: '//path)
-                    end if
+                path = directory//'/'//listing%stdout_text(start:finish)
+                file_count = file_count + 1
+                if (forbidden_executable(path, read_shebang(path))) then
+                    forbidden_count = forbidden_count + 1
+                    if (expected == 0) call check(.false., &
+                        'tracked interpreter executable: '//path)
                 end if
             end if
             if (next_line == 0) exit
             start = finish + 2
         end do
-        call check(mutant_count == 7, 'all checked-in language mutants are inventoried')
-    end subroutine check_checked_in_inventory
+        call check(file_count > 0, label//' tracked inventory is nonempty')
+        call check_equal(forbidden_count, expected, &
+            label//' tracked interpreter controls are classified')
+    end subroutine check_tracked_inventory
+
+    subroutine check_temporary_tracked_mutants()
+        character(len=:), allocatable :: directory, path
+        character(len=4096) :: arguments(7)
+        integer :: ierr, i, unit
+        directory = root//'/tracked-controls'
+        call check_equal(fx_test_mkdir_p(directory), 0, &
+            'temporary tracked-control repository is created')
+        arguments(1) = 'git'
+        arguments(2) = '-C'
+        arguments(3) = directory
+        arguments(4) = 'init'
+        arguments(5) = '--quiet'
+        arguments(6) = '--template='
+        call proc_exec_silent(arguments, 6, ierr)
+        call check_equal(ierr, 0, 'temporary native Git repository initializes')
+        do i = 1, size(mutant_names)
+            path = directory//'/control_'//trim(mutant_names(i))//'.fixture'
+            call write_generated_control(path, &
+                '#!/usr/bin/env '//trim(mutant_names(i)))
+        end do
+        do i = 1, size(mutant_classes)
+            path = directory//'/extension_'//trim(mutant_classes(i))// &
+                trim(mutant_extensions(i))
+            call write_generated_control(path, trim(mutant_source(i)))
+        end do
+        call write_generated_control(directory//'/env_assignment.fixture', &
+            '#!/usr/bin/env FOO=bar python3')
+        call write_generated_control(directory//'/env_unset.fixture', &
+            '#!/usr/bin/env -u FOO python3')
+        open (newunit=unit, file=directory//'/native.f90', status='replace')
+        write (unit, '(A)') 'program native_control'
+        write (unit, '(A)') 'end program'
+        close (unit)
+        arguments(4) = 'add'
+        arguments(5) = '-f'
+        arguments(6) = '--'
+        arguments(7) = '.'
+        call proc_exec_silent(arguments, 7, ierr)
+        call check_equal(ierr, 0, 'temporary Fortran-generated controls are indexed')
+        call check_tracked_inventory(directory, size(mutant_names) + &
+            size(mutant_classes) + 2, 'temporary controls')
+    end subroutine check_temporary_tracked_mutants
 
     subroutine check_generated_inventory()
         character(len=:), allocatable :: files(:), path, fixture_path
         character(len=512) :: source
         integer :: count, ierr, i, unit
-        logical :: fixture, forbidden
 
         fixture_path = root//'/generated'
-        call check_equal(fx_test_mkdir_p(fixture_path), 0, &
-            'generated mutant scratch is created')
         call check_equal(fx_test_mkdir_p(fixture_path), 0, &
             'generated mutant directory is created')
         do i = 1, size(mutant_classes)
@@ -246,21 +280,23 @@ contains
             call check_equal(fx_test_chmod(path, 493), 0, &
                 'generated mutant is executable: '//trim(mutant_classes(i)))
         end do
+        do i = 1, size(mutant_names)
+            path = fixture_path//'/family_'//trim(mutant_names(i))//'.fixture'
+            call write_generated_control(path, &
+                '#!/usr/bin/env '//trim(mutant_names(i)))
+        end do
         call write_generated_control(fixture_path//'/env_assignment.fixture', &
             '#!/usr/bin/env FOO=bar python3')
         call write_generated_control(fixture_path//'/env_unset.fixture', &
             '#!/usr/bin/env -u FOO python3')
         call proc_scan_files(fixture_path, files, count, ierr)
         call check_equal(ierr, 0, 'generated executable inventory succeeds')
+        call check_equal(count, size(mutant_names) + size(mutant_classes) + 2, &
+            'generated inventory contains every independent control')
         do i = 1, count
             path = trim(files(i))
-            fixture = index(path, fixture_path//'/') == 1
-            forbidden = forbidden_executable(path, read_shebang(path))
-            if (fixture) then
-                call check(forbidden, 'generated interpreter mutant is rejected: '//path)
-            else if (forbidden) then
-                call check(.false., 'generated interpreter executable: '//path)
-            end if
+            call check(forbidden_executable(path, read_shebang(path)), &
+                'generated interpreter mutant is rejected: '//path)
         end do
         call check(test_process_is_executable(fixture_path//'/'// &
             'generated_shell.sh') == 1, 'generated mutant has executable mode')
@@ -342,67 +378,69 @@ contains
 
     subroutine check_runtime_mutants()
         character(kind=c_char) :: paths(TRACE_CAPACITY)
-        character(len=:), allocatable :: forbidden
-        character(len=4096) :: arguments(5), interpreter
-        integer :: ierr, status, i
+        character(len=:), allocatable :: content, target, alias, forbidden
+        character(len=4096) :: arguments(5)
+        integer :: ierr, status, i, byte_count
         character(len=1) :: empty_environment(0)
-
+        call proc_file_read(trim(self_path), content, byte_count, ierr)
+        call check_equal(ierr, 0, 'native Fortran control image is read')
+        if (ierr /= 0) return
         arguments(1) = self_path
         arguments(2) = '--runtime-orphan'
-        arguments(4) = '-c'
+        arguments(4) = '--runtime-native'
+        arguments(5) = ''
         do i = 1, size(mutant_names)
-            call find_tool(trim(mutant_names(i)), interpreter, ierr)
-            call check_equal(ierr, 0, 'runtime interpreter control is available')
-            if (ierr /= 0) cycle
-            arguments(3) = interpreter
-            arguments(4) = '-c'
-            if (i >= 3) arguments(4) = '-e'
-            arguments(5) = '0'
-            if (i == 1) arguments(5) = ':'
+            target = root//'/'//trim(mutant_names(i))
+            alias = root//'/neutral-'//trim(integer_text(i))
+            call write_native_image(target, alias, content, byte_count)
+            arguments(3) = alias
             call test_process_trace_execs(arguments, &
                 empty_environment, paths, status, ierr, 5000)
-            call check_equal(ierr, 0, 'runtime descendant trace succeeds')
-            call check_equal(status, 0, 'runtime descendant exits normally')
+            call check_equal(ierr, 0, 'native descendant trace succeeds')
+            call check_equal(status, 0, 'native descendant exits normally')
             forbidden = forbidden_trace_path(paths)
-            call check(len(forbidden) > 0, &
-                'runtime interpreter descendant is rejected: '//trim(mutant_names(i)))
+            call check(forbidden == target, &
+                'resolved forbidden family is rejected: '//trim(mutant_names(i)))
+            call check_equal(fx_test_remove_tree(alias), 0, 'native alias is removed')
+            call check_equal(fx_test_remove_tree(target), 0, 'native image is removed')
         end do
     end subroutine check_runtime_mutants
 
-    subroutine check_versioned_runtime()
-        character(kind=c_char) :: paths(TRACE_CAPACITY)
-        character(len=:), allocatable :: content, target, alias, forbidden
-        character(len=4096) :: interpreter, arguments(4)
-        character(len=1) :: empty_environment(0)
-        integer :: ierr, status, byte_count
-        call find_tool('ruby', interpreter, ierr)
-        call check_equal(ierr, 0, 'Ruby runtime control is available')
-        if (ierr /= 0) return
-        target = root//'/ruby3.3'
-        alias = root//'/native-runtime-alias'
-        call proc_file_read(trim(interpreter), content, byte_count, ierr)
-        call check_equal(ierr, 0, 'native Ruby image is read')
-        if (ierr /= 0) return
+    subroutine write_native_image(target, alias, content, byte_count)
+        character(len=*), intent(in) :: target, alias, content
+        integer, intent(in) :: byte_count
+        integer :: ierr
         call proc_file_write(target, content, byte_count, ierr)
-        call check_equal(ierr, 0, 'versioned Ruby fixture image is written')
-        if (ierr /= 0) return
+        call check_equal(ierr, 0, 'native Fortran fixture image is written')
         call check_equal(fx_test_chmod(target, 493), 0, &
-            'versioned Ruby fixture is executable')
+            'native Fortran fixture is executable')
         call check_equal(fx_test_symlink(target, alias), 0, &
             'neutral runtime alias is created')
         call check(.not. forbidden_executable(alias, ''), &
             'neutral alias has no interpreter name')
+    end subroutine write_native_image
+
+    subroutine check_versioned_runtime()
+        character(kind=c_char) :: paths(TRACE_CAPACITY)
+        character(len=:), allocatable :: content, target, alias, forbidden
+        character(len=4096) :: arguments(2)
+        character(len=1) :: empty_environment(0)
+        integer :: ierr, status, byte_count
+        target = root//'/ruby3.3'
+        alias = root//'/native-runtime-alias'
+        call proc_file_read(trim(self_path), content, byte_count, ierr)
+        call check_equal(ierr, 0, 'native Fortran version control image is read')
+        if (ierr /= 0) return
+        call write_native_image(target, alias, content, byte_count)
         arguments(1) = alias
-        arguments(2) = '--disable-gems'
-        arguments(3) = '-e'
-        arguments(4) = '0'
+        arguments(2) = '--runtime-native'
         call test_process_trace_execs(arguments, empty_environment, &
             paths, status, ierr, 5000)
-        call check_equal(ierr, 0, 'versioned runtime alias is traced')
-        call check_equal(status, 0, 'versioned runtime fixture executes normally')
+        call check_equal(ierr, 0, 'versioned native runtime alias is traced')
+        call check_equal(status, 0, 'versioned native fixture executes normally')
         forbidden = forbidden_trace_path(paths)
         call check(forbidden == target, &
-            'trace rejects resolved ruby3.3 image behind neutral alias')
+            'trace rejects resolved ruby3.3 name behind neutral alias')
     end subroutine check_versioned_runtime
 
     subroutine find_driver(path)
