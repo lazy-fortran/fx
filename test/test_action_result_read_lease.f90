@@ -1,7 +1,10 @@
 program test_action_result_read_lease
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_suite_summary, test_suite_exit
     use fx_proc, only: proc_pid
+    use fx_cache, only: cache_t, cache_init
+    use fx_action_cache, only: cache_store_action, cache_restore_action
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_sleep_ms
@@ -13,6 +16,15 @@ program test_action_result_read_lease
         action_result_materialize_blob, action_result_action_key, &
         ACTION_RESULT_OK, ACTION_RESULT_CONFLICT, ACTION_RESULT_QUARANTINED
     implicit none
+
+    interface
+        integer(c_int) function configure_barrier(phase, ready_path, release_path) &
+                bind(C, name='fx_action_result_test_configure')
+            import c_char, c_int
+            integer(c_int), value :: phase
+            character(kind=c_char), intent(in) :: ready_path(*), release_path(*)
+        end function configure_barrier
+    end interface
 
     type(test_suite_t) :: suite
     type(action_result_store_t) :: store
@@ -34,6 +46,10 @@ program test_action_result_read_lease
         call run_restore_reader()
         stop 0
     end if
+    if (trim(executable) == '--pending-publisher') then
+        call run_pending_publisher()
+        stop 0
+    end if
 
     call test_suite_init(suite, 'fx_action_result_read_lease')
     write(root, '(A,I0)') '/var/tmp/fx_action_read_', proc_pid()
@@ -43,6 +59,11 @@ program test_action_result_read_lease
     store_root = trim(root)//'/store/v2'
     call action_result_store_init(store, trim(store_root), ierr)
     call test_assert_equal_int(suite, 0, ierr, 'action result store initializes')
+    call get_command_argument(0, executable)
+    call test_pending_publication(.false.)
+    call test_pending_publication(.true.)
+    store_root = trim(root)//'/store/v2'
+    call action_result_store_init(store, trim(store_root), ierr)
 
     sources = [character(len=512) :: trim(root)//'/source-a', &
         trim(root)//'/source-b']
@@ -178,6 +199,7 @@ contains
         character(len=512) :: child_root, child_action, child_ready
         character(len=512) :: child_release, child_done, child_dest
         character(len=512) :: child_finish, child_released
+        character(len=512) :: acquired
         character(len=64) :: result_id
         integer :: local_err, release_err, i
 
@@ -194,6 +216,12 @@ contains
         call action_result_read_acquire(child_store, trim(child_action), read, &
             local_err)
         if (local_err /= ACTION_RESULT_OK) stop 62
+        call get_command_argument(10, acquired)
+        if (len_trim(acquired) > 0) then
+            call write_text(trim(acquired), 'leased-before-binding-lookup')
+            call wait_for_file(trim(acquired)//'-lookup', completed)
+            if (.not. completed) stop 68
+        end if
         call action_result_read_lookup(child_store, read, restored, result_id, &
             local_err)
         if (local_err /= ACTION_RESULT_OK) stop 63
@@ -213,6 +241,278 @@ contains
         if (release_err /= ACTION_RESULT_OK) stop 67
         call write_text(trim(child_released), 'lease-released')
     end subroutine run_restore_reader
+
+    subroutine run_pending_publisher()
+        type(action_result_store_t) :: child_store
+        type(cache_t) :: legacy
+        type(immutable_tree_entry_t) :: outputs(2)
+        character(len=512) :: base, child_ready, child_release, mode, paths(2)
+        character(len=64) :: result_id
+        integer :: local_err
+        logical :: restored
+
+        call get_command_argument(2, base)
+        call get_command_argument(3, mode)
+        call get_command_argument(4, child_ready)
+        call get_command_argument(5, child_release)
+        local_err = int(configure_barrier(1_c_int, &
+            trim(child_ready)//c_null_char, trim(child_release)//c_null_char))
+        if (local_err /= 0) stop 71
+        if (trim(mode) == 'legacy') then
+            call cache_init(legacy, trim(base)//'/cache')
+            call cache_restore_action(legacy, 'pending-action', &
+                trim(base)//'/imported.o', trim(base)//'/imported', restored)
+            if (.not. restored) stop 72
+        else
+            call action_result_store_init(child_store, &
+                trim(base)//'/cache/store/v2', local_err)
+            if (local_err /= 0) stop 73
+            paths = [character(len=512) :: trim(base)//'/source.o', &
+                trim(base)//'/widget.mod']
+            outputs(1) = result_entry('object', 'object', 420)
+            outputs(2) = result_entry('module-widget', 'module', 420)
+            call action_result_publish_files(child_store, 'pending-action', &
+                paths, outputs, result_id, local_err)
+            if (local_err /= ACTION_RESULT_OK) stop 74
+        end if
+    end subroutine run_pending_publisher
+
+    subroutine test_pending_publication(import_legacy)
+        logical, intent(in) :: import_legacy
+        type(cache_t) :: legacy
+        character(len=512) :: base, mode, publish_release
+        character(len=512) :: acquired, restore_ready, restore_release
+        character(len=512) :: restore_done, restore_finish, restore_released
+        character(len=512) :: destination
+        character(len=64) :: pending_id
+        integer :: publisher, reader_pid, exit_status
+        logical :: reaped, found
+
+        mode = 'ordinary'
+        if (import_legacy) mode = 'legacy'
+        base = trim(root)//'/'//trim(mode)
+        call prepare_pending_fixture(base, import_legacy, legacy)
+        call start_pending_publisher(base, mode, publisher, publish_release, pending_id)
+        if (publisher <= 0) return
+        call start_pending_reader(base, reader_pid, destination, acquired, &
+            restore_ready, restore_release, restore_done, restore_finish, &
+            restore_released)
+        call wait_for_file(trim(acquired), found)
+        call test_assert(suite, found, 'reader leases P graph before binding lookup')
+        if (.not. found) then
+            call write_text(trim(publish_release), 'unblock-failed-reader')
+            call wait_for_child(publisher, 15000, exit_status, reaped)
+            call wait_for_child(reader_pid, 15000, exit_status, reaped)
+            return
+        end if
+        call assert_graph_lease('pending-action', pending_id, .true., &
+            'pending graph is protected while binding lookup waits')
+        call write_text(trim(publish_release), 'publish-binding')
+        call wait_for_child(publisher, 15000, exit_status, reaped)
+        call test_assert(suite, reaped, 'pending publisher is reaped')
+        call test_assert_equal_int(suite, 0, exit_status, &
+            'publication or legacy import retry restores successfully')
+        call assert_metadata_record('P', pending_id, 'publication', .false.)
+        call assert_metadata_record('R', pending_id, 'bound', .true.)
+        call write_text(trim(acquired)//'-lookup', 'lookup-published-binding')
+        call finish_pending_reader(reader_pid, destination, pending_id, &
+            restore_ready, restore_release, restore_done, restore_finish, &
+            restore_released)
+        if (import_legacy) call assert_legacy_conflict(legacy, base)
+    end subroutine test_pending_publication
+
+    subroutine prepare_pending_fixture(base, import_legacy, legacy)
+        character(len=*), intent(in) :: base
+        logical, intent(in) :: import_legacy
+        type(cache_t), intent(out) :: legacy
+        character(len=64) :: output_id
+        integer :: local_err
+
+        local_err = fx_test_mkdir_p(trim(base)//'/imported')
+        call test_assert_equal_int(suite, 0, local_err, 'pending fixture created')
+        call write_text(trim(base)//'/source.o', 'pending object bytes')
+        call write_text(trim(base)//'/widget.mod', 'pending module bytes')
+        call cache_init(legacy, trim(base)//'/cache')
+        store_root = trim(base)//'/cache/store/v2'
+        if (import_legacy) then
+            call cache_store_action(legacy, 'pending-action', &
+                trim(base)//'/source.o', trim(base), 'widget', output_id, local_err)
+            call test_assert_equal_int(suite, 0, local_err, 'legacy record seeded')
+            local_err = fx_test_remove_tree(trim(store_root))
+            call test_assert_equal_int(suite, 0, local_err, &
+                'isolated v2 fixture removed to force public legacy import')
+        end if
+        call action_result_store_init(store, trim(store_root), local_err)
+        call test_assert_equal_int(suite, 0, local_err, 'pending store initializes')
+    end subroutine prepare_pending_fixture
+
+    subroutine start_pending_publisher(base, mode, pid, publisher_release, pending_id)
+        character(len=*), intent(in) :: base, mode
+        integer, intent(out) :: pid
+        character(len=*), intent(out) :: publisher_release, pending_id
+        character(len=512) :: child_args(6), publisher_ready
+        character(len=64) :: key
+        integer :: local_err
+        logical :: found
+
+        publisher_ready = trim(base)//'/publisher-ready'
+        publisher_release = trim(base)//'/publisher-release'
+        child_args = [character(len=512) :: trim(executable), &
+            '--pending-publisher', trim(base), trim(mode), trim(publisher_ready), &
+            trim(publisher_release)]
+        call test_process_spawn(child_args, pid, local_err)
+        call test_assert_equal_int(suite, 0, local_err, 'pending publisher starts')
+        if (local_err /= 0) return
+        call wait_for_file(trim(publisher_ready), found)
+        call test_assert(suite, found, 'publisher pauses before binding rename')
+        call pending_graph_id(pending_id)
+        call test_assert(suite, len_trim(pending_id) == 64, &
+            'anticipated graph has a durable P lease before binding')
+        key = action_result_action_key('pending-action')
+        inquire(file=trim(store_root)//'/actions/sha256/'//key(1:2)//'/'//key, &
+            exist=found)
+        call test_assert(suite, .not. found, 'action binding is still absent')
+        call assert_metadata_record('R', pending_id, 'bound', .false.)
+    end subroutine start_pending_publisher
+
+    subroutine start_pending_reader(base, pid, destination, acquired, &
+            reader_ready, reader_release, reader_done, reader_finish, reader_released)
+        character(len=*), intent(in) :: base
+        integer, intent(out) :: pid
+        character(len=*), intent(out) :: destination, acquired, reader_ready
+        character(len=*), intent(out) :: reader_release, reader_done, reader_finish
+        character(len=*), intent(out) :: reader_released
+        character(len=512) :: child_args(11)
+        integer :: local_err
+
+        destination = trim(base)//'/restored'
+        local_err = fx_test_mkdir_p(trim(destination))
+        call test_assert_equal_int(suite, 0, local_err, 'pending restore dir created')
+        acquired = trim(base)//'/reader-acquired'
+        reader_ready = trim(base)//'/reader-ready'
+        reader_release = trim(base)//'/reader-release'
+        reader_done = trim(base)//'/reader-done'
+        reader_finish = trim(base)//'/reader-finish'
+        reader_released = trim(base)//'/reader-released'
+        child_args = [character(len=512) :: trim(executable), '--restore-reader', &
+            trim(store_root), 'pending-action', trim(reader_ready), &
+            trim(reader_release), trim(reader_done), trim(destination), &
+            trim(reader_finish), trim(reader_released), trim(acquired)]
+        call test_process_spawn(child_args, pid, local_err)
+        call test_assert_equal_int(suite, 0, local_err, 'pending graph reader starts')
+    end subroutine start_pending_reader
+
+    subroutine finish_pending_reader(pid, destination, pending_id, reader_ready, &
+            reader_release, reader_done, reader_finish, reader_released)
+        integer, intent(in) :: pid
+        character(len=*), intent(in) :: destination, pending_id, reader_ready
+        character(len=*), intent(in) :: reader_release, reader_done, reader_finish
+        character(len=*), intent(in) :: reader_released
+        integer :: exit_status
+        logical :: found, reaped
+
+        call wait_for_file(reader_ready, found)
+        call test_assert(suite, found, 'reader looks up completed binding')
+        call assert_graph_lease('pending-action', pending_id, .true., &
+            'P graph lease survives publication and binding lookup')
+        call write_text(reader_release, 'restore-companions')
+        call wait_for_file(reader_done, found)
+        call test_assert(suite, found, 'pending reader completes all replacements')
+        call test_assert(suite, file_has_bytes(trim(destination)//'/object', &
+            'pending object bytes'), 'pending object bytes restore exactly')
+        call test_assert(suite, file_has_bytes(trim(destination)//'/module-widget', &
+            'pending module bytes'), 'pending companion bytes restore exactly')
+        call assert_graph_lease('pending-action', pending_id, .true., &
+            'read lease remains after full companion restoration')
+        call write_text(reader_finish, 'release-owned-lease')
+        call wait_for_file(reader_released, found)
+        call test_assert(suite, found, 'pending reader releases its own token')
+        call wait_for_child(pid, 15000, exit_status, reaped)
+        call test_assert(suite, reaped, 'pending reader is reaped')
+        call test_assert_equal_int(suite, 0, exit_status, 'pending reader succeeds')
+        call assert_graph_lease('pending-action', pending_id, .false., &
+            'pending reader lease is absent after release')
+        call assert_metadata_record('R', pending_id, 'bound', .true.)
+    end subroutine finish_pending_reader
+
+    subroutine assert_legacy_conflict(legacy, base)
+        type(cache_t), intent(in) :: legacy
+        character(len=*), intent(in) :: base
+        type(immutable_tree_entry_t) :: output(1)
+        character(len=512) :: path(1)
+        character(len=64) :: result_id
+        integer :: local_err
+        logical :: restored
+
+        call test_assert(suite, file_has_bytes(trim(base)//'/imported.o', &
+            'pending object bytes'), 'public importer restores object after retry')
+        call test_assert(suite, file_has_bytes(trim(base)//'/imported/widget.mod', &
+            'pending module bytes'), 'public importer restores module after retry')
+        path(1) = trim(base)//'/conflicting.o'
+        call write_text(trim(path(1)), 'conflicting imported object')
+        output(1) = result_entry('object', 'object', 420)
+        call action_result_publish_files(store, 'pending-action', path, output, &
+            result_id, local_err)
+        call test_assert_equal_int(suite, ACTION_RESULT_CONFLICT, local_err, &
+            'legacy imported action becomes durably conflicted')
+        call write_text(trim(base)//'/imported.o', 'keep existing object')
+        call write_text(trim(base)//'/imported/widget.mod', 'keep existing module')
+        call cache_restore_action(legacy, 'pending-action', &
+            trim(base)//'/imported.o', trim(base)//'/imported', restored)
+        call test_assert(suite, .not. restored, 'conflict blocks legacy fallback')
+        call test_assert(suite, file_has_bytes(trim(base)//'/imported.o', &
+            'keep existing object'), 'conflict preserves caller object bytes')
+        call test_assert(suite, file_has_bytes(trim(base)//'/imported/widget.mod', &
+            'keep existing module'), 'conflict preserves caller companion bytes')
+    end subroutine assert_legacy_conflict
+
+    subroutine pending_graph_id(id)
+        character(len=*), intent(out) :: id
+        character(len=2048) :: line
+        character(len=64) :: key
+        integer :: unit, local_err, delimiter
+
+        id = ''
+        key = action_result_action_key('pending-action')
+        open(newunit=unit, file=trim(store_root)//'/.fx-metadata/leases', &
+            status='old', action='read', iostat=local_err)
+        if (local_err /= 0) return
+        do
+            read(unit, '(A)', iostat=local_err) line
+            if (local_err /= 0) exit
+            if (line(1:2) /= 'P|') cycle
+            if (index(line, '|'//key//'|fx-action-v1|publication|tree|') == 0) cycle
+            delimiter = index(trim(line), '|', back=.true.)
+            if (delimiter > 0) id = trim(line(delimiter + 1:))
+        end do
+        close(unit)
+    end subroutine pending_graph_id
+
+    subroutine assert_metadata_record(kind, id, reason, expected)
+        character(len=*), intent(in) :: kind, id, reason
+        logical, intent(in) :: expected
+        character(len=2048) :: line
+        character(len=512) :: needle
+        integer :: unit, local_err
+        logical :: found
+
+        needle = '|'//action_result_action_key('pending-action')// &
+            '|fx-action-v1|'//reason//'|tree|'//id
+        found = .false.
+        open(newunit=unit, file=trim(store_root)//'/.fx-metadata/leases', &
+            status='old', action='read', iostat=local_err)
+        if (local_err == 0) then
+            do
+                read(unit, '(A)', iostat=local_err) line
+                if (local_err /= 0) exit
+                if (line(1:2) /= kind//'|') cycle
+                if (index(line, trim(needle)) > 0) found = .true.
+            end do
+            close(unit)
+        end if
+        call test_assert(suite, found .eqv. expected, &
+            kind//' graph record presence for '//reason)
+    end subroutine assert_metadata_record
 
     function result_entry(path, role, mode) result(entry)
         character(len=*), intent(in) :: path, role
@@ -273,6 +573,7 @@ contains
 
         reaped = .false.
         exit_status = -1
+        if (pid <= 0) return
         do i = 1, timeout_ms / 5
             call test_process_wait_once(pid, exit_status, child_state)
             if (child_state == 1) then
