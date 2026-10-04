@@ -124,7 +124,9 @@ Linux receipt SHA256:
 `a1bc2278710df3810cef7af4bbdaa3cc177d4182c9cc100695f29fe1c568042f`.
 Source integration preserves the tested patch; prior failures remain historical
 evidence. Broader platform coverage remains explicit rather than implied by
-these two targets. Execution is authorized again under the continuation request.
+these two targets. The latest replacement workspace AGENTS instructions now
+restrict work to documents/issues; implementation and owned jobs are stopped
+pending an explicit execution trigger. Completed repairs and receipts stay intact.
 
 #53's cleanup is integrated at `fc9a1ec`: production watcher controls, including
 the old synthetic ENOSPC trigger, are removed. Descriptor measurement lives in
