@@ -12,6 +12,7 @@ program test_immutable_materialization
         immutable_store_init, immutable_store_put_blob, immutable_store_blob_path, &
         immutable_store_materialize_blob, &
         IMMUTABLE_OK, IMMUTABLE_INVALID, IMMUTABLE_BLOB, &
+        IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, &
         IMMUTABLE_MATERIALIZE_COPY, IMMUTABLE_MATERIALIZE_CLONE
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_materialize_tree, immutable_store_verify_tree
@@ -80,6 +81,7 @@ program test_immutable_materialization
     call test_collisions()
     call test_clone_and_fallback()
     call test_materialization_contract()
+    call test_failed_materialization_preserves_destination()
     call test_materialization_crash()
     call test_suite_summary(suite)
     call test_suite_exit(suite)
@@ -225,6 +227,42 @@ contains
             observed == 'OUTSIDE MATERIALIZATION SENTINEL', &
             'materialization leaves the unrelated outside file unchanged')
     end subroutine test_materialization_contract
+
+    subroutine test_failed_materialization_preserves_destination()
+        character(len=512) :: destination
+        character(len=:), allocatable :: stored, observed
+        logical :: cloned
+        integer :: result, ios, local_err
+
+        destination = trim(root)//'/materialization-failure/destination'
+        local_err = fx_test_mkdir_p(trim(root)//'/materialization-failure')
+        call test_assert_equal_int(suite, 0, local_err, &
+            'failed-materialization parent is created')
+        call write_text(trim(destination), 'existing destination sentinel')
+        stored = immutable_store_blob_path(store, blob)
+
+        call write_text(stored, 'corrupt immutable bytes')
+        call immutable_store_materialize_blob(store, blob, trim(destination), &
+            420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+        call test_assert_equal_int(suite, IMMUTABLE_CORRUPT, result, &
+            'materialization rejects bytes that do not match the blob ID')
+        call read_text(trim(destination), observed, ios)
+        call test_assert(suite, ios == 0 .and. &
+            observed == 'existing destination sentinel', &
+            'corrupt input leaves the prior destination unchanged')
+
+        local_err = fx_test_remove_tree(stored)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'test removes the blob before materialization opens it')
+        call immutable_store_materialize_blob(store, blob, trim(destination), &
+            420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+        call test_assert_equal_int(suite, IMMUTABLE_MISSING, result, &
+            'unlink before opening reports a cache miss')
+        call read_text(trim(destination), observed, ios)
+        call test_assert(suite, ios == 0 .and. &
+            observed == 'existing destination sentinel', &
+            'a pre-open cache miss leaves the prior destination unchanged')
+    end subroutine test_failed_materialization_preserves_destination
 
     subroutine test_materialization_crash()
         integer, parameter :: NBYTES = 64 * 1024 * 1024
