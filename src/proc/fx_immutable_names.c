@@ -2,8 +2,6 @@
 #define _GNU_SOURCE
 #define _DARWIN_C_SOURCE
 #include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -135,14 +133,4 @@ int fx_immutable_clone_id(const char *path, long long *id)
     (void)path; (void)id;
     return -1;
 #endif
-}
-int fx_immutable_test_tmp_root(char *out, int cap)
-{
-    /* Resolve the system scratch alias once, before the store's nofollow walk. */
-    char *path = realpath("/var/tmp", NULL);
-    int length;
-    if (!path) return -1;
-    length = snprintf(out, (size_t)cap, "%s", path);
-    free(path);
-    return length >= 0 && length < cap ? 0 : -1;
 }
