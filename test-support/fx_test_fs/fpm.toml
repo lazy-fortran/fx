@@ -1,0 +1,11 @@
+name = "fx_test_fs"
+version = "0.1.0"
+license = "MIT"
+description = "Test-only native filesystem and monotonic time interfaces"
+
+[library]
+source-dir = "src"
+type = "static"
+
+[install]
+library = false
