@@ -6,13 +6,13 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current `main` is `4179a3d`; `c1da80d` is the watcher-lifecycle implementation
+Current `main` is `6beeec4`; `c1da80d` is the watcher-lifecycle implementation
 checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
 
-1. [#42](https://github.com/lazy-fortran/fx/issues/42) publishes verified raw
-   blobs and canonical trees without rewriting existing content.
+1. **Complete:** [#42](https://github.com/lazy-fortran/fx/issues/42) publishes
+   verified raw blobs and canonical trees without rewriting existing content.
 2. [#43](https://github.com/lazy-fortran/fx/issues/43) publishes complete action
    results and reports conflicting outputs for one action instead of overwriting.
 3. [#44](https://github.com/lazy-fortran/fx/issues/44) collects only unreachable
