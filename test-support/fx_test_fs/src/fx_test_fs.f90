@@ -3,7 +3,7 @@ module fx_test_fs
     implicit none
     private
     public :: fx_test_mkdir_p, fx_test_remove_tree, fx_test_rename
-    public :: fx_test_symlink, fx_test_sleep_ms
+    public :: fx_test_symlink, fx_test_chmod, fx_test_sleep_ms
 
     interface
         integer(c_int) function c_mkdir_p(path) &
@@ -28,6 +28,12 @@ module fx_test_fs
             character(kind=c_char), intent(in) :: target(*)
             character(kind=c_char), intent(in) :: link_path(*)
         end function c_symlink
+        integer(c_int) function c_chmod(path, mode) &
+                bind(C, name='fx_test_fs_chmod')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+        end function c_chmod
         integer(c_int) function c_sleep_ms(milliseconds) &
                 bind(C, name='fx_test_fs_sleep_ms')
             import :: c_int, c_int64_t
@@ -58,6 +64,12 @@ contains
         ierr = int(c_symlink(trim(target)//c_null_char, &
             trim(link_path)//c_null_char))
     end function fx_test_symlink
+
+    integer function fx_test_chmod(path, mode) result(ierr)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: mode
+        ierr = int(c_chmod(trim(path)//c_null_char, int(mode, c_int)))
+    end function fx_test_chmod
 
     integer function fx_test_sleep_ms(milliseconds) result(ierr)
         integer(c_int64_t), intent(in) :: milliseconds

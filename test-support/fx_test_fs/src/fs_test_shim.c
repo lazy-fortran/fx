@@ -123,6 +123,12 @@ int fx_test_fs_symlink(const char *target, const char *link_path)
     return symlink(target, link_path);
 }
 
+int fx_test_fs_chmod(const char *path, int mode)
+{
+    if (!safe_fixture_root(path)) { errno = EINVAL; return -1; }
+    return chmod(path, (mode_t)mode);
+}
+
 int fx_test_fs_sleep_ms(int64_t milliseconds)
 {
     struct timespec now;

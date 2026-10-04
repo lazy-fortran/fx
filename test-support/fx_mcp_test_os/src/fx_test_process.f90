@@ -4,6 +4,8 @@ module fx_test_process
     private
     public :: test_process_spawn, test_process_spawn_piped, test_process_read
     public :: test_process_write, test_process_close, test_process_is_executable
+    public :: test_process_trace_execs
+    public :: test_process_trace_supported
     public :: test_process_wait_once, test_process_signal, test_process_identity
     public :: test_process_clock_ms, test_process_sleep_ms
 
@@ -52,6 +54,21 @@ module fx_test_process
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function c_is_executable
+        integer(c_int) function c_trace_execs(bytes, offsets, count, env_bytes, &
+                env_offsets, env_count, &
+                exec_paths, paths_capacity, exit_status, timeout_ms) &
+                bind(C, name='fx_test_process_trace_execs')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: bytes(*), env_bytes(*)
+            integer(c_int), intent(in) :: offsets(*), env_offsets(*)
+            integer(c_int), value :: count, env_count, paths_capacity, timeout_ms
+            character(kind=c_char), intent(out) :: exec_paths(*)
+            integer(c_int), intent(out) :: exit_status
+        end function c_trace_execs
+        integer(c_int) function c_trace_supported() &
+                bind(C, name='fx_test_process_trace_supported')
+            import :: c_int
+        end function c_trace_supported
         integer(c_int) function c_wait(pid, status) &
                 bind(C, name='fx_test_process_wait_once')
             import :: c_int
@@ -155,6 +172,39 @@ contains
         character(len=*), intent(in) :: path
         test_process_is_executable = int(c_is_executable(trim(path)//c_null_char))
     end function test_process_is_executable
+
+    subroutine test_process_trace_execs(arguments, environment, exec_paths, &
+            exit_status, ierr, timeout_ms)
+        character(len=*), intent(in) :: arguments(:), environment(:)
+        character(kind=c_char), intent(out), contiguous :: exec_paths(:)
+        integer, intent(out) :: exit_status, ierr
+        integer, intent(in) :: timeout_ms
+        character(kind=c_char), allocatable :: bytes(:), env_bytes(:)
+        integer(c_int), allocatable :: offsets(:), env_offsets(:)
+        integer(c_int) :: child_status
+        integer :: total, env_total
+
+        exec_paths = c_null_char
+        exit_status = -1
+        ierr = -1
+        if (size(arguments) < 1) return
+        total = sum(len_trim(arguments)) + size(arguments)
+        env_total = max(1, sum(len_trim(environment)) + size(environment))
+        allocate(bytes(total), offsets(size(arguments)))
+        allocate(env_bytes(env_total), env_offsets(size(environment)))
+        call pack_arguments(arguments, bytes, offsets)
+        call pack_arguments(environment, env_bytes, env_offsets)
+        child_status = -1_c_int
+        ierr = int(c_trace_execs(bytes, offsets, int(size(arguments), c_int), &
+            env_bytes, env_offsets, int(size(environment), c_int), &
+            exec_paths, int(size(exec_paths), c_int), &
+            child_status, int(timeout_ms, c_int)))
+        exit_status = int(child_status)
+    end subroutine test_process_trace_execs
+
+    logical function test_process_trace_supported()
+        test_process_trace_supported = c_trace_supported() == 1_c_int
+    end function test_process_trace_supported
 
     subroutine test_process_close(process, timeout_ms, status, timed_out)
         type(test_process_t), intent(inout) :: process

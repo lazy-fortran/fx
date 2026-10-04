@@ -3,7 +3,9 @@ program test_action_result_store
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
-    use fx_proc, only: proc_pid
+    use fx_proc, only: proc_pid, proc_exec_silent
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_chmod
+    use fx_test_process, only: test_process_is_executable
     use fx_immutable_store, only: immutable_tree_entry_t, &
         immutable_store_blob_path
     use fx_immutable_tree, only: immutable_store_verify_tree
@@ -81,7 +83,8 @@ program test_action_result_store
     end_path = index(scratch, c_null_char)
     if (end_path <= 1) stop 20
     write (root, '(a,i0)') scratch(1:end_path - 1)//'/fx-action43-', proc_pid()
-    call execute_command_line('mkdir -p -- '//trim(root))
+    ierr = fx_test_mkdir_p(trim(root))
+    call test_assert_equal_int(suite, 0, ierr, 'test root directory is created')
     call action_result_store_init(store, trim(root)//'/store/v2', ierr)
     call test_assert_equal_int(suite, 0, ierr, 'versioned action store initializes')
 
@@ -95,7 +98,8 @@ program test_action_result_store
     call test_conflicting_concurrent_publishers()
     call test_crash_boundaries()
 
-    call execute_command_line('rm -rf -- '//trim(root))
+    ierr = fx_test_remove_tree(trim(root))
+    call test_assert_equal_int(suite, 0, ierr, 'test root directory is removed')
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -432,25 +436,32 @@ contains
     subroutine test_complete_outputs()
         character(len=512) :: sources(4), destinations(4), destination
         character(len=512) :: c_source, object_file, consumer_source
+        character(len=512) :: producer_source
         integer :: command_status, command_status_run, executable_index
         integer :: archive_index, shared_index, runtime_index, i
 
-        c_source = trim(root)//'/demo.c'
+        c_source = trim(root)//'/demo.f90'
+        producer_source = trim(root)//'/program.f90'
         object_file = trim(root)//'/demo.o'
         sources(1) = trim(root)//'/program'
-        call write_text(trim(sources(1)), '#!/bin/sh'//achar(10)// &
-            'echo ACTION43'//achar(10))
-        call execute_command_line('chmod 755 -- '//trim(sources(1)), &
-            exitstat=command_status)
+        call write_text(trim(producer_source), &
+            'program action43'//achar(10)// &
+            'print *, "ACTION43"'//achar(10)//'end program'//achar(10))
+        call run_native(command_status, 'gfortran', trim(producer_source), '-o', &
+            trim(sources(1)))
         call test_assert_equal_int(suite, 0, command_status, &
-            'producer creates an executable output')
-        call write_text(trim(c_source), 'int fx_demo(void) { return 43; }'//achar(10))
+            'producer creates a native executable output')
+        call write_text(trim(c_source), &
+            'integer function fx_demo()'//achar(10)// &
+            'fx_demo = 43'//achar(10)//'end function'//achar(10))
         sources(2) = trim(root)//'/libdemo.a'
         sources(3) = trim(root)//'/libdemo.so'
-        call execute_command_line('cc -fPIC -c '//trim(c_source)//' -o '// &
-            trim(object_file)//' && ar rcs '//trim(sources(2))//' '// &
-            trim(object_file)//' && cc -shared '//trim(object_file)//' -o '// &
-            trim(sources(3)), exitstat=command_status)
+        call run_native(command_status, 'gfortran', '-fPIC', '-c', trim(c_source), &
+            '-o', trim(object_file))
+        if (command_status == 0) call run_native(command_status, 'ar', 'rcs', &
+            trim(sources(2)), trim(object_file))
+        if (command_status == 0) call run_native(command_status, 'gfortran', &
+            '-shared', trim(object_file), '-o', trim(sources(3)))
         call test_assert_equal_int(suite, 0, command_status, &
             'producer creates a real archive and shared library')
         sources(4) = trim(root)//'/runtime.dat'
@@ -497,29 +508,28 @@ contains
                 'every manifest companion materializes for its consumer')
         end do
         destination = destinations(executable_index)
-        call test_assert(suite, file_has_bytes(trim(destination), &
-            '#!/bin/sh'//achar(10)//'echo ACTION43'//achar(10)), &
-            'materialized executable bytes match producer output')
-        call execute_command_line(trim(destination), exitstat=command_status_run, &
-            cmdstat=command_status)
-        call test_assert_equal_int(suite, 0, command_status, &
-            'materialized executable starts successfully')
+        call test_assert(suite, test_process_is_executable(trim(destination)) == 1, &
+            'materialized native program retains executable mode')
+        call run_native(command_status_run, trim(destination))
         call test_assert_equal_int(suite, 0, command_status_run, &
-            'materialized executable returns success')
+            'materialized native executable returns success')
 
-        consumer_source = trim(root)//'/consumer.c'
+        consumer_source = trim(root)//'/consumer.f90'
         call write_text(trim(consumer_source), &
-            'int fx_demo(void); int main(void) { return fx_demo() == 43 ? 0 : 1; }'//achar(10))
-        call execute_command_line('cc '//trim(consumer_source)//' '// &
-            trim(destinations(archive_index))//' -o '//trim(root)// &
-            '/use-archive && '//trim(root)//'/use-archive', &
-            exitstat=command_status)
+            'program consumer'//achar(10)// &
+            'integer, external :: fx_demo'//achar(10)// &
+            'if (fx_demo() /= 43) stop 1'//achar(10)//'end program'//achar(10))
+        call run_native(command_status, 'gfortran', trim(consumer_source), &
+            trim(destinations(archive_index)), '-o', trim(root)//'/use-archive')
+        if (command_status == 0) call run_native(command_status, &
+            trim(root)//'/use-archive')
         call test_assert_equal_int(suite, 0, command_status, &
             'materialized archive links and runs in a real consumer')
-        call execute_command_line('cc '//trim(consumer_source)//' '// &
-            trim(destinations(shared_index))//' -Wl,-rpath,'//trim(root)// &
-            ' -o '//trim(root)//'/use-shared && '//trim(root)//'/use-shared', &
-            exitstat=command_status)
+        call run_native(command_status, 'gfortran', trim(consumer_source), &
+            trim(destinations(shared_index)), '-Wl,-rpath,'//trim(root), '-o', &
+            trim(root)//'/use-shared')
+        if (command_status == 0) call run_native(command_status, &
+            trim(root)//'/use-shared')
         call test_assert_equal_int(suite, 0, command_status, &
             'materialized shared library links and runs in a real consumer')
         call test_assert(suite, file_has_bytes(trim(destinations(runtime_index)), &
@@ -595,7 +605,8 @@ contains
         call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
             'complete companion publishes before removal')
         result_path = immutable_store_blob_path(store%objects, missing_blob)
-        call execute_command_line('rm -f -- '//result_path)
+        ierr = fx_test_remove_tree(result_path)
+        call test_assert_equal_int(suite, 0, ierr, 'companion file is removed')
         call action_result_lookup(store, 'removed-companion', ignored, &
             result_id, ierr)
         call test_assert_equal_int(suite, ACTION_RESULT_CORRUPT, ierr, &
@@ -617,7 +628,8 @@ contains
             'shared output publishes before corruption test')
         result_path = immutable_store_blob_path(store%objects, &
             corrupt_files(1)%object_id)
-        call execute_command_line('chmod u+w -- '//result_path)
+        ierr = fx_test_chmod(result_path, 420)
+        call test_assert_equal_int(suite, 0, ierr, 'companion is writable for corruption')
         open (newunit=unit, file=result_path, status='replace', &
             access='stream', form='unformatted')
         write (unit) 'CORRUPTED'
@@ -672,6 +684,38 @@ contains
 
         includes_id = any(ids == id)
     end function includes_id
+
+    subroutine run_native(exit_status, arg1, arg2, arg3, arg4, arg5, arg6)
+        integer, intent(out) :: exit_status
+        character(len=*), intent(in) :: arg1
+        character(len=*), intent(in), optional :: arg2, arg3, arg4, arg5, arg6
+        character(len=512) :: arguments(6)
+        integer :: count
+        arguments = ''
+        arguments(1) = arg1
+        count = 1
+        if (present(arg2)) then
+            arguments(2) = arg2
+            count = 2
+        end if
+        if (present(arg3)) then
+            arguments(3) = arg3
+            count = 3
+        end if
+        if (present(arg4)) then
+            arguments(4) = arg4
+            count = 4
+        end if
+        if (present(arg5)) then
+            arguments(5) = arg5
+            count = 5
+        end if
+        if (present(arg6)) then
+            arguments(6) = arg6
+            count = 6
+        end if
+        call proc_exec_silent(arguments, count, exit_status)
+    end subroutine run_native
 
     subroutine write_text(path, text)
         character(len=*), intent(in) :: path, text
