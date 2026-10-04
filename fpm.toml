@@ -53,3 +53,8 @@ main = "test_immutable_publication.f90"
 name = "test_immutable_publication_race"
 source-dir = "test"
 main = "test_immutable_publication_race.f90"
+
+[[test]]
+name = "test_mcp_system"
+source-dir = "test"
+main = "test_mcp_system.f90"

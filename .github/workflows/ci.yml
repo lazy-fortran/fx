@@ -45,4 +45,15 @@ jobs:
       # which issues `stop 1`; fpm reports the non-zero exit and itself exits 1,
       # so this step fails the job.
       - name: Run fx tests
-        run: fpm test
+        run: |
+          mkdir -p /tmp/fx-test-path
+          for directory in /bin /usr/bin /usr/local/bin; do
+            for tool in "$directory"/*; do
+              name=${tool##*/}
+              case "$name" in node|node[0-9]*|nodejs|npm|npx) continue ;; esac
+              if [ -f "$tool" ] && [ -x "$tool" ]; then
+                ln -sf "$tool" "/tmp/fx-test-path/$name"
+              fi
+            done
+          done
+          PATH=/tmp/fx-test-path /usr/local/bin/fpm test
