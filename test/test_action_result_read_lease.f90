@@ -28,7 +28,7 @@ program test_action_result_read_lease
     character(len=64) :: old_id, conflict_id, action_id
     type(immutable_tree_entry_t) :: entries(2), conflict_entry(1)
     integer :: ierr, child, status, cleanup
-    logical :: completed
+    logical :: completed, child_exited
 
     call get_command_argument(1, executable)
     if (trim(executable) == '--prelookup-reader') then
@@ -94,7 +94,11 @@ program test_action_result_read_lease
     call test_process_spawn(args(1:7), child, ierr)
     call test_assert_equal_int(suite, 0, ierr, &
         'native reader starts before action binding lookup')
-    call wait_for_file(trim(ready), completed)
+    call wait_for_file(trim(ready), completed, child, status, child_exited)
+    if (child_exited) then
+        call report_child_exit(child, status, 'prelookup reader', trim(root))
+        stop
+    end if
     call test_assert(suite, completed, 'reader pauses after graph lease acquire')
     call assert_graph_lease(trim(action_id), trim(old_id), .true., &
         'pre-lookup lease protects the bound graph')
@@ -131,7 +135,11 @@ program test_action_result_read_lease
     args(10) = trim(released)
     call test_process_spawn(args, child, ierr)
     call test_assert_equal_int(suite, 0, ierr, 'native restore reader starts')
-    call wait_for_file(trim(ready), completed)
+    call wait_for_file(trim(ready), completed, child, status, child_exited)
+    if (child_exited) then
+        call report_child_exit(child, status, 'restore reader', trim(store_root))
+        stop
+    end if
     call test_assert(suite, completed, 'reader pauses after loading result manifest')
     call assert_graph_lease(trim(action_id), trim(old_id), .true., &
         'read lease remains active during companion restoration')
@@ -142,7 +150,11 @@ program test_action_result_read_lease
     call assert_graph_lease(trim(action_id), trim(old_id), .true., &
         'old graph remains leased after conflict replacement')
     call write_text(trim(release), 'continue')
-    call wait_for_file(trim(done), completed)
+    call wait_for_file(trim(done), completed, child, status, child_exited)
+    if (child_exited) then
+        call report_child_exit(child, status, 'restore reader', trim(dest_dir))
+        stop
+    end if
     call test_assert(suite, completed, 'all companions replace before release')
     call assert_graph_lease(trim(action_id), trim(old_id), .true., &
         'graph lease remains through every output replacement')
@@ -236,7 +248,13 @@ contains
             call action_result_materialize_blob(child_store, &
                 restored(i)%object_id, trim(child_dest)//'/'// &
                 trim(restored(i)%path), restored(i)%mode, local_err)
-            if (local_err /= ACTION_RESULT_OK) stop 65
+            if (local_err /= ACTION_RESULT_OK) then
+                write (*, '(A,I0,2A)') 'blob materialization error=', local_err, &
+                    ' root=', trim(child_root)
+                write (*, '(2A)') 'destination=', trim(child_dest)//'/'// &
+                    trim(restored(i)%path)
+                stop 65
+            end if
         end do
         call write_text(trim(child_done), 'all-replaced')
         call wait_for_file(trim(child_finish), completed)
@@ -554,18 +572,41 @@ contains
         call test_assert(suite, found .eqv. expected, label)
     end subroutine assert_graph_lease
 
-    subroutine wait_for_file(path, found)
+    subroutine wait_for_file(path, found, child_pid, child_status, child_exited)
         character(len=*), intent(in) :: path
         logical, intent(out) :: found
-        integer :: i
+        integer, intent(in), optional :: child_pid
+        integer, intent(out), optional :: child_status
+        logical, intent(out), optional :: child_exited
+        integer :: i, state, status
 
         found = .false.
+        if (present(child_exited)) child_exited = .false.
         do i = 1, 1500
             inquire(file=trim(path), exist=found)
             if (found) return
+            if (present(child_pid)) then
+                call test_process_wait_once(child_pid, status, state)
+                if (state /= 0) then
+                    if (present(child_status)) child_status = status
+                    if (present(child_exited)) child_exited = .true.
+                    return
+                end if
+            end if
             call test_process_sleep_ms(10)
         end do
     end subroutine wait_for_file
+
+    subroutine report_child_exit(pid, exit_status, role, path)
+        integer, intent(in) :: pid, exit_status
+        character(len=*), intent(in) :: role, path
+
+        write (*, '(A,I0,A,I0,2A)') trim(role)//' exited=', exit_status, &
+            ' pid=', pid, ' path=', trim(path)
+        call test_assert(suite, .false., trim(role)//' exited before readiness')
+        call test_suite_summary(suite)
+        call test_suite_exit(suite)
+    end subroutine report_child_exit
 
     subroutine wait_for_child(pid, timeout_ms, exit_status, reaped)
         integer, intent(in) :: pid, timeout_ms
