@@ -1,16 +1,14 @@
 module fx_action_result_store
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-    use, intrinsic :: iso_fortran_env, only: int64
     use fx_hash, only: sha256_string
     use fx_cache_key, only: cache_digest
-    use fx_cache_fs, only: cache_read_bytes_file
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_CORRUPT, &
         IMMUTABLE_MISSING
     use fx_immutable_manifest, only: immutable_tree_entry_t, &
         immutable_id_valid, immutable_manifest_parse, &
         immutable_entries_canonical, immutable_manifest_serialize
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
-        immutable_store_put_blob, immutable_store_tree_path, &
+        immutable_store_put_blob, &
         immutable_lease_t, immutable_store_publication_lease_acquire, &
         immutable_store_publication_commit, immutable_store_lease_release, &
         immutable_store_reason_release, &
@@ -18,6 +16,8 @@ module fx_action_result_store
         immutable_store_materialize_blob, IMMUTABLE_MATERIALIZE_AUTO
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_verify_tree
+    use fx_immutable_owned, only: owned_open_store, owned_read_manifest, &
+        owned_close
     use fx_action_result_record, only: ACTION_RECORD_BOUND, &
         ACTION_RECORD_CONFLICT, action_result_bound_record, &
         action_result_conflict_record, action_result_record_parse
@@ -56,6 +56,7 @@ module fx_action_result_store
     public :: action_result_lookup, action_result_conflicts
     public :: action_result_read_acquire, action_result_read_lookup, &
         action_result_read_release
+    public :: action_result_preview, action_result_preview_confirm
     public :: action_result_materialize_blob, action_result_action_key, &
         action_result_action_key_parts, action_result_compile_action_key
     public :: action_result_file_mode
@@ -396,6 +397,127 @@ contains
             ierr == ACTION_RESULT_OK) ierr = ACTION_RESULT_IO_ERROR
     end subroutine action_result_lookup
 
+    subroutine action_result_preview(store, action_id, entries, result_id, ierr)
+        !! Read a validated bound snapshot without acquiring a graph lease.
+        !! Call action_result_preview_confirm after checking local outputs.
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: action_id
+        type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
+        character(len=HASH_LEN), intent(out) :: result_id
+        integer, intent(out) :: ierr
+        character(len=HASH_LEN) :: key, snapshot
+        integer :: verify_status
+
+        result_id = ''
+        ierr = ACTION_RESULT_INVALID
+        if (.not. store%initialized) return
+        key = action_result_action_key(action_id)
+        if (.not. immutable_id_valid(key)) return
+        call action_result_record_snapshot(store, key, snapshot, &
+            .true., ACTION_RESULT_MISSING, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
+        call immutable_store_verify_tree(store%objects, snapshot, verify_status)
+        if (verify_status /= IMMUTABLE_OK) then
+            ierr = ACTION_RESULT_CORRUPT
+            return
+        end if
+        call read_result_tree(store, snapshot, entries, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
+        result_id = snapshot
+    end subroutine action_result_preview
+
+    subroutine action_result_preview_confirm(store, action_id, result_id, ierr)
+        !! Confirm a preview still names the action's bound, non-conflicting result.
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: action_id, result_id
+        integer, intent(out) :: ierr
+        character(len=HASH_LEN) :: key
+
+        ierr = ACTION_RESULT_INVALID
+        if (.not. store%initialized) return
+        key = action_result_action_key(action_id)
+        if (.not. immutable_id_valid(key)) return
+        if (.not. immutable_id_valid(result_id)) return
+        call action_result_record_confirm(store, key, result_id, &
+            .true., ACTION_RESULT_MISSING, ierr)
+    end subroutine action_result_preview_confirm
+
+    subroutine action_result_record_snapshot(store, key, result_id, &
+            check_exists, missing_status, ierr)
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: key
+        character(len=HASH_LEN), intent(out) :: result_id
+        logical, intent(in) :: check_exists
+        integer, intent(in) :: missing_status
+        integer, intent(out) :: ierr
+        character(kind=c_char), allocatable :: c_root(:), c_key(:)
+        character(kind=c_char) :: record_bytes(RECORD_LIMIT)
+        character(len=HASH_LEN) :: current, ids(2)
+        integer(c_int) :: exists_status, lock, count, rc, unlock_status
+        integer :: parse_status
+
+        result_id = ''
+        ierr = ACTION_RESULT_INVALID
+        if (.not. store%initialized) return
+        if (.not. immutable_id_valid(key)) return
+        call to_c_text(store%root_dir, c_root)
+        call to_c_text(key, c_key)
+        if (check_exists) then
+            exists_status = c_action_exists(c_root, c_key)
+            if (exists_status == 1_c_int) then
+                ierr = missing_status
+                return
+            end if
+            if (exists_status /= 0_c_int) then
+                ierr = ACTION_RESULT_CORRUPT
+                return
+            end if
+        end if
+        lock = c_action_lock(c_root, c_key)
+        if (lock < 0_c_int) then
+            ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        rc = c_action_read(c_root, c_key, record_bytes, RECORD_LIMIT, count)
+        if (rc /= 0_c_int) then
+            unlock_status = c_action_unlock(lock)
+            ierr = ACTION_RESULT_CORRUPT
+            return
+        end if
+        call action_result_record_parse(record_bytes, int(count), key, current, &
+            ids, parse_status)
+        unlock_status = c_action_unlock(lock)
+        if (unlock_status /= 0_c_int) then
+            ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        if (parse_status == ACTION_RECORD_CONFLICT) then
+            ierr = ACTION_RESULT_QUARANTINED
+            return
+        end if
+        if (parse_status /= ACTION_RECORD_BOUND) then
+            ierr = ACTION_RESULT_CORRUPT
+            return
+        end if
+        result_id = current
+        ierr = ACTION_RESULT_OK
+    end subroutine action_result_record_snapshot
+
+    subroutine action_result_record_confirm(store, key, expected_id, &
+            check_exists, missing_status, ierr)
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: key, expected_id
+        logical, intent(in) :: check_exists
+        integer, intent(in) :: missing_status
+        integer, intent(out) :: ierr
+        character(len=HASH_LEN) :: current
+
+        call action_result_record_snapshot(store, key, current, check_exists, &
+            missing_status, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
+        if (current /= expected_id) ierr = ACTION_RESULT_MISSING
+    end subroutine action_result_record_confirm
+
     subroutine action_result_read_lookup(store, read, entries, result_id, ierr)
         !! Verify and load the manifest while the graph read handle remains active.
         type(action_result_store_t), intent(in) :: store
@@ -404,11 +526,8 @@ contains
         character(len=HASH_LEN), intent(out) :: result_id
         integer, intent(out) :: ierr
 
-        character(len=HASH_LEN) :: key, current, snapshot, ids(2), checked_ids(2)
-        character(kind=c_char), allocatable :: c_root(:), c_key(:)
-        character(kind=c_char) :: record_bytes(RECORD_LIMIT)
-        integer(c_int) :: lock, count, rc, unlock_rc, exists_rc
-        integer :: parse_status, verify_status
+        character(len=HASH_LEN) :: key, snapshot
+        integer :: verify_status
 
         result_id = ''
         ierr = ACTION_RESULT_INVALID
@@ -419,47 +538,12 @@ contains
         if (read%store_root /= store%root_dir) return
         key = read%action_key
         if (.not. immutable_id_valid(key)) return
-        call to_c_text(store%root_dir, c_root)
-        call to_c_text(key, c_key)
-        exists_rc = c_action_exists(c_root, c_key)
-        if (exists_rc == 1_c_int) then
-            ierr = ACTION_RESULT_MISSING
-            return
-        end if
-        if (exists_rc /= 0_c_int) then
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
-        lock = c_action_lock(c_root, c_key)
-        if (lock < 0_c_int) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
-        rc = c_action_read(c_root, c_key, record_bytes, RECORD_LIMIT, count)
-        if (rc /= 0_c_int) then
-            unlock_rc = c_action_unlock(lock)
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
-        call action_result_record_parse(record_bytes, int(count), key, current, &
-            ids, parse_status)
-        unlock_rc = c_action_unlock(lock)
-        if (unlock_rc /= 0_c_int) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
-        if (parse_status == ACTION_RECORD_CONFLICT) then
-            ierr = ACTION_RESULT_QUARANTINED
-            return
-        end if
-        if (parse_status /= ACTION_RECORD_BOUND) then
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
+        call action_result_record_snapshot(store, key, snapshot, &
+            .true., ACTION_RESULT_MISSING, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
 
         ! Result verification and manifest loading can hash an arbitrarily
         ! large tree. Do that outside the per-action publication lock.
-        snapshot = current
         call immutable_store_verify_tree(store%objects, snapshot, verify_status)
         if (verify_status /= IMMUTABLE_OK) then
             ierr = ACTION_RESULT_CORRUPT
@@ -468,38 +552,10 @@ contains
         call read_result_tree(store, snapshot, entries, ierr)
         if (ierr /= ACTION_RESULT_OK) return
 
-        ! The snapshot is reusable only if the binding is still the same at a
-        ! linearization point after validation; conflict always wins.
-        lock = c_action_lock(c_root, c_key)
-        if (lock < 0_c_int) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
-        rc = c_action_read(c_root, c_key, record_bytes, RECORD_LIMIT, count)
-        if (rc /= 0_c_int) then
-            unlock_rc = c_action_unlock(lock)
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
-        call action_result_record_parse(record_bytes, int(count), key, current, &
-            checked_ids, parse_status)
-        unlock_rc = c_action_unlock(lock)
-        if (unlock_rc /= 0_c_int) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
-        if (parse_status == ACTION_RECORD_CONFLICT) then
-            ierr = ACTION_RESULT_QUARANTINED
-            return
-        end if
-        if (parse_status /= ACTION_RECORD_BOUND) then
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
-        if (current /= snapshot) then
-            ierr = ACTION_RESULT_MISSING
-            return
-        end if
+        ! A second lock check provides the linearization point; conflicts win.
+        call action_result_record_confirm(store, key, snapshot, &
+            .false., ACTION_RESULT_CORRUPT, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
         result_id = snapshot
         ierr = ACTION_RESULT_OK
     end subroutine action_result_read_lookup
@@ -652,30 +708,19 @@ contains
         character(len=*), intent(in) :: result_id
         type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
         integer, intent(out) :: ierr
-        character(len=1), allocatable :: bytes(:)
         character(len=:), allocatable :: text
-        integer(int64) :: size_bytes
-        integer :: i, count
+        integer(c_int) :: root, cleanup
+        integer :: verify_status
 
         ierr = ACTION_RESULT_CORRUPT
-        size_bytes = -1_int64
-        inquire(file=immutable_store_tree_path(store%objects, result_id), &
-            size=size_bytes)
-        if (size_bytes < 0_int64 .or. size_bytes > int(huge(0), int64)) return
-        allocate(bytes(int(size_bytes)))
-        call cache_read_bytes_file(immutable_store_tree_path(store%objects, &
-            result_id), bytes, count, ierr)
-        if (ierr /= 0 .or. count /= size(bytes)) then
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
-        allocate(character(len=count) :: text)
-        do i = 1, count
-            text(i:i) = bytes(i)
-        end do
-        call immutable_manifest_parse(text, entries, ierr)
-        if (ierr /= IMMUTABLE_OK) ierr = ACTION_RESULT_CORRUPT
-        if (ierr == IMMUTABLE_OK) ierr = ACTION_RESULT_OK
+        root = owned_open_store(store%objects%root_dir//c_null_char)
+        if (root < 0_c_int) return
+        call owned_read_manifest(root, result_id, text, verify_status)
+        cleanup = owned_close(root)
+        if (verify_status /= IMMUTABLE_OK) return
+        call immutable_manifest_parse(text, entries, verify_status)
+        if (verify_status /= IMMUTABLE_OK) return
+        ierr = ACTION_RESULT_OK
     end subroutine read_result_tree
 
     subroutine write_record(c_root, c_key, record, ierr)

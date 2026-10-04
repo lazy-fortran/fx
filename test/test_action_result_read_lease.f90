@@ -15,6 +15,7 @@ program test_action_result_read_lease
         action_result_read_t, action_result_store_init, &
         action_result_read_acquire, action_result_read_lookup, &
         action_result_read_release, action_result_publish_files, &
+        action_result_preview, action_result_preview_confirm, &
         action_result_materialize_blob, action_result_action_key, &
         ACTION_RESULT_OK, ACTION_RESULT_CONFLICT, ACTION_RESULT_QUARANTINED
     implicit none
@@ -27,6 +28,8 @@ program test_action_result_read_lease
     character(len=512) :: conflict_source(1)
     character(len=64) :: old_id, conflict_id, action_id
     type(immutable_tree_entry_t) :: entries(2), conflict_entry(1)
+    type(immutable_tree_entry_t), allocatable :: preview_entries(:)
+    character(len=64) :: preview_id
     integer :: ierr, child, status, cleanup
     logical :: completed, child_exited
 
@@ -115,6 +118,32 @@ program test_action_result_read_lease
         'pre-lookup reader reports the durable conflict')
     call assert_graph_lease(trim(action_id), trim(old_id), .false., &
         'pre-lookup reader releases its own graph lease')
+
+    action_id = 'preview-confirm-race'
+    call action_result_publish_files(store, trim(action_id), sources, entries, &
+        old_id, ierr)
+    call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+        'preview fixture publishes its first bound graph')
+    call action_result_preview(store, trim(action_id), preview_entries, &
+        preview_id, ierr)
+    call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+        'unleased preview reads the verified bound graph')
+    call test_assert(suite, preview_id == old_id, &
+        'preview returns the published result identity')
+    if (allocated(preview_entries)) then
+        call test_assert(suite, size(preview_entries) == 2, &
+            'preview returns every output needed to validate local files')
+    else
+        call test_assert(suite, .false., &
+            'preview returns every output needed to validate local files')
+    end if
+    call action_result_publish_files(store, trim(action_id), conflict_source, &
+        conflict_entry, conflict_id, ierr)
+    call test_assert_equal_int(suite, ACTION_RESULT_CONFLICT, ierr, &
+        'publisher changes the previewed binding to conflict')
+    call action_result_preview_confirm(store, trim(action_id), preview_id, ierr)
+    call test_assert_equal_int(suite, ACTION_RESULT_QUARANTINED, ierr, &
+        'confirmation rejects a preview after concurrent binding conflict')
 
     action_id = 'restore-lifetime'
     call action_result_publish_files(store, trim(action_id), sources, entries, &
