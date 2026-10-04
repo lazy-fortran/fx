@@ -98,8 +98,12 @@ int fx_test_process_pipe_write(int fd, const char *bytes, int count)
         done += (int)n;
     }
     if (!had_pending && error == EPIPE) {
-        struct timespec immediate = {0, 0};
-        (void)sigtimedwait(&pipe_signal, NULL, &immediate);
+        sigset_t pending_after;
+        if (sigpending(&pending_after) == 0 &&
+            sigismember(&pending_after, SIGPIPE) == 1) {
+            int received_signal;
+            (void)sigwait(&pipe_signal, &received_signal);
+        }
     }
     (void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
     if (error) { errno = error; return -1; }
