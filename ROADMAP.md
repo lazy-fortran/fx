@@ -6,7 +6,7 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current integration head is `679f692`; `6beeec4` is the immutable-store
+Current integration head is `93ee0d8`; `6beeec4` is the immutable-store
 implementation checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
@@ -17,10 +17,14 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    publishes complete action results, materializes complete executable/archive/
    shared/runtime graphs and durably quarantines conflicting outputs for one
    action instead of overwriting.
-3. **Active:** [#44](https://github.com/lazy-fortran/fx/issues/44) first lands owner/reason
-   roots plus read/publication leases and a monotonic epoch with collection
-   disabled. After fo exposes complete semantic roots, its second phase collects
-   only unreachable objects with bounded, crash-safe work.
+3. **Phase A complete through `93ee0d8`; Phase B deferred:**
+   [#44](https://github.com/lazy-fortran/fx/issues/44) provides owner/reason
+   roots, pre-lookup read/publication leases and a monotonic epoch with collection
+   disabled. Native external-lock oracles prove pending P-before-binding reads,
+   P-to-R publication, complete companion restoration, legacy import and conflict
+   quarantine; the action-result production test hook was removed. After fo #168
+   exposes and audits every semantic root, Phase B may collect only unreachable
+   objects with bounded, crash-safe work.
 4. **Complete through `084bac3`:** [#45](https://github.com/lazy-fortran/fx/issues/45)
    replaces the remaining JavaScript MCP system fixture with an independent
    Fortran process oracle. Its narrow C process shim lives in a static test-only
@@ -43,6 +47,11 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    visibility for action-result no-follow and locking APIs. Cold macOS
    publication/conflict/recovery oracles and the complete Linux fx gate pass
    without weakening either platform's semantics.
+7. **Active cleanup:** [#51](https://github.com/lazy-fortran/fx/issues/51)
+   removes the older immutable-store production test synchronization hooks found
+   during #44's final review. Independent Fortran oracles will control the same
+   real locks/process boundaries through test-only OS shims; collection remains
+   disabled and the Phase A public root/lease contract does not change.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
