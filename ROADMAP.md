@@ -59,6 +59,19 @@ low-churn semantic retention. #44 Phase A is an explicit prerequisite of fo
 root and is enabled only by the audited #168/#44 Phase B. fx does not acquire
 Gremlin scheduling policy.
 
+## Current consumer hot-path repair
+
+Main `537a165` removes per-blob lease snapshot rewrites from verified
+materialization. The held source descriptor survives unlink; missing/corrupt
+input preserves the prior destination. Four focused native checks pass, including
+multi-file graph lease lifetime. Actual Fo dogfood exposed over 1 GB of metadata
+writes for an approximately 11 MB source bundle; the Fo consumer recheck remains
+pending. Graph/publication leases and durable roots are retained.
+
+[#57](https://github.com/lazy-fortran/fx/issues/57) remains open for safe validated
+warm local-hit preflight and initialized-store reuse. These repairs belong in the
+shared cache service; do not add Fo-private cache logic or a second store.
+
 ## Test cost and remaining architecture
 
 At `8730572`, tracked production source has 14,331 physical lines and native
