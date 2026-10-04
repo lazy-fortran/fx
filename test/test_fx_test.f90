@@ -1,9 +1,9 @@
 program test_fx_test
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr, &
-        c_null_char, c_associated
+    use, intrinsic :: iso_c_binding, only: c_char
     use, intrinsic :: iso_fortran_env, only: real64, error_unit, output_unit
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
-    use fx_mcp_test_os, only: fx_test_spawn_argv, fx_test_read, fx_test_close
+    use fx_test_process, only: test_process_t, test_process_spawn_piped, &
+        test_process_read, test_process_close
     use fx_test, only: test_suite_t, test_suite_init, &
         test_assert, test_assert_equal_int, &
         test_assert_equal_str, test_assert_equal_real, &
@@ -689,11 +689,10 @@ contains
         integer, intent(out) :: exit_code
         logical, intent(out) :: ok
         character(len=512) :: executable
-        character(kind=c_char), allocatable :: arguments(:)
         character(kind=c_char) :: bytes(4096)
-        type(c_ptr) :: handle
-        integer :: argument_length, argument_status, position, i
-        integer(c_int) :: nread
+        type(test_process_t) :: child
+        integer :: argument_length, argument_status, nread, i
+        logical :: timed_out
 
         captured = ''
         exit_code = -1
@@ -702,36 +701,19 @@ contains
         call get_command_argument(0, executable, length=argument_length, &
             status=argument_status)
         if (argument_status /= 0 .or. argument_length > len(executable)) return
-        allocate(arguments(argument_length + len_trim(mode_arg) + 2))
-        position = 1
-        call append_argument(arguments, position, executable(:argument_length))
-        call append_argument(arguments, position, trim(mode_arg))
-        handle = fx_test_spawn_argv(arguments, 2_c_int, 1_c_int)
-        if (.not. c_associated(handle)) return
+        call test_process_spawn_piped([executable(:argument_length), trim(mode_arg)], &
+            child, .true., i)
+        if (i /= 0) return
         do
-            nread = fx_test_read(handle, bytes, int(size(bytes), c_int), 10000_c_int)
-            if (nread <= 0_c_int) exit
-            do i = 1, int(nread)
+            nread = test_process_read(child%output_fd, bytes, 10000)
+            if (nread <= 0) exit
+            do i = 1, nread
                 captured = captured // achar(iachar(bytes(i)))
             end do
         end do
-        exit_code = int(fx_test_close(handle, 5000_c_int))
-        ok = exit_code >= 0
+        call test_process_close(child, 5000, exit_code, timed_out)
+        ok = .not. timed_out .and. nread == 0 .and. exit_code >= 0
     end subroutine run_child
-
-    subroutine append_argument(buffer, position, argument)
-        character(kind=c_char), intent(inout) :: buffer(:)
-        integer, intent(inout) :: position
-        character(len=*), intent(in) :: argument
-        integer :: i
-
-        do i = 1, len(argument)
-            buffer(position) = argument(i:i)
-            position = position + 1
-        end do
-        buffer(position) = c_null_char
-        position = position + 1
-    end subroutine append_argument
 
     subroutine test_suite_exit_failure_path(suite)
         type(test_suite_t), intent(inout) :: suite
