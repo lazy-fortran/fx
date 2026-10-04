@@ -13,6 +13,8 @@ module fx_action_cache
     use fx_immutable_store, only: immutable_store_hash_file, &
         immutable_store_blob_path
     use fx_action_result_store, only: action_result_store_t, &
+        action_result_read_t, action_result_read_acquire, &
+        action_result_read_lookup, action_result_read_release, &
         action_result_store_init, &
         action_result_publish_files, action_result_lookup, &
         action_result_materialize_blob, action_result_file_mode, &
@@ -136,6 +138,30 @@ contains
         if (ierr /= ACTION_RESULT_OK) return
         call action_result_lookup(store, action_id, entries, result_id, ierr)
     end subroutine lookup_or_import
+
+    subroutine lookup_or_import_read(c, store, action_id, read, entries, &
+            result_id, ierr)
+        type(cache_t), intent(in) :: c
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: action_id
+        type(action_result_read_t), intent(out) :: read
+        type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
+        character(len=HASH_LEN), intent(out) :: result_id
+        integer, intent(out) :: ierr
+        integer :: release_status
+
+        call action_result_read_acquire(store, action_id, read, ierr)
+        if (ierr == ACTION_RESULT_MISSING) then
+            call import_legacy_compile_result(c, store, action_id, ierr)
+            if (ierr /= ACTION_RESULT_OK) return
+            call action_result_read_acquire(store, action_id, read, ierr)
+        end if
+        if (ierr /= ACTION_RESULT_OK) return
+        call action_result_read_lookup(store, read, entries, result_id, ierr)
+        if (ierr /= ACTION_RESULT_OK) then
+            call action_result_read_release(store, read, release_status)
+        end if
+    end subroutine lookup_or_import_read
 
     subroutine import_legacy_compile_result(c, store, action_id, ierr)
         type(cache_t), intent(in) :: c
@@ -273,11 +299,12 @@ contains
         character(len=*), intent(in), optional :: required_smod_name
 
         type(action_result_store_t) :: store
+        type(action_result_read_t) :: read
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=HASH_LEN) :: result_id
         character(len=HASH_LEN) :: old_output, old_object, old_mod, old_smod
         character(len=MAX_MOD_NAME) :: old_mod_name, old_smod_name
-        integer :: ierr, i, init_status
+        integer :: ierr, i, init_status, release_status
         integer :: old_obj_size, old_mod_size, old_smod_size
         logical :: local_ok
         logical :: old_has_mod, old_has_smod
@@ -288,11 +315,15 @@ contains
 
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import(c, store, action_id, entries, result_id, ierr)
+        call lookup_or_import_read(c, store, action_id, read, entries, &
+            result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         if (present(required_smod_name)) then
             if (len_trim(required_smod_name) > 0) then
-                if (.not. result_has_smod(entries, required_smod_name)) return
+                if (.not. result_has_smod(entries, required_smod_name)) then
+                    call action_result_read_release(store, read, release_status)
+                    return
+                end if
             end if
         end if
         if (present(output_id)) then
@@ -310,10 +341,16 @@ contains
                 call action_result_materialize_blob(store, entries(i)%object_id, &
                     compile_destination(entries(i), obj_path, mod_dir), &
                     entries(i)%mode, ierr)
-                if (ierr /= ACTION_RESULT_OK) return
+                if (ierr /= ACTION_RESULT_OK) exit
             end do
+            if (ierr /= ACTION_RESULT_OK) then
+                call action_result_read_release(store, read, release_status)
+                return
+            end if
         end if
         restored = local_result_matches(entries, obj_path, mod_dir)
+        call action_result_read_release(store, read, release_status)
+        if (release_status /= ACTION_RESULT_OK) restored = .false.
     end subroutine cache_restore_action
 
     subroutine cache_store_action(c, action_id, obj_path, mod_dir, mod_name, &
@@ -443,10 +480,11 @@ contains
         logical, intent(out) :: found
 
         type(action_result_store_t) :: store
+        type(action_result_read_t) :: read
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=HASH_LEN) :: result_id
         character(len=:), allocatable :: blob_path
-        integer :: ierr, init_status, size_bytes, i
+        integer :: ierr, init_status, size_bytes, i, release_status
 
         mod_key = ''
         found = .false.
@@ -454,7 +492,8 @@ contains
 
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import(c, store, action_id, entries, result_id, ierr)
+        call lookup_or_import_read(c, store, action_id, read, entries, &
+            result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         do i = 1, size(entries)
             if (entries(i)%role /= 'module') cycle
@@ -462,8 +501,13 @@ contains
                 entries(i)%object_id)
             call cache_file_content_key(blob_path, 'mod', mod_key, size_bytes, ierr)
             if (ierr == 0) found = .true.
-            return
+            exit
         end do
+        call action_result_read_release(store, read, release_status)
+        if (release_status /= ACTION_RESULT_OK) then
+            mod_key = ''
+            found = .false.
+        end if
     end subroutine cache_action_mod_key
 
     subroutine cache_store_binary(c, action_id, bin_path, ierr)
@@ -505,22 +549,31 @@ contains
         logical, intent(out) :: matches
 
         type(action_result_store_t) :: store
+        type(action_result_read_t) :: read
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=HASH_LEN) :: result_id, actual_id
-        integer :: ierr, mode, init_status
+        integer :: ierr, mode, init_status, release_status
 
         matches = .false.
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import(c, store, action_id, entries, result_id, ierr)
+        call lookup_or_import_read(c, store, action_id, read, entries, &
+            result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
-        if (size(entries) /= 1) return
-        if (entries(1)%role /= 'executable') return
-        call immutable_store_hash_file(bin_path, actual_id, ierr)
-        if (ierr /= 0) return
-        call action_result_file_mode(bin_path, mode, ierr)
-        if (ierr /= ACTION_RESULT_OK) return
-        matches = actual_id == entries(1)%object_id .and. mode == entries(1)%mode
+        if (size(entries) == 1) then
+            if (entries(1)%role == 'executable') then
+                call immutable_store_hash_file(bin_path, actual_id, ierr)
+                if (ierr == 0) then
+                    call action_result_file_mode(bin_path, mode, ierr)
+                    if (ierr == ACTION_RESULT_OK) then
+                        matches = actual_id == entries(1)%object_id .and. &
+                            mode == entries(1)%mode
+                    end if
+                end if
+            end if
+        end if
+        call action_result_read_release(store, read, release_status)
+        if (release_status /= ACTION_RESULT_OK) matches = .false.
     end subroutine cache_binary_matches
 
     subroutine cache_restore_binary(c, action_id, dest_path, restored)
@@ -531,21 +584,26 @@ contains
         logical, intent(out) :: restored
 
         type(action_result_store_t) :: store
+        type(action_result_read_t) :: read
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=HASH_LEN) :: result_id
-        integer :: ierr, init_status
+        integer :: ierr, init_status, release_status
 
         restored = .false.
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import(c, store, action_id, entries, result_id, ierr)
+        call lookup_or_import_read(c, store, action_id, read, entries, &
+            result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
-        if (size(entries) /= 1) return
-        if (entries(1)%role /= 'executable') return
-        call action_result_materialize_blob(store, entries(1)%object_id, &
-            dest_path, entries(1)%mode, ierr)
-        if (ierr /= ACTION_RESULT_OK) return
-        restored = .true.
+        if (size(entries) == 1) then
+            if (entries(1)%role == 'executable') then
+                call action_result_materialize_blob(store, entries(1)%object_id, &
+                    dest_path, entries(1)%mode, ierr)
+                if (ierr == ACTION_RESULT_OK) restored = .true.
+            end if
+        end if
+        call action_result_read_release(store, read, release_status)
+        if (release_status /= ACTION_RESULT_OK) restored = .false.
     end subroutine cache_restore_binary
 
     subroutine cache_debug_write_action_record(c, action_id, record_text, ierr)

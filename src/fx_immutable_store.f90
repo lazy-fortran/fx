@@ -68,6 +68,7 @@ module fx_immutable_store
     public :: immutable_store_root_set
     public :: immutable_store_reason_release
     public :: immutable_store_read_lease_acquire
+    public :: immutable_store_graph_read_lease_acquire
     public :: immutable_store_publication_lease_acquire
     public :: immutable_store_publication_commit
     public :: immutable_store_lease_release
@@ -310,6 +311,19 @@ contains
         call acquire_lease(store, 3, owner, owner_start, reason, kind, object_id, &
             lease, ierr, epoch)
     end subroutine immutable_store_read_lease_acquire
+
+    subroutine immutable_store_graph_read_lease_acquire(store, owner, &
+            owner_start, reason, lease, ierr, epoch)
+        !! Lease every published or pending root owned by this graph identity.
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: owner, owner_start, reason
+        type(immutable_lease_t), intent(out) :: lease
+        integer, intent(out) :: ierr
+        integer(int64), intent(out), optional :: epoch
+
+        call acquire_lease(store, 7, owner, owner_start, reason, '', '', '', &
+            lease, ierr, epoch)
+    end subroutine immutable_store_graph_read_lease_acquire
 
     subroutine immutable_store_publication_lease_acquire(store, owner, &
             owner_start, reason, kinds, ids, lease, ierr, epoch)

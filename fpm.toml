@@ -77,3 +77,8 @@ main = "test_no_interpreter_gate.f90"
 name = "test_immutable_leases"
 source-dir = "test"
 main = "test_immutable_leases.f90"
+
+[[test]]
+name = "test_action_result_read_lease"
+source-dir = "test"
+main = "test_action_result_read_lease.f90"

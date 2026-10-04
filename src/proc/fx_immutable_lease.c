@@ -172,7 +172,8 @@ static int same_root(char *row, const char *owner, const char *start,
 }
 
 /* op: 1=set roots, 2=release reason, 3=read lease, 4=release lease,
- *     5=publication lease, 6=commit roots and publication lease. */
+ *     5=publication lease, 6=commit roots and publication lease,
+ *     7=lease all roots/publications for an owner graph. */
 int fx_immutable_lease_update(const char *root, int op, const char *owner,
         const char *start, const char *reason, const char *token,
         const char *kind, const char *id, const char *root_rows,
@@ -180,6 +181,7 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
 {
     char dir[PATH_MAX], lock_path[PATH_MAX];
     int lock = -1, n, result = -1, changed = 0, publication_found = 0;
+    int graph_found = 0;
     size_t old_root_count = 0, new_root_count = 0;
     int root_changed = 1;
     uint64_t epoch = 0;
@@ -187,10 +189,12 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     size_t nrow = 0, nnext = 0;
     if (!root || !safe_field(owner) || !safe_field(start) ||
         (reason && *reason && !safe_field(reason))) return -1;
-    if (op < 1 || op > 6) return -1;
+    if (op < 1 || op > 7) return -1;
     if ((op == 3 && (!safe_field(kind) || !safe_field(id))) ||
         (op == 4 && !safe_field(token)) ||
-        (op == 6 && !safe_field(token))) return -1;
+        (op == 6 && !safe_field(token)) ||
+        (op == 7 && (!safe_field(reason) || !out_token || out_cap < 32)))
+        return -1;
     if (ensure_metadata(root, dir, sizeof(dir)) != 0) return -1;
     n = snprintf(lock_path, sizeof(lock_path), "%s/lock", dir);
     if (n < 0 || (size_t)n >= sizeof(lock_path)) return -1;
@@ -199,6 +203,12 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     if (read_snapshot(dir, &epoch, &rows, &nrow) != 0) goto done;
     next = calloc(ROW_LIMIT, sizeof(char *));
     if (!next) goto done;
+    if (op == 7) {
+        if (epoch >= (uint64_t)INT64_MAX) goto done;
+        n = snprintf(out_token, out_cap, "L%llu",
+                     (unsigned long long)(epoch + 1));
+        if (n < 0 || (size_t)n >= out_cap) goto done;
+    }
     for (size_t i = 0; i < nrow; ++i) {
         int remove = 0, root_remove = 0;
         if (op == 1 || op == 2 || op == 6) {
@@ -228,6 +238,28 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
                 strcmp(f[2], owner) == 0 && strcmp(f[3], start) == 0)
                 remove = 1;
         }
+        if (op == 7) {
+            char copy[1100], line[1100], *f[7];
+            if (strlen(rows[i]) >= sizeof(copy)) goto done;
+            strcpy(copy, rows[i]);
+            if (fields(copy, f, 7) == 7 &&
+                (strcmp(f[0], "R") == 0 || strcmp(f[0], "P") == 0) &&
+                strcmp(f[2], owner) == 0 && strcmp(f[3], start) == 0) {
+                graph_found = 1;
+                n = snprintf(line, sizeof(line), "L|%s|%s|%s|%s|%s|%s\n",
+                             out_token, owner, start, reason, f[5], f[6]);
+                if (n < 0 || (size_t)n >= sizeof(line)) goto done;
+                int duplicate = 0;
+                for (size_t j = 0; j < nnext; ++j)
+                    if (strcmp(next[j], line) == 0) duplicate = 1;
+                if (!duplicate) {
+                    if (nnext >= ROW_LIMIT) goto done;
+                    next[nnext] = strdup(line);
+                    if (!next[nnext++]) goto done;
+                    changed = 1;
+                }
+            }
+        }
         if (remove) {
             if (root_remove) {
                 ++old_root_count;
@@ -239,6 +271,7 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
             if (!next[nnext++]) goto done;
         }
     }
+    if (op == 7 && !graph_found) { result = 1; goto done; }
     if (op == 1 || op == 6) {
         if (!reason || !*reason || !root_rows) goto done;
         const char *p = root_rows;

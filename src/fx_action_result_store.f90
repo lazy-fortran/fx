@@ -14,6 +14,7 @@ module fx_action_result_store
         immutable_lease_t, immutable_store_publication_lease_acquire, &
         immutable_store_publication_commit, immutable_store_lease_release, &
         immutable_store_reason_release, &
+        immutable_store_graph_read_lease_acquire, &
         immutable_store_materialize_blob, IMMUTABLE_MATERIALIZE_AUTO
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_verify_tree
@@ -40,9 +41,21 @@ module fx_action_result_store
         logical :: initialized = .false.
     end type action_result_store_t
 
+    !! Read handles keep the action's current and pending result graph leased.
+    !! Release only after every restored output has been atomically replaced.
+    type, public :: action_result_read_t
+        private
+        type(immutable_lease_t) :: graph_lease
+        character(len=:), allocatable :: action_key
+        character(len=:), allocatable :: store_root
+        logical :: active = .false.
+    end type action_result_read_t
+
     public :: action_result_store_init, action_result_put_blob
     public :: action_result_publish, action_result_publish_files
     public :: action_result_lookup, action_result_conflicts
+    public :: action_result_read_acquire, action_result_read_lookup, &
+        action_result_read_release
     public :: action_result_materialize_blob, action_result_action_key, &
         action_result_action_key_parts, action_result_compile_action_key
     public :: action_result_file_mode
@@ -312,9 +325,81 @@ contains
         call action_result_publish(store, action_id, entries, result_id, ierr)
     end subroutine action_result_publish_files
 
+    subroutine action_result_read_acquire(store, action_id, read, ierr)
+        !! Acquire before checking or reading the action binding record.
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: action_id
+        type(action_result_read_t), intent(out) :: read
+        integer, intent(out) :: ierr
+        character(len=HASH_LEN) :: key
+        integer :: lease_status
+
+        read%active = .false.
+        ierr = ACTION_RESULT_INVALID
+        if (.not. store%initialized) return
+        key = action_result_action_key(action_id)
+        if (.not. immutable_id_valid(key)) return
+        call immutable_store_graph_read_lease_acquire(store%objects, key, &
+            'fx-action-v1', 'action-read', read%graph_lease, lease_status)
+        if (lease_status == IMMUTABLE_MISSING) then
+            ierr = ACTION_RESULT_MISSING
+            return
+        end if
+        if (lease_status /= IMMUTABLE_OK) then
+            ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        read%action_key = key
+        read%store_root = store%root_dir
+        read%active = .true.
+        ierr = ACTION_RESULT_OK
+    end subroutine action_result_read_acquire
+
+    subroutine action_result_read_release(store, read, ierr)
+        !! Release only this handle's token after all graph consumers are done.
+        type(action_result_store_t), intent(in) :: store
+        type(action_result_read_t), intent(inout) :: read
+        integer, intent(out) :: ierr
+        integer :: lease_status
+
+        ierr = ACTION_RESULT_INVALID
+        if (.not. read%active) return
+        if (.not. store%initialized) return
+        if (.not. allocated(read%store_root)) return
+        if (read%store_root /= store%root_dir) return
+        call immutable_store_lease_release(store%objects, read%graph_lease, &
+            lease_status)
+        if (lease_status == IMMUTABLE_OK .or. &
+            lease_status == IMMUTABLE_MISSING) then
+            read%active = .false.
+            ierr = ACTION_RESULT_OK
+        else
+            ierr = ACTION_RESULT_IO_ERROR
+        end if
+    end subroutine action_result_read_release
+
     subroutine action_result_lookup(store, action_id, entries, result_id, ierr)
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: action_id
+        type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
+        character(len=HASH_LEN), intent(out) :: result_id
+        integer, intent(out) :: ierr
+        type(action_result_read_t) :: read
+        integer :: release_status
+
+        result_id = ''
+        call action_result_read_acquire(store, action_id, read, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
+        call action_result_read_lookup(store, read, entries, result_id, ierr)
+        call action_result_read_release(store, read, release_status)
+        if (release_status /= ACTION_RESULT_OK .and. &
+            ierr == ACTION_RESULT_OK) ierr = ACTION_RESULT_IO_ERROR
+    end subroutine action_result_lookup
+
+    subroutine action_result_read_lookup(store, read, entries, result_id, ierr)
+        !! Verify and load the manifest while the graph read handle remains active.
+        type(action_result_store_t), intent(in) :: store
+        type(action_result_read_t), intent(in) :: read
         type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
         character(len=HASH_LEN), intent(out) :: result_id
         integer, intent(out) :: ierr
@@ -328,7 +413,11 @@ contains
         result_id = ''
         ierr = ACTION_RESULT_INVALID
         if (.not. store%initialized) return
-        key = action_result_action_key(action_id)
+        if (.not. read%active) return
+        if (.not. allocated(read%action_key)) return
+        if (.not. allocated(read%store_root)) return
+        if (read%store_root /= store%root_dir) return
+        key = read%action_key
         if (.not. immutable_id_valid(key)) return
         call to_c_text(store%root_dir, c_root)
         call to_c_text(key, c_key)
@@ -413,7 +502,7 @@ contains
         end if
         result_id = snapshot
         ierr = ACTION_RESULT_OK
-    end subroutine action_result_lookup
+    end subroutine action_result_read_lookup
 
     subroutine action_result_conflicts(store, action_id, ids, ierr)
         type(action_result_store_t), intent(in) :: store
