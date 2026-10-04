@@ -75,14 +75,18 @@ conformity tests if found, preserving observable retention/publication/recovery
 contracts. The first confirmed redundancy is a repeated retained-blob assertion
 in `test_immutable_leases` whose name incorrectly claims absence of a delete API.
 The prior assertion already follows the complete lifecycle and stays intact.
-Native Git-free source-export inventory is on pending task commit `24cf52c`;
-it is not yet delivered at this checkpoint. No special Gremlin Git artifact.
+The controller integrated the duplicate removal at `3b0daf9` and native Git-free
+source-export inventory at `54b3c5c`. Independent Luna review found no blocker;
+the exact combined native lease/inventory gate passes 2/2 in 0.80 seconds with
+pinned driver `f31d0faa`. This is an initial slice, not a completed suite-wide
+quality audit. No special Gremlin Git artifact.
 
 [#53](https://github.com/lazy-fortran/fx/issues/53) removes production watcher
 test failure counters/descriptor entry points; #51 owns immutable-store hooks.
 Keep test-only measurement and real external errors. Do not recreate internal
-phases using interception frameworks. fo #150 consumes one shared strict JSON
-parser; generic grammar fixes belong here rather than another fo scanner.
+phases using interception frameworks. [#54](https://github.com/lazy-fortran/fx/issues/54)
+provides the shared strict JSON codec consumed by fo #150; generic grammar fixes
+belong here rather than another fo scanner.
 
 Luna workers use isolated task worktrees, warm focused behavioral gates and
 bounded readiness deadlines. Record before/after work and the concrete faults
