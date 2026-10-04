@@ -16,72 +16,51 @@ typedef struct {
     int output;
 } fx_test_child;
 
-static int fx_test_build(void) {
-    pid_t pid = fork();
-    int status = 0, elapsed = 0;
-    if (pid < 0) return 0;
-    if (pid == 0) {
-        execlp("fpm", "fpm", "build", (char *)NULL);
-        _exit(127);
-    }
-    while (elapsed <= 300000) {
-        pid_t result = waitpid(pid, &status, WNOHANG);
-        if (result == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        if (result < 0 && errno != EINTR) return 0;
-        struct timespec delay = {0, 10000000};
-        nanosleep(&delay, NULL);
-        elapsed += 10;
-    }
-    kill(pid, SIGKILL);
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    return 0;
+int fx_test_is_executable(const char *path) {
+    return path != NULL && access(path, X_OK) == 0;
 }
 
-int fx_test_find_server(const char *test_binary, char *out, int capacity) {
-    const char *override = getenv("FX_MCP_SERVER");
-    const char *slash = strrchr(test_binary, '/');
-    if (override && access(override, X_OK) == 0) {
-        if (strlen(override) >= (size_t)capacity) return 0;
-        strcpy(out, override);
-        return 1;
-    }
-    if (!slash) return 0;
-    size_t directory_len = (size_t)(slash - test_binary);
-    /* fo builds this worktree's app and test into the same bin directory. */
-    const char fo_directory[] = "/build/fo/bin";
-    if (directory_len >= sizeof(fo_directory) - 1 &&
-        memcmp(test_binary + directory_len - (sizeof(fo_directory) - 1),
-               fo_directory, sizeof(fo_directory) - 1) == 0) {
-        if (directory_len + sizeof("/fx-mcp-server") > (size_t)capacity) return 0;
-        memcpy(out, test_binary, directory_len);
-        strcpy(out + directory_len, "/fx-mcp-server");
-        return access(out, X_OK) == 0;
-    }
-    if (directory_len + sizeof("/../app/fx-mcp-server") > (size_t)capacity) return 0;
-    memcpy(out, test_binary, directory_len);
-    strcpy(out + directory_len, "/../app/fx-mcp-server");
-    if (!fx_test_build()) return 0;
-    return access(out, X_OK) == 0;
-}
-
-void *fx_test_spawn(const char *path) {
+void *fx_test_spawn_argv(const char *packed_args, int argument_count,
+                         int capture_stderr) {
     int in_pipe[2], out_pipe[2];
     pid_t pid;
     fx_test_child *child;
-    if (pipe(in_pipe) || pipe(out_pipe)) return NULL;
+    char **argv;
+    const char *cursor = packed_args;
+    int index;
+    if (packed_args == NULL || argument_count < 1 || argument_count > 16) return NULL;
+    argv = calloc((size_t)argument_count + 1, sizeof(*argv));
+    if (argv == NULL) return NULL;
+    for (index = 0; index < argument_count; ++index) {
+        argv[index] = (char *)cursor;
+        cursor += strlen(cursor) + 1;
+    }
+    if (argv[0][0] == '\0') { free(argv); return NULL; }
+    if (pipe(in_pipe) != 0) { free(argv); return NULL; }
+    if (pipe(out_pipe) != 0) {
+        close(in_pipe[0]); close(in_pipe[1]); free(argv); return NULL;
+    }
     pid = fork();
-    if (pid < 0) return NULL;
+    if (pid < 0) {
+        close(in_pipe[0]); close(in_pipe[1]);
+        close(out_pipe[0]); close(out_pipe[1]); free(argv); return NULL;
+    }
     if (pid == 0) {
         dup2(in_pipe[0], STDIN_FILENO);
         dup2(out_pipe[1], STDOUT_FILENO);
+        if (capture_stderr) dup2(out_pipe[1], STDERR_FILENO);
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
-        execl(path, path, (char *)NULL);
+        execv(argv[0], argv);
         _exit(127);
     }
+    free(argv);
     close(in_pipe[0]); close(out_pipe[1]);
     child = malloc(sizeof(*child));
-    if (!child) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); return NULL; }
+    if (!child) {
+        close(in_pipe[1]); close(out_pipe[0]);
+        kill(pid, SIGKILL); waitpid(pid, NULL, 0); return NULL;
+    }
     child->pid = pid; child->input = in_pipe[1]; child->output = out_pipe[0];
     return child;
 }
