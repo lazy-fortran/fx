@@ -277,11 +277,14 @@ contains
             call wait_for_file(trim(ready(i)), 15000, exists)
             call test_assert(s, exists, 'directory creators reach the Fortran gate')
         end do
-        call write_text(trim(start), 'create')
         do i = 1, NCREATORS
             if (creator_pid(i) <= 0) cycle
             call assert_fortran_child(s, creator_pid(i), child_start, &
                 child_parent, child_path)
+        end do
+        call write_text(trim(start), 'create')
+        do i = 1, NCREATORS
+            if (creator_pid(i) <= 0) cycle
             call wait_for_child(creator_pid(i), 15000, child_status, started)
             call test_assert(s, started .and. child_status == 0, &
                 'concurrent creator completes directory synchronization')

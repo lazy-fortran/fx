@@ -36,9 +36,9 @@ program test_immutable_publication
     if (end_path <= 1) stop 20
     write (root, '(a,i0)') scratch(1:end_path - 1)//'/fx-publish51-', proc_pid()
     source = trim(root)//'/source'
-    call write_text(source, PAYLOAD)
     call immutable_store_init(store, trim(root)//'/store', ierr)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'store initializes')
+    call write_text(source, PAYLOAD)
 
     call immutable_store_put_blob(store, trim(source), blob_id, ierr)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
