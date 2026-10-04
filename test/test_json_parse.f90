@@ -1,9 +1,11 @@
 program test_json_parse
+    use, intrinsic :: iso_fortran_env, only: int64
     use fx_test, only: test_suite_t, test_suite_init, &
         test_suite_summary, test_suite_exit, &
         test_assert, test_assert_equal_str, &
         test_assert_equal_int
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, &
+        json_parser_init_strict, &
         json_parser_next, json_parser_reset, &
         json_extract_string, json_extract_int, &
         json_extract_bool, &
@@ -11,7 +13,8 @@ program test_json_parse
         JSON_ARRAY_START, JSON_ARRAY_END, &
         JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, &
         JSON_BOOL, JSON_NULL_VAL, JSON_ERROR, &
-        JSON_END_OF_INPUT
+        JSON_END_OF_INPUT, JSON_ERR_SYNTAX, JSON_ERR_DEPTH, JSON_ERR_STRING, &
+        JSON_ERR_NUMBER, JSON_ERR_TRAILING, JSON_MAX_DEPTH
     implicit none
 
     type(test_suite_t) :: suite
@@ -26,6 +29,8 @@ program test_json_parse
     call test_extract_string_path(suite)
     call test_extract_int_path(suite)
     call test_parse_malformed(suite)
+    call test_strict_typed_values(suite)
+    call test_strict_rejects_malformed(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -353,7 +358,6 @@ contains
         type(test_suite_t), intent(inout) :: suite
         type(json_parser_t) :: p
         type(json_event_t) :: ev
-        logical :: got_error
         logical :: starts_ok
         integer :: i
         character(len=:), allocatable :: deep_json
@@ -371,15 +375,17 @@ contains
         call test_assert(suite, ev%event_type == JSON_ERROR, &
             'malformed: unterminated string')
 
-        ! Empty input
+        ! Strict entry points reject missing documents and stay failed.
         call json_parser_init(p, '')
         call json_parser_next(p, ev)
-        call test_assert(suite, ev%event_type == JSON_END_OF_INPUT, &
-            'malformed: empty is end-of-input')
+        call test_assert(suite, ev%event_type == JSON_ERROR .and. &
+            ev%error_code == JSON_ERR_SYNTAX, 'malformed: empty document')
+        call test_assert_equal_int(suite, 1, ev%error_offset, &
+            'malformed: empty input offset')
         call test_assert_equal_int(suite, 0, p%depth, &
             'malformed: empty depth remains zero')
 
-        ! Unmatched closers report an error without underflowing the depth.
+        ! Unmatched closers fail without underflowing or resuming at later text.
         call json_parser_init(p, '}{')
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_ERROR, &
@@ -387,8 +393,8 @@ contains
         call test_assert_equal_int(suite, 0, p%depth, &
             'malformed: unmatched closer depth remains zero')
         call json_parser_next(p, ev)
-        call test_assert(suite, ev%event_type == JSON_OBJECT_START, &
-            'malformed: token after unmatched closer remains readable')
+        call test_assert(suite, ev%event_type == JSON_ERROR, &
+            'malformed: parser error remains sticky')
 
         call json_parser_init(p, ']')
         call json_parser_next(p, ev)
@@ -397,11 +403,12 @@ contains
         call test_assert_equal_int(suite, 0, p%depth, &
             'malformed: unmatched array depth remains zero')
 
-        ! The parser accepts exactly MAX_DEPTH open containers and rejects one more.
-        deep_json = repeat('[', 129) // repeat(']', 129)
+        ! The strict parser accepts JSON_MAX_DEPTH and rejects one more level.
+        deep_json = repeat('[', JSON_MAX_DEPTH + 1) // '0' // &
+            repeat(']', JSON_MAX_DEPTH + 1)
         call json_parser_init(p, deep_json)
         starts_ok = .true.
-        do i = 1, 128
+        do i = 1, JSON_MAX_DEPTH
             call json_parser_next(p, ev)
             if (ev%event_type /= JSON_ARRAY_START) then
                 starts_ok = .false.
@@ -411,9 +418,10 @@ contains
         call test_assert(suite, starts_ok, 'malformed: maximum nesting accepted')
         if (starts_ok) then
             call json_parser_next(p, ev)
-            call test_assert(suite, ev%event_type == JSON_ERROR, &
+            call test_assert(suite, ev%event_type == JSON_ERROR .and. &
+                ev%error_code == JSON_ERR_DEPTH, &
                 'malformed: excess nesting rejected')
-            call test_assert_equal_int(suite, 128, p%depth, &
+            call test_assert_equal_int(suite, JSON_MAX_DEPTH, p%depth, &
                 'malformed: excess nesting preserves maximum depth')
         end if
 
@@ -441,18 +449,167 @@ contains
         call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
             ev%int_val == 42, 'boundary: integer at end of input')
 
-        ! Whitespace only
+        ! Whitespace only is an empty document in strict mode.
         call json_parser_init(p, '   ')
         call json_parser_next(p, ev)
-        call test_assert(suite, ev%event_type == JSON_END_OF_INPUT, &
-            'malformed: whitespace only')
+        call test_assert(suite, ev%event_type == JSON_ERROR .and. &
+            ev%error_code == JSON_ERR_SYNTAX, 'malformed: whitespace only')
+        call test_assert_equal_int(suite, 4, ev%error_offset, &
+            'malformed: whitespace-only error offset')
 
         ! Object with invalid interior
         call json_parser_init(p, '{xyz}')
         call json_parser_next(p, ev) ! OBJECT_START
         call json_parser_next(p, ev) ! ERROR (x is not valid key start)
-        got_error = ev%event_type == JSON_ERROR
-        call test_assert(suite, got_error, 'malformed: invalid object key')
+        call test_assert(suite, ev%event_type == JSON_ERROR, &
+            'malformed: invalid object key')
     end subroutine test_parse_malformed
+
+    subroutine test_strict_typed_values(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(json_parser_t) :: p
+        type(json_event_t) :: ev
+        character(len=:), allocatable :: decoded
+
+        decoded = 'A' // achar(206) // achar(187) // achar(240) // &
+            achar(159) // achar(152) // achar(128)
+        call json_parser_init_strict(p, &
+            '{"unicode":"A\u03BB\uD83D\uDE00","bounds":[' // &
+            '-9223372036854775808,9223372036854775807,' // &
+            '9223372036854775808,-9223372036854775809,1.25e+2]}')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_OBJECT_START, &
+            'strict: object start')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_KEY .and. &
+            ev%string_val == 'unicode', 'strict: decoded first key')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_STRING, &
+            'strict: Unicode string type')
+        call test_assert_equal_str(suite, decoded, ev%string_val, &
+            'strict: BMP and surrogate-pair UTF-8 bytes')
+        call test_assert_equal_str(suite, '"A\u03BB\uD83D\uDE00"', &
+            ev%raw_val, 'strict: raw string token is preserved')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_KEY .and. &
+            ev%string_val == 'bounds', 'strict: decoded second key')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_ARRAY_START, &
+            'strict: integer array start')
+
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
+            ev%int64_valid, 'strict: signed int64 minimum fits')
+        call test_assert(suite, ev%int64_val == -huge(0_int64) - 1_int64, &
+            'strict: signed int64 minimum value')
+        call test_assert_equal_str(suite, '-9223372036854775808', &
+            ev%raw_val, 'strict: minimum raw integer')
+
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
+            ev%int64_valid, 'strict: signed int64 maximum fits')
+        call test_assert(suite, ev%int64_val == huge(0_int64), &
+            'strict: signed int64 maximum value')
+        call test_assert_equal_str(suite, '9223372036854775807', &
+            ev%raw_val, 'strict: maximum raw integer')
+
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
+            .not. ev%int64_valid, 'strict: out-of-range integer stays JSON')
+        call test_assert_equal_str(suite, '9223372036854775808', ev%raw_val, &
+            'strict: out-of-range integer raw value')
+
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
+            .not. ev%int64_valid, 'strict: negative underflow stays JSON')
+        call test_assert_equal_str(suite, '-9223372036854775809', ev%raw_val, &
+            'strict: negative underflow raw value')
+
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_REAL .and. &
+            ev%real64_valid .and. abs(ev%real_val - 125.0d0) < 1.0d-12, &
+            'strict: exponent number decodes')
+        call test_assert_equal_str(suite, '1.25e+2', ev%raw_val, &
+            'strict: real raw value')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_ARRAY_END, &
+            'strict: array end')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_OBJECT_END, &
+            'strict: object end')
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_END_OF_INPUT, &
+            'strict: complete document ends')
+        call test_assert(suite, p%error_code == 0, &
+            'strict: complete document has no parser error')
+
+        ! Distinct source spellings that decode to the same name stay visible
+        ! to domain consumers, which own duplicate-field rejection.
+        call json_parser_init_strict(p, '{"a":1,"\u0061":2}')
+        call json_parser_next(p, ev)
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_KEY .and. &
+            ev%string_val == 'a', 'strict: first duplicate key')
+        call json_parser_next(p, ev)
+        call json_parser_next(p, ev)
+        call test_assert(suite, ev%event_type == JSON_KEY .and. &
+            ev%string_val == 'a', 'strict: escaped duplicate key decodes')
+    end subroutine test_strict_typed_values
+
+    subroutine test_strict_rejects_malformed(suite)
+        type(test_suite_t), intent(inout) :: suite
+
+        call expect_strict_error(suite, '{"a" 1}', JSON_ERR_SYNTAX, 6, &
+            'strict: missing colon')
+        call expect_strict_error(suite, '{"a":1 "b":2}', JSON_ERR_SYNTAX, 8, &
+            'strict: missing comma')
+        call expect_strict_error(suite, '{"a":1,}', JSON_ERR_SYNTAX, 8, &
+            'strict: trailing object comma')
+        call expect_strict_error(suite, '[1,]', JSON_ERR_SYNTAX, 4, &
+            'strict: trailing array comma')
+        call expect_strict_error(suite, '[01]', JSON_ERR_NUMBER, 3, &
+            'strict: leading zero')
+        call expect_strict_error(suite, '[1.]', JSON_ERR_NUMBER, 4, &
+            'strict: fraction needs digits')
+        call expect_strict_error(suite, '[1e]', JSON_ERR_NUMBER, 4, &
+            'strict: exponent needs digits')
+        call expect_strict_error(suite, 'true false', JSON_ERR_TRAILING, 6, &
+            'strict: trailing root value')
+        call expect_strict_error(suite, '{"a":1}x', JSON_ERR_TRAILING, 8, &
+            'strict: trailing root text offset')
+        call expect_strict_error(suite, '"' // achar(92) // 'x"', &
+            JSON_ERR_STRING, 2, 'strict: invalid escape offset')
+        call expect_strict_error(suite, '"' // achar(92) // 'uD800"', &
+            JSON_ERR_STRING, 8, 'strict: unpaired high surrogate offset')
+        call expect_strict_error(suite, '"' // achar(92) // 'uDC00"', &
+            JSON_ERR_STRING, 2, 'strict: unpaired low surrogate offset')
+        call expect_strict_error(suite, '["a' // achar(1) // '"]', &
+            JSON_ERR_STRING, 4, 'strict: raw control character offset')
+        call expect_strict_error(suite, '', JSON_ERR_SYNTAX, 1, &
+            'strict: empty input offset')
+    end subroutine test_strict_rejects_malformed
+
+    subroutine expect_strict_error(suite, input, expected_code, expected_offset, name)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=*), intent(in) :: input, name
+        integer, intent(in) :: expected_code, expected_offset
+        type(json_parser_t) :: p
+        type(json_event_t) :: ev
+        integer :: i
+
+        call json_parser_init_strict(p, input)
+        do i = 1, 128
+            call json_parser_next(p, ev)
+            if (ev%event_type == JSON_ERROR) then
+                call test_assert_equal_int(suite, expected_code, ev%error_code, &
+                    name // ': error class')
+                call test_assert_equal_int(suite, expected_offset, &
+                    ev%error_offset, name // ': error offset')
+                return
+            end if
+            if (ev%event_type == JSON_END_OF_INPUT) exit
+        end do
+        call test_assert(suite, .false., name // ': malformed input rejected')
+    end subroutine expect_strict_error
 
 end program test_json_parse
