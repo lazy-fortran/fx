@@ -8,10 +8,10 @@ contains
         character(len=:), allocatable :: basename, extension, interpreter
         integer :: slash, dot
         slash = scan(trim(path), '/', back=.true.)
-        basename = lower(trim(path(slash + 1:)))
+        basename = trim(path(slash + 1:))
         dot = scan(basename, '.', back=.true.)
         extension = ''
-        if (dot > 0) extension = basename(dot:)
+        if (dot > 0) extension = lower(basename(dot:))
         forbidden_executable = forbidden_extension(extension) .or. forbidden_name(basename)
         if (forbidden_executable) return
         interpreter = shebang_interpreter(shebang)
@@ -40,7 +40,7 @@ contains
         start = 3
         token = next_word(line, start)
         name = basename_of(token)
-        if (name == 'env') name = env_interpreter(remainder(line, start))
+        if (lower(name) == 'env') name = env_interpreter(remainder(line, start))
     end function shebang_interpreter
 
     recursive function env_interpreter(line) result(name)
@@ -77,7 +77,7 @@ contains
             end if
             if (index(token, '=') > 0) cycle
             name = basename_of(token)
-            if (name == 'env') name = env_interpreter(remainder(line, start))
+            if (lower(name) == 'env') name = env_interpreter(remainder(line, start))
             return
         end do
     end function env_interpreter
@@ -167,43 +167,62 @@ contains
         character(len=:), allocatable :: name
         integer :: slash
         slash = scan(trim(path), '/', back=.true.)
-        name = lower(trim(path(slash + 1:)))
+        name = trim(path(slash + 1:))
     end function basename_of
 
     logical function forbidden_name(name)
         character(len=*), intent(in) :: name
-        character(len=:), allocatable :: lower_name
+        character(len=8), parameter :: families(25) = [character(len=8) :: &
+            'sh', 'bash', 'dash', 'ash', 'zsh', 'ksh', 'csh', 'tcsh', 'fish', &
+            'python', 'node', 'nodejs', 'npm', 'npx', 'perl', 'ruby', 'lua', &
+            'php', 'awk', 'mawk', 'gawk', 'tclsh', 'wish', 'R', 'rscript']
+        character(len=:), allocatable :: lower_name, family
+        integer :: i
         lower_name = lower(name)
-        forbidden_name = lower_name == 'sh' .or. lower_name == 'bash' .or. &
-            lower_name == 'dash' .or. lower_name == 'ash' .or. &
-            lower_name == 'zsh' .or. lower_name == 'ksh' .or. &
-            lower_name == 'csh' .or. lower_name == 'tcsh' .or. &
-            lower_name == 'fish' .or. lower_name == 'python' .or. &
-            lower_name == 'python2' .or. lower_name == 'python3' .or. &
-            lower_name == 'node' .or. lower_name == 'nodejs' .or. &
-            lower_name == 'npm' .or. lower_name == 'npx' .or. &
-            lower_name == 'perl' .or. lower_name == 'ruby' .or. &
-            lower_name == 'lua' .or. lower_name == 'php' .or. &
-            lower_name == 'awk' .or. lower_name == 'mawk' .or. &
-            lower_name == 'gawk' .or. lower_name == 'tclsh' .or. &
-            lower_name == 'wish' .or. lower_name == 'r' .or. &
-            lower_name == 'rscript'
-        forbidden_name = forbidden_name .or. &
-            starts_with_version(lower_name, 'python') .or. &
-            starts_with_version(lower_name, 'node')
+        forbidden_name = .false.
+        do i = 1, size(families)
+            family = lower(trim(families(i)))
+            if (lower_name == family) then
+                forbidden_name = .true.
+                return
+            end if
+            ! R's versioned executable keeps its capital R; lowercase r2 is
+            ! also the unrelated native radare2 command.
+            if (families(i) == 'R') then
+                if (len(name) < 1) cycle
+                if (name(1:1) /= 'R') cycle
+            end if
+            if (starts_with_version(lower_name, family)) then
+                forbidden_name = .true.
+                return
+            end if
+        end do
     end function forbidden_name
 
     logical function starts_with_version(name, prefix)
         character(len=*), intent(in) :: name, prefix
-        integer :: i
+        integer :: i, start
+        logical :: digits
         starts_with_version = .false.
         if (len(name) <= len(prefix)) return
         if (name(:len(prefix)) /= prefix) return
-        do i = len(prefix) + 1, len(name)
-            if ((name(i:i) < '0' .or. name(i:i) > '9') .and. &
-                name(i:i) /= '.') return
+        start = len(prefix) + 1
+        ! Both ruby3.3 and gawk-5.4.1 are real naming forms. Require complete
+        ! numeric components, so language-prefixed helper names stay allowed.
+        if (name(start:start) == '-') start = start + 1
+        if (start > len(name)) return
+        digits = .false.
+        do i = start, len(name)
+            if (name(i:i) >= '0' .and. name(i:i) <= '9') then
+                digits = .true.
+            else if (name(i:i) == '.') then
+                if (.not. digits) return
+                digits = .false.
+            else
+                return
+            end if
         end do
-        starts_with_version = .true.
+        starts_with_version = digits
     end function starts_with_version
 
     function lower(text) result(result)

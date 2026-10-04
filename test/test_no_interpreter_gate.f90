@@ -3,7 +3,7 @@ program test_no_interpreter_gate
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_suite_summary, test_suite_exit
     use fx_proc, only: proc_result_t, proc_exec, proc_exec_silent, &
-        proc_pid, proc_scan_files
+        proc_pid, proc_scan_files, proc_file_read, proc_file_write
     use fx_test_executable_policy, only: forbidden_executable
     use fx_test_process, only: test_process_trace_execs, &
         test_process_is_executable, test_process_trace_supported, &
@@ -55,6 +55,7 @@ program test_no_interpreter_gate
     call check_equal(fx_test_remove_tree(root), 0, 'old gate fixture is removed')
     call check_equal(fx_test_mkdir_p(bin_path), 0, 'private gate PATH is created')
 
+    call check_command_names()
     call check_shebang_forms()
     call check_checked_in_inventory()
     call check_generated_inventory()
@@ -62,6 +63,7 @@ program test_no_interpreter_gate
     trace_supported = test_process_trace_supported()
     if (trace_supported) then
         call check_runtime_mutants()
+        call check_versioned_runtime()
         call check_trace_timeout()
     else
         call check(.not. gate_run, &
@@ -104,6 +106,33 @@ contains
         character(len=32) :: text
         write (text, '(I0)') value
     end function integer_text
+
+    subroutine check_command_names()
+        character(len=32), parameter :: forbidden(28) = [character(len=32) :: &
+            'sh1', 'bash5.2', 'dash0.5', 'ash1.0', 'zsh5.9', 'ksh93', &
+            'csh6', 'tcsh6.24', 'fish4.1', 'python3.14', 'node22', &
+            'nodejs22', 'npm10', 'npx10', 'perl5.40.0', 'ruby3.3', &
+            'lua5.4', 'php8.3', 'awk5.3', 'mawk1.3.4', 'gawk5.4.1', &
+            'gawk-5.4.1', 'tclsh8.6', 'wish8.6', 'R4.5', 'R-4.5.1', &
+            'Rscript4.5', 'ruby-3.3']
+        character(len=32), parameter :: allowed(18) = [character(len=32) :: &
+            'rubyhelper', 'ruby3.3helper', 'ruby.', 'ruby3.', 'ruby3..3', &
+            'ruby-3.3-helper', 'perltex', 'perl5-config', 'luatex', &
+            'lua5.4-helper', 'php-config', 'gawkbug', 'gawk-5.4.1-tools', &
+            'tclshlib', 'Rscript-helper', 'r2', 'R2-D2', 'node_modules']
+        integer :: i
+        do i = 1, size(forbidden)
+            call check(forbidden_executable('/native/'//trim(forbidden(i)), ''), &
+                'versioned interpreter name is rejected: '//trim(forbidden(i)))
+            call check(forbidden_executable('extensionless', &
+                '#!/usr/bin/env '//trim(forbidden(i))), &
+                'versioned shebang command is rejected: '//trim(forbidden(i)))
+        end do
+        do i = 1, size(allowed)
+            call check(.not. forbidden_executable('/native/'//trim(allowed(i)), ''), &
+                'unrelated native command is allowed: '//trim(allowed(i)))
+        end do
+    end subroutine check_command_names
 
     subroutine check_shebang_forms()
         character(len=256), parameter :: forbidden(22) = [character(len=256) :: &
@@ -339,6 +368,42 @@ contains
                 'runtime interpreter descendant is rejected: '//trim(mutant_names(i)))
         end do
     end subroutine check_runtime_mutants
+
+    subroutine check_versioned_runtime()
+        character(kind=c_char) :: paths(TRACE_CAPACITY)
+        character(len=:), allocatable :: content, target, alias, forbidden
+        character(len=4096) :: interpreter, arguments(4)
+        character(len=1) :: empty_environment(0)
+        integer :: ierr, status, byte_count
+        call find_tool('ruby', interpreter, ierr)
+        call check_equal(ierr, 0, 'Ruby runtime control is available')
+        if (ierr /= 0) return
+        target = root//'/ruby3.3'
+        alias = root//'/native-runtime-alias'
+        call proc_file_read(trim(interpreter), content, byte_count, ierr)
+        call check_equal(ierr, 0, 'native Ruby image is read')
+        if (ierr /= 0) return
+        call proc_file_write(target, content, byte_count, ierr)
+        call check_equal(ierr, 0, 'versioned Ruby fixture image is written')
+        if (ierr /= 0) return
+        call check_equal(fx_test_chmod(target, 493), 0, &
+            'versioned Ruby fixture is executable')
+        call check_equal(fx_test_symlink(target, alias), 0, &
+            'neutral runtime alias is created')
+        call check(.not. forbidden_executable(alias, ''), &
+            'neutral alias has no interpreter name')
+        arguments(1) = alias
+        arguments(2) = '--disable-gems'
+        arguments(3) = '-e'
+        arguments(4) = '0'
+        call test_process_trace_execs(arguments, empty_environment, &
+            paths, status, ierr, 5000)
+        call check_equal(ierr, 0, 'versioned runtime alias is traced')
+        call check_equal(status, 0, 'versioned runtime fixture executes normally')
+        forbidden = forbidden_trace_path(paths)
+        call check(forbidden == target, &
+            'trace rejects resolved ruby3.3 image behind neutral alias')
+    end subroutine check_versioned_runtime
 
     subroutine find_driver(path)
         character(len=:), allocatable, intent(out) :: path
