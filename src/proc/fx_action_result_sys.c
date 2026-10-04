@@ -10,16 +10,11 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
-
-static int test_pause_phase;
-static char test_pause_ready[PATH_MAX];
-static char test_pause_release[PATH_MAX];
 
 static int valid_id(const char *id)
 {
@@ -155,22 +150,6 @@ int fx_action_result_read(const char *root, const char *id, char *bytes,
     return 0;
 }
 
-static void publication_pause(int phase)
-{
-    if (test_pause_phase != phase || !test_pause_ready[0] ||
-        !test_pause_release[0]) return;
-    int fd = open(test_pause_ready, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) return;
-    (void)write(fd, "ready\n", 6);
-    (void)fsync(fd);
-    close(fd);
-    struct timespec delay = {0, 10000000};
-    for (int i = 0; i < 30000; ++i) {
-        if (access(test_pause_release, F_OK) == 0) break;
-        (void)nanosleep(&delay, NULL);
-    }
-}
-
 int fx_action_result_write(const char *root, const char *id,
                            const char *bytes, int count)
 {
@@ -195,11 +174,9 @@ int fx_action_result_write(const char *root, const char *id,
     }
     if (fsync(fd) != 0) { close(fd); unlinkat(dfd, temp, 0); close(dfd); return -1; }
     close(fd);
-    publication_pause(1);
     if (renameat(dfd, temp, dfd, name) != 0) {
         unlinkat(dfd, temp, 0); close(dfd); return -1;
     }
-    publication_pause(2);
     int rc = fsync(dfd);
     close(dfd);
     return rc;
@@ -254,33 +231,5 @@ int fx_action_result_replace(const char *source, const char *destination)
 int fx_action_result_unlink(const char *path)
 {
     if (unlink(path) == 0 || errno == ENOENT) return 0;
-    return -1;
-}
-
-int fx_action_result_test_configure(int phase, const char *ready,
-                                    const char *release)
-{
-    if (strlen(ready) >= sizeof(test_pause_ready) ||
-        strlen(release) >= sizeof(test_pause_release)) return -1;
-    strcpy(test_pause_ready, ready);
-    strcpy(test_pause_release, release);
-    test_pause_phase = phase;
-    return 0;
-}
-
-int fx_action_result_test_barrier(const char *ready, const char *release)
-{
-    int fd = open(ready, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (fd < 0) return -1;
-    if (write(fd, "ready\n", 6) != 6 || fsync(fd) != 0) {
-        close(fd);
-        return -1;
-    }
-    close(fd);
-    struct timespec delay = {0, 10000000};
-    for (int i = 0; i < 30000; ++i) {
-        if (access(release, F_OK) == 0) return 0;
-        (void)nanosleep(&delay, NULL);
-    }
     return -1;
 }

@@ -1,13 +1,37 @@
 #define _POSIX_C_SOURCE 200809L
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <time.h>
 #include <unistd.h>
+
+int fx_test_fs_lock(const char *path)
+{
+    int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    struct timespec delay = {0, 10000000};
+    for (int i = 0; i < 1500; ++i) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
+        if (errno != EWOULDBLOCK && errno != EINTR) break;
+        (void)nanosleep(&delay, NULL);
+    }
+    close(fd);
+    return -1;
+}
+
+int fx_test_fs_unlock(int fd)
+{
+    if (fd < 0) return -1;
+    int result = flock(fd, LOCK_UN);
+    if (close(fd) != 0) result = -1;
+    return result;
+}
 
 static int safe_fixture_root(const char *path)
 {

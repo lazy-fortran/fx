@@ -4,8 +4,17 @@ module fx_test_fs
     private
     public :: fx_test_mkdir_p, fx_test_remove_tree, fx_test_rename
     public :: fx_test_symlink, fx_test_chmod, fx_test_sleep_ms
+    public :: fx_test_lock, fx_test_unlock
 
     interface
+        integer(c_int) function c_lock(path) bind(C, name='fx_test_fs_lock')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function c_lock
+        integer(c_int) function c_unlock(fd) bind(C, name='fx_test_fs_unlock')
+            import :: c_int
+            integer(c_int), value :: fd
+        end function c_unlock
         integer(c_int) function c_mkdir_p(path) &
                 bind(C, name='fx_test_fs_mkdir_p')
             import :: c_char, c_int
@@ -42,6 +51,17 @@ module fx_test_fs
     end interface
 
 contains
+
+    integer function fx_test_lock(path) result(fd)
+        character(len=*), intent(in) :: path
+        fd = int(c_lock(trim(path)//c_null_char))
+    end function fx_test_lock
+
+    integer function fx_test_unlock(fd) result(ierr)
+        integer, intent(inout) :: fd
+        ierr = int(c_unlock(int(fd, c_int)))
+        fd = -1
+    end function fx_test_unlock
 
     integer function fx_test_mkdir_p(path) result(ierr)
         character(len=*), intent(in) :: path

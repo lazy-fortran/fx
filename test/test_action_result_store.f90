@@ -6,6 +6,11 @@ program test_action_result_store
     use fx_proc, only: proc_pid, proc_exec_silent
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_chmod
     use fx_test_process, only: test_process_is_executable
+    use fx_test_process, only: test_process_wait_once, test_process_signal, &
+        test_process_sleep_ms
+    use action_publication_oracle, only: publication_probe_t, &
+        publication_probe_lock, publication_probe_observe, publication_probe_conflict, &
+        publication_probe_unlock
     use fx_immutable_store, only: immutable_tree_entry_t, &
         immutable_store_blob_path
     use fx_immutable_tree, only: immutable_store_verify_tree
@@ -25,11 +30,6 @@ program test_action_result_store
         integer(c_int) function fork_process() bind(C, name='fork')
             import c_int
         end function fork_process
-        integer(c_int) function wait_child(pid, status, options) bind(C, name='waitpid')
-            import c_int
-            integer(c_int), value :: pid, options
-            integer(c_int), intent(out) :: status
-        end function wait_child
         integer(c_int) function kill_child(pid, signal) bind(C, name='kill')
             import c_int
             integer(c_int), value :: pid, signal
@@ -42,17 +42,6 @@ program test_action_result_store
             import c_int
             integer(c_int), value :: status
         end subroutine exit_child
-        integer(c_int) function configure_barrier(phase, ready, release) &
-                bind(C, name='fx_action_result_test_configure')
-            import c_char, c_int
-            integer(c_int), value :: phase
-            character(kind=c_char), intent(in) :: ready(*), release(*)
-        end function configure_barrier
-        integer(c_int) function race_barrier(ready, release) &
-                bind(C, name='fx_action_result_test_barrier')
-            import c_char, c_int
-            character(kind=c_char), intent(in) :: ready(*), release(*)
-        end function race_barrier
         integer(c_int) function tmp_root(out, cap) &
                 bind(C, name='fx_immutable_test_tmp_root')
             import c_char, c_int
@@ -73,7 +62,7 @@ program test_action_result_store
     character(len=:), allocatable :: result_path
     integer :: ierr, end_path
     character(len=512) :: race_source_a, race_source_b
-    character(len=512) :: race_ready, race_release
+    type(publication_probe_t) :: race_probe
     type(immutable_tree_entry_t) :: race_entry_a(1), race_entry_b(1)
     character(len=64) :: race_result_a, race_result_b
 
@@ -234,11 +223,11 @@ contains
             release_path)
         character(len=*), intent(in) :: action_id, ready_path, release_path
         type(immutable_tree_entry_t), intent(in) :: entries(:)
-        integer(c_int) :: barrier_status
+        logical :: ready
 
-        barrier_status = race_barrier(trim(ready_path)//c_null_char, &
-            trim(release_path)//c_null_char)
-        if (barrier_status /= 0_c_int) call exit_child(2_c_int)
+        call write_text(ready_path, 'ready')
+        call wait_for_file(release_path, ready)
+        if (.not. ready) call exit_child(2_c_int)
         call concurrent_publish_child(action_id, entries)
     end subroutine synchronized_publish_child
 
@@ -247,36 +236,74 @@ contains
         character(len=*), intent(in) :: tag
         type(immutable_tree_entry_t), intent(in) :: entries(:)
         integer(c_int), intent(out) :: child
-        integer(c_int) :: configured
-        character(len=512) :: ready_path, release_path
+        integer :: local_err
+        character(len=64) :: pending_id
 
-        ready_path = trim(root)//'/'//trim(tag)//'-ready'
-        release_path = trim(root)//'/'//trim(tag)//'-release'
-        race_ready = ready_path
-        race_release = release_path
-        configured = configure_barrier(phase, trim(ready_path)//c_null_char, &
-            trim(release_path)//c_null_char)
-        call test_assert_equal_int(suite, 0, int(configured), &
-            'crash barrier configuration succeeds')
+        child = -1_c_int
+        call publication_probe_lock(trim(root)//'/store/v2', &
+            trim(tag)//'-action', race_probe, local_err)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'external action lock establishes publication boundary')
+        if (local_err /= 0) return
         child = fork_process()
         call test_assert(suite, child >= 0_c_int, 'crash publisher forks')
         if (child == 0_c_int) &
             call concurrent_publish_child(trim(tag)//'-action', entries)
+        if (child < 0_c_int) then
+            call publication_probe_unlock(race_probe)
+            return
+        end if
+        call publication_probe_observe(race_probe, int(child), pending_id, local_err)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'publisher waits after external durable P observation')
+        if (phase == 2_c_int) then
+            call publication_probe_conflict(race_probe, local_err)
+            call test_assert_equal_int(suite, 0, local_err, &
+                'publisher waits after external conflict-binding observation')
+        end if
     end subroutine start_paused_conflict
 
-    subroutine wait_for_file(path)
+    subroutine wait_for_file(path, found)
         character(len=*), intent(in) :: path
+        logical, intent(out), optional :: found
         logical :: exists
         integer :: attempt
 
         exists = .false.
+        if (present(found)) found = .false.
         do attempt = 1, 1000
             inquire(file=trim(path), exist=exists)
-            if (exists) return
+            if (exists) then
+                if (present(found)) found = .true.
+                return
+            end if
             ierr = sleep_us(10000_c_int)
         end do
-        call test_assert(suite, .false., 'publisher reaches the configured crash barrier')
+        call test_assert(suite, .false., 'publisher reaches the native race barrier')
     end subroutine wait_for_file
+
+    subroutine bounded_child_wait(pid, status, waited)
+        integer(c_int), intent(in) :: pid
+        integer(c_int), intent(out) :: status, waited
+        integer :: local_status, state, local_err, attempt, phase
+
+        status = -1_c_int
+        waited = -1_c_int
+        if (pid <= 0_c_int) return
+        do phase = 1, 2
+            do attempt = 1, 1500
+                call test_process_wait_once(int(pid), local_status, state)
+                if (state == 1) then
+                    status = int(local_status, c_int)
+                    waited = pid
+                    return
+                end if
+                if (state < 0) return
+                call test_process_sleep_ms(10)
+            end do
+            if (phase == 1) call test_process_signal(int(pid), 9, local_err)
+        end do
+    end subroutine bounded_child_wait
 
     subroutine test_equal_concurrent_publishers()
         integer(c_int) :: child, wait_status, wait_rc
@@ -298,7 +325,7 @@ contains
         call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
             'parent equal producer publishes successfully')
         wait_status = 0_c_int
-        wait_rc = wait_child(child, wait_status, 0_c_int)
+        call bounded_child_wait(child, wait_status, wait_rc)
         call test_assert_equal_int(suite, 0, int(wait_status), &
             'concurrent equal producer succeeds')
         call test_assert_equal_int(suite, int(child), int(wait_rc), &
@@ -331,7 +358,7 @@ contains
         call test_assert(suite, ierr == ACTION_RESULT_OK .or. &
             ierr == ACTION_RESULT_CONFLICT, 'parent race producer linearizes')
         wait_status = 0_c_int
-        wait_rc = wait_child(child, wait_status, 0_c_int)
+        call bounded_child_wait(child, wait_status, wait_rc)
         call test_assert_equal_int(suite, 0, int(wait_status), &
             'competing producer completes after the action lock releases')
         call test_assert_equal_int(suite, int(child), int(wait_rc), &
@@ -380,7 +407,7 @@ contains
     end subroutine test_crash_boundaries
 
     subroutine test_crash_before_conflict_rename()
-        integer(c_int) :: child, wait_status, configured, killed, wait_rc
+        integer(c_int) :: child, wait_status, killed, wait_rc
         character(len=64) :: result_id
         type(immutable_tree_entry_t), allocatable :: restored_entries(:)
 
@@ -389,19 +416,16 @@ contains
             result_id, ierr)
         call start_paused_conflict(1_c_int, 'crash-before', race_entry_b, child)
         if (child <= 0_c_int) return
-        call wait_for_file(trim(race_ready))
         killed = kill_child(child, 9_c_int)
         wait_status = 0_c_int
-        wait_rc = wait_child(child, wait_status, 0_c_int)
+        call bounded_child_wait(child, wait_status, wait_rc)
+        call publication_probe_unlock(race_probe)
         call test_assert_equal_int(suite, int(child), int(wait_rc), &
             'pre-rename crashed process is reaped')
         call test_assert(suite, wait_status /= 0_c_int, &
             'pre-rename process records forced termination')
-        configured = configure_barrier(0_c_int, ''//c_null_char, ''//c_null_char)
         call test_assert_equal_int(suite, 0, int(killed), &
             'pre-rename publisher is killed at the crash barrier')
-        call test_assert_equal_int(suite, 0, int(configured), &
-            'pre-rename barrier is disabled after recovery')
         call action_result_lookup(store, 'crash-before-action', restored_entries, &
             result_id, ierr)
         call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
@@ -411,7 +435,7 @@ contains
     end subroutine test_crash_before_conflict_rename
 
     subroutine test_crash_after_conflict_rename()
-        integer(c_int) :: child, wait_status, configured, killed, wait_rc
+        integer(c_int) :: child, wait_status, killed, wait_rc
         character(len=64) :: result_id, ids(2)
         type(action_result_store_t) :: recovered_store
         type(immutable_tree_entry_t), allocatable :: restored_entries(:)
@@ -422,19 +446,16 @@ contains
             result_id, ierr)
         call start_paused_conflict(2_c_int, 'crash-after', race_entry_b, child)
         if (child <= 0_c_int) return
-        call wait_for_file(trim(race_ready))
         killed = kill_child(child, 9_c_int)
         wait_status = 0_c_int
-        wait_rc = wait_child(child, wait_status, 0_c_int)
+        call bounded_child_wait(child, wait_status, wait_rc)
+        call publication_probe_unlock(race_probe)
         call test_assert_equal_int(suite, int(child), int(wait_rc), &
             'post-rename crashed process is reaped')
         call test_assert(suite, wait_status /= 0_c_int, &
             'post-rename process records forced termination')
-        configured = configure_barrier(0_c_int, ''//c_null_char, ''//c_null_char)
         call test_assert_equal_int(suite, 0, int(killed), &
             'post-rename publisher is killed at the crash barrier')
-        call test_assert_equal_int(suite, 0, int(configured), &
-            'post-rename barrier is disabled after recovery')
         call action_result_store_init(recovered_store, trim(root)//'/store/v2', &
             init_status)
         call test_assert_equal_int(suite, 0, init_status, &

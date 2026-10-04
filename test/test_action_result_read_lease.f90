@@ -1,10 +1,12 @@
 program test_action_result_read_lease
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_suite_summary, test_suite_exit
     use fx_proc, only: proc_pid
     use fx_cache, only: cache_t, cache_init
     use fx_action_cache, only: cache_store_action, cache_restore_action
+    use action_publication_oracle, only: publication_probe_t, &
+        publication_probe_lock, publication_probe_observe, publication_probe_resume, &
+        publication_probe_unlock
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_sleep_ms
@@ -16,15 +18,6 @@ program test_action_result_read_lease
         action_result_materialize_blob, action_result_action_key, &
         ACTION_RESULT_OK, ACTION_RESULT_CONFLICT, ACTION_RESULT_QUARANTINED
     implicit none
-
-    interface
-        integer(c_int) function configure_barrier(phase, ready_path, release_path) &
-                bind(C, name='fx_action_result_test_configure')
-            import c_char, c_int
-            integer(c_int), value :: phase
-            character(kind=c_char), intent(in) :: ready_path(*), release_path(*)
-        end function configure_barrier
-    end interface
 
     type(test_suite_t) :: suite
     type(action_result_store_t) :: store
@@ -246,18 +239,13 @@ contains
         type(action_result_store_t) :: child_store
         type(cache_t) :: legacy
         type(immutable_tree_entry_t) :: outputs(2)
-        character(len=512) :: base, child_ready, child_release, mode, paths(2)
+        character(len=512) :: base, mode, paths(2)
         character(len=64) :: result_id
         integer :: local_err
         logical :: restored
 
         call get_command_argument(2, base)
         call get_command_argument(3, mode)
-        call get_command_argument(4, child_ready)
-        call get_command_argument(5, child_release)
-        local_err = int(configure_barrier(1_c_int, &
-            trim(child_ready)//c_null_char, trim(child_release)//c_null_char))
-        if (local_err /= 0) stop 71
         if (trim(mode) == 'legacy') then
             call cache_init(legacy, trim(base)//'/cache')
             call cache_restore_action(legacy, 'pending-action', &
@@ -280,19 +268,20 @@ contains
     subroutine test_pending_publication(import_legacy)
         logical, intent(in) :: import_legacy
         type(cache_t) :: legacy
-        character(len=512) :: base, mode, publish_release
+        type(publication_probe_t) :: probe
+        character(len=512) :: base, mode
         character(len=512) :: acquired, restore_ready, restore_release
         character(len=512) :: restore_done, restore_finish, restore_released
         character(len=512) :: destination
         character(len=64) :: pending_id
-        integer :: publisher, reader_pid, exit_status
+        integer :: publisher, reader_pid, exit_status, local_err
         logical :: reaped, found
 
         mode = 'ordinary'
         if (import_legacy) mode = 'legacy'
         base = trim(root)//'/'//trim(mode)
         call prepare_pending_fixture(base, import_legacy, legacy)
-        call start_pending_publisher(base, mode, publisher, publish_release, pending_id)
+        call start_pending_publisher(base, mode, publisher, probe, pending_id)
         if (publisher <= 0) return
         call start_pending_reader(base, reader_pid, destination, acquired, &
             restore_ready, restore_release, restore_done, restore_finish, &
@@ -300,14 +289,18 @@ contains
         call wait_for_file(trim(acquired), found)
         call test_assert(suite, found, 'reader leases P graph before binding lookup')
         if (.not. found) then
-            call write_text(trim(publish_release), 'unblock-failed-reader')
+            call publication_probe_resume(probe, local_err)
+            call publication_probe_unlock(probe)
             call wait_for_child(publisher, 15000, exit_status, reaped)
             call wait_for_child(reader_pid, 15000, exit_status, reaped)
             return
         end if
         call assert_graph_lease('pending-action', pending_id, .true., &
             'pending graph is protected while binding lookup waits')
-        call write_text(trim(publish_release), 'publish-binding')
+        call publication_probe_resume(probe, local_err)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'only the observed publisher identity passes admission')
+        call publication_probe_unlock(probe)
         call wait_for_child(publisher, 15000, exit_status, reaped)
         call test_assert(suite, reaped, 'pending publisher is reaped')
         call test_assert_equal_int(suite, 0, exit_status, &
@@ -346,26 +339,31 @@ contains
         call test_assert_equal_int(suite, 0, local_err, 'pending store initializes')
     end subroutine prepare_pending_fixture
 
-    subroutine start_pending_publisher(base, mode, pid, publisher_release, pending_id)
+    subroutine start_pending_publisher(base, mode, pid, probe, pending_id)
         character(len=*), intent(in) :: base, mode
         integer, intent(out) :: pid
-        character(len=*), intent(out) :: publisher_release, pending_id
-        character(len=512) :: child_args(6), publisher_ready
+        type(publication_probe_t), intent(out) :: probe
+        character(len=*), intent(out) :: pending_id
+        character(len=512) :: child_args(4)
         character(len=64) :: key
         integer :: local_err
         logical :: found
 
-        publisher_ready = trim(base)//'/publisher-ready'
-        publisher_release = trim(base)//'/publisher-release'
+        pid = -1
+        call publication_probe_lock(trim(store_root), 'pending-action', probe, local_err)
+        call test_assert_equal_int(suite, 0, local_err, 'external action lock acquired')
+        if (local_err /= 0) return
         child_args = [character(len=512) :: trim(executable), &
-            '--pending-publisher', trim(base), trim(mode), trim(publisher_ready), &
-            trim(publisher_release)]
+            '--pending-publisher', trim(base), trim(mode)]
         call test_process_spawn(child_args, pid, local_err)
         call test_assert_equal_int(suite, 0, local_err, 'pending publisher starts')
-        if (local_err /= 0) return
-        call wait_for_file(trim(publisher_ready), found)
-        call test_assert(suite, found, 'publisher pauses before binding rename')
-        call pending_graph_id(pending_id)
+        if (local_err /= 0) then
+            call publication_probe_unlock(probe)
+            return
+        end if
+        call publication_probe_observe(probe, pid, pending_id, local_err)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'exact publisher identity waits after durable P observation')
         call test_assert(suite, len_trim(pending_id) == 64, &
             'anticipated graph has a durable P lease before binding')
         key = action_result_action_key('pending-action')
@@ -465,28 +463,6 @@ contains
         call test_assert(suite, file_has_bytes(trim(base)//'/imported/widget.mod', &
             'keep existing module'), 'conflict preserves caller companion bytes')
     end subroutine assert_legacy_conflict
-
-    subroutine pending_graph_id(id)
-        character(len=*), intent(out) :: id
-        character(len=2048) :: line
-        character(len=64) :: key
-        integer :: unit, local_err, delimiter
-
-        id = ''
-        key = action_result_action_key('pending-action')
-        open(newunit=unit, file=trim(store_root)//'/.fx-metadata/leases', &
-            status='old', action='read', iostat=local_err)
-        if (local_err /= 0) return
-        do
-            read(unit, '(A)', iostat=local_err) line
-            if (local_err /= 0) exit
-            if (line(1:2) /= 'P|') cycle
-            if (index(line, '|'//key//'|fx-action-v1|publication|tree|') == 0) cycle
-            delimiter = index(trim(line), '|', back=.true.)
-            if (delimiter > 0) id = trim(line(delimiter + 1:))
-        end do
-        close(unit)
-    end subroutine pending_graph_id
 
     subroutine assert_metadata_record(kind, id, reason, expected)
         character(len=*), intent(in) :: kind, id, reason
