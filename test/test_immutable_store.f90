@@ -113,6 +113,14 @@ program test_immutable_store
 
 contains
 
+    function number(value) result(text)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=24) :: buffer
+        write(buffer, '(I0)') value
+        text = trim(buffer)
+    end function number
+
     subroutine test_reuse_does_not_write(s, cache, source_path, id)
         type(test_suite_t), intent(inout) :: s
         type(immutable_store_t), intent(in) :: cache
@@ -247,7 +255,7 @@ contains
         integer, parameter :: NCREATORS = 6
         character(len=512) :: target, ready(NCREATORS), start, child_exe
         character(len=512) :: child_path
-        character(len=4096) :: worker_argv(4)
+        character(len=4096) :: worker_argv(5)
         integer :: child_status, creator_pid(NCREATORS), spawn_err, i
         integer :: child_parent
         integer(int64) :: child_start
@@ -259,9 +267,9 @@ contains
         creator_pid = 0
         do i = 1, NCREATORS
             ready(i) = trim(base)//'/mkdir-ready-'//number(i)
-            worker_argv(1:4) = [character(len=4096) :: trim(child_exe), &
+            worker_argv(1:5) = [character(len=4096) :: trim(child_exe), &
                 '--mkdir-race', trim(target), trim(ready(i)), trim(start)]
-            call test_process_spawn(worker_argv(1:4), creator_pid(i), spawn_err)
+            call test_process_spawn(worker_argv(1:5), creator_pid(i), spawn_err)
             call test_assert_equal_int(s, 0, spawn_err, &
                 'native process API starts a concurrent directory creator')
         end do
