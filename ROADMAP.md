@@ -6,7 +6,7 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current integration head is `9585a7b`; `6beeec4` is the immutable-store
+Current integration head is `bca1693`; `6beeec4` is the immutable-store
 implementation checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
@@ -36,10 +36,11 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    The final process-tree no-interpreter gate remains.
    Declarative workflow/TOML files remain data; test programs, scheduling,
    parsing and assertions are Fortran with only narrow C OS primitives.
-6. **Active:** [#50](https://github.com/lazy-fortran/fx/issues/50) restores strict
-   Darwin visibility for action-result no-follow and locking APIs, then proves
-   cold macOS action publication/conflict/recovery behavior without weakening
-   Linux semantics.
+6. **Complete through `bca1693`:**
+   [#50](https://github.com/lazy-fortran/fx/issues/50) restores strict Darwin
+   visibility for action-result no-follow and locking APIs. Cold macOS
+   publication/conflict/recovery oracles and the complete Linux fx gate pass
+   without weakening either platform's semantics.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
