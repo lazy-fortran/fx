@@ -481,18 +481,22 @@ contains
         call test_assert(suite, ev%event_type == JSON_OBJECT_START, &
             'strict: object start')
         call json_parser_next(p, ev)
-        call test_assert(suite, ev%event_type == JSON_KEY .and. &
-            ev%string_val == 'unicode', 'strict: decoded first key')
+        call test_assert(suite, ev%event_type == JSON_KEY, &
+            'strict: first key event type')
+        call assert_allocated_string(suite, ev%string_val, 'unicode', &
+            'strict: decoded first key')
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_STRING, &
             'strict: Unicode string type')
-        call test_assert_equal_str(suite, decoded, ev%string_val, &
+        call assert_allocated_string(suite, ev%string_val, decoded, &
             'strict: BMP and surrogate-pair UTF-8 bytes')
-        call test_assert_equal_str(suite, '"A\u03BB\uD83D\uDE00"', &
-            ev%raw_val, 'strict: raw string token is preserved')
+        call assert_allocated_string(suite, ev%raw_val, &
+            '"A\u03BB\uD83D\uDE00"', 'strict: raw string token is preserved')
         call json_parser_next(p, ev)
-        call test_assert(suite, ev%event_type == JSON_KEY .and. &
-            ev%string_val == 'bounds', 'strict: decoded second key')
+        call test_assert(suite, ev%event_type == JSON_KEY, &
+            'strict: second key event type')
+        call assert_allocated_string(suite, ev%string_val, 'bounds', &
+            'strict: decoded second key')
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_ARRAY_START, &
             'strict: integer array start')
@@ -502,34 +506,34 @@ contains
             ev%int64_valid, 'strict: signed int64 minimum fits')
         call test_assert(suite, ev%int64_val == -huge(0_int64) - 1_int64, &
             'strict: signed int64 minimum value')
-        call test_assert_equal_str(suite, '-9223372036854775808', &
-            ev%raw_val, 'strict: minimum raw integer')
+        call assert_allocated_string(suite, ev%raw_val, &
+            '-9223372036854775808', 'strict: minimum raw integer')
 
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
             ev%int64_valid, 'strict: signed int64 maximum fits')
         call test_assert(suite, ev%int64_val == huge(0_int64), &
             'strict: signed int64 maximum value')
-        call test_assert_equal_str(suite, '9223372036854775807', &
-            ev%raw_val, 'strict: maximum raw integer')
+        call assert_allocated_string(suite, ev%raw_val, &
+            '9223372036854775807', 'strict: maximum raw integer')
 
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
             .not. ev%int64_valid, 'strict: out-of-range integer stays JSON')
-        call test_assert_equal_str(suite, '9223372036854775808', ev%raw_val, &
+        call assert_allocated_string(suite, ev%raw_val, '9223372036854775808', &
             'strict: out-of-range integer raw value')
 
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_INTEGER .and. &
             .not. ev%int64_valid, 'strict: negative underflow stays JSON')
-        call test_assert_equal_str(suite, '-9223372036854775809', ev%raw_val, &
-            'strict: negative underflow raw value')
+        call assert_allocated_string(suite, ev%raw_val, &
+            '-9223372036854775809', 'strict: negative underflow raw value')
 
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_REAL .and. &
             ev%real64_valid .and. abs(ev%real_val - 125.0d0) < 1.0d-12, &
             'strict: exponent number decodes')
-        call test_assert_equal_str(suite, '1.25e+2', ev%raw_val, &
+        call assert_allocated_string(suite, ev%raw_val, '1.25e+2', &
             'strict: real raw value')
         call json_parser_next(p, ev)
         call test_assert(suite, ev%event_type == JSON_ARRAY_END, &
@@ -548,12 +552,16 @@ contains
         call json_parser_init_strict(p, '{"a":1,"\u0061":2}')
         call json_parser_next(p, ev)
         call json_parser_next(p, ev)
-        call test_assert(suite, ev%event_type == JSON_KEY .and. &
-            ev%string_val == 'a', 'strict: first duplicate key')
+        call test_assert(suite, ev%event_type == JSON_KEY, &
+            'strict: first duplicate key event type')
+        call assert_allocated_string(suite, ev%string_val, 'a', &
+            'strict: first duplicate key')
         call json_parser_next(p, ev)
         call json_parser_next(p, ev)
-        call test_assert(suite, ev%event_type == JSON_KEY .and. &
-            ev%string_val == 'a', 'strict: escaped duplicate key decodes')
+        call test_assert(suite, ev%event_type == JSON_KEY, &
+            'strict: escaped duplicate key event type')
+        call assert_allocated_string(suite, ev%string_val, 'a', &
+            'strict: escaped duplicate key decodes')
     end subroutine test_strict_typed_values
 
     subroutine test_strict_rejects_malformed(suite)
@@ -611,5 +619,17 @@ contains
         end do
         call test_assert(suite, .false., name // ': malformed input rejected')
     end subroutine expect_strict_error
+
+    subroutine assert_allocated_string(suite, value, expected, name)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=:), allocatable, intent(in) :: value
+        character(len=*), intent(in) :: expected, name
+
+        if (.not. allocated(value)) then
+            call test_assert(suite, .false., name // ': value is allocated')
+            return
+        end if
+        call test_assert_equal_str(suite, expected, value, name)
+    end subroutine assert_allocated_string
 
 end program test_json_parse
