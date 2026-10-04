@@ -110,9 +110,18 @@ pauses and forced automatic fallback; explicit COPY and public lifecycle oracles
 remain, without claiming identical phase-by-phase coverage.
 
 #56 restores Darwin feature declarations for immutable leases. Its Mac provider
-build passes; named Mac test linkage with an older fo bootstrap was blocked by
-missing test-only C helpers. Current-fo Mac verification remains pending, and
-the Linux lease receipts above do not substitute for it.
+build passes. Current-Fo verification exposed unsupported `sigtimedwait` in the
+shared test helper. Published narrow helper repair `e427a10` clears that compile
+failure; both Mac lease/read-lease tests then time out at their unchanged 10s
+budget (child STOP 42/73). Those source sites report publication-lease acquisition
+and action-store initialization errors; the next execution must expose return
+statuses/resolved paths and stop parent waits on child failure before altering
+budgets. The runtime cause remains unknown. Linux receipts do not substitute
+for Mac success; helper promotion and runtime repair remain parked.
+
+The latest replacement workspace AGENTS instruction permits only documents and
+issue maintenance until a new execution trigger. All workers and owned jobs are
+stopped; source task branches, failures and exact driver receipts are preserved.
 
 #53's cleanup is integrated at `fc9a1ec`: production watcher controls, including
 the old synthetic ENOSPC trigger, are removed. Descriptor measurement lives in
