@@ -606,7 +606,7 @@ contains
 
         counter = counter + 1
         write(counter_text, '(I0)') counter
-        path = '/tmp/fx cache;$(fixture)-' // trim(tag) // '-' // &
+        path = '/var/tmp/fx cache;$(fixture)-' // trim(tag) // '-' // &
             trim(counter_text)
     end function temp_root
 
