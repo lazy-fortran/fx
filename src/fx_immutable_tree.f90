@@ -13,7 +13,7 @@ module fx_immutable_tree
         immutable_store_read_lease_acquire, immutable_store_lease_release
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_read_manifest, owned_begin_path, owned_begin_at, owned_fd, &
-        owned_pause, owned_materialize_blob, owned_finish, owned_dispose, owned_close, &
+        owned_materialize_blob, owned_finish, owned_dispose, owned_close, &
         owned_write, owned_hash_fd, owned_publish, owned_reject
     use fx_immutable_manifest, only: immutable_tree_entry_t, IMMUTABLE_BLOB, &
         IMMUTABLE_TREE, immutable_entries_canonical, &
@@ -101,7 +101,6 @@ contains
         capture = owned_begin_path(immutable_store_tree_path(store, id)//c_null_char, &
             0_c_int)
         if (.not. c_associated(capture)) return
-        call owned_pause(capture, 5_c_int)
         status = owned_write(capture, manifest, int(len(manifest), c_int))
         if (status == 0_c_int) then
             call owned_hash_fd(owned_fd(capture), actual, ierr)
@@ -206,7 +205,6 @@ contains
         transaction = owned_begin_path(trim(dest_path)//c_null_char, 1_c_int)
         ierr = IMMUTABLE_IO_ERROR
         if (c_associated(transaction)) then
-            call owned_pause(transaction, 4_c_int)
             call materialize_tree_contents(root, tree_id, transaction, &
                 DEFAULT_DIR_MODE, strategy, 0, used_clone, ierr)
             call owned_dispose(transaction)
@@ -236,7 +234,6 @@ contains
         if (depth > 128) return
         call owned_read_manifest(root, tree_id, manifest, ierr)
         if (ierr /= IMMUTABLE_OK) return
-        call owned_pause(transaction, 3_c_int)
         call immutable_manifest_parse(manifest, entries, ierr)
         if (ierr /= IMMUTABLE_OK) return
         parent = owned_fd(transaction)

@@ -25,21 +25,13 @@
 #endif
 int fx_immutable_open_directory(const char *path);
 int fx_immutable_mkdirs_sync(const char *path);
-void fx_immutable_owned_pause(int phase, const char *path);
 int fx_immutable_tempfile(int directory, const char *name);
-void fx_immutable_copy_pause(const char *path);
-void fx_immutable_publish_pause(const char *path);
-void fx_immutable_eexist_record(void);
 
 typedef struct {
     int parent, fd, staging, tree, published, published_fd;
-    char temp[96], name[PATH_MAX], display[PATH_MAX];
+    char temp[96], name[PATH_MAX];
 } owned_t;
 static _Atomic unsigned long serial;
-static int force_copy;
-static int no_atomic_clone;
-void fx_owned_test_no_atomic_clone(int forced) { no_atomic_clone = forced; }
-void fx_owned_test_force_copy(int forced) { force_copy = forced; }
 static int dir_flags(void) { return O_RDONLY | O_DIRECTORY | O_NOFOLLOW; }
 
 int fx_owned_open_store(const char *path)
@@ -146,16 +138,9 @@ void *fx_owned_begin_path(const char *path, int tree)
     if (fd < 0) return NULL;
     t = fx_owned_begin_at(fd, name, tree);
     close(fd);
-    if (t) snprintf(t->display, sizeof(t->display), "%s/%s%s", parent, t->temp,
-        tree ? "" : "/payload");
     return t;
 }
 int fx_owned_fd(void *handle) { return ((owned_t *)handle)->fd; }
-void fx_owned_pause(void *handle, int phase)
-{
-    owned_t *t = handle;
-    fx_immutable_owned_pause(phase, t->display);
-}
 static int copy_fd(int input, int output)
 {
     char bytes[65536];
@@ -201,7 +186,7 @@ int fx_owned_fill(void *handle, int input, int strategy, int *cloned)
 {
     owned_t *t = handle;
     *cloned = 0;
-    if (strategy != 1 && !force_copy && clone_fd(input, t) == 0) *cloned = 1;
+    if (strategy != 1 && clone_fd(input, t) == 0) *cloned = 1;
     if (strategy == 2 && !*cloned) return 2;
     if (t->fd < 0) return -1;
     if (!*cloned) {
@@ -220,7 +205,6 @@ static int publish_owned_file(owned_t *t, int cas)
     return linkat(AT_FDCWD, source, t->parent, t->name, AT_SYMLINK_FOLLOW);
 #elif defined(__APPLE__)
     if (cas) {
-        if (no_atomic_clone) { errno = ENOTSUP; return -1; }
         /* Atomic exclusive clone from the verified descriptor, never its name. */
         return fclonefileat(t->fd, t->parent, t->name, CLONE_NOOWNERCOPY);
     }
@@ -267,7 +251,6 @@ static int publish_boundary(owned_t *t, int cas)
     }
     if (rc != 0) {
         if (cas && errno == EEXIST && fsync(t->parent) == 0) {
-            fx_immutable_eexist_record();
             rc = 1;
             goto done;
         }
@@ -289,16 +272,12 @@ static int finish_owned(owned_t *t, int mode, int cas)
     if (!fx_owned_same_entry(t->parent, t->temp, t->staging)) return -1;
     if (!t->tree && !fx_owned_same_entry(t->staging, "payload", t->fd)) return -1;
     if (cas) {
-        fx_immutable_publish_pause(t->display);
-        fx_immutable_owned_pause(6, t->display);
         /* Repeat ownership checks after the synchronized publication boundary. */
         if (!fx_owned_same_entry(t->parent, t->temp, t->staging) ||
             !fx_owned_same_entry(t->staging, "payload", t->fd)) return -1;
     }
     if (fchmod(t->fd, (mode_t)mode) != 0 || fsync(t->fd) != 0) return -1;
-    if (cas) fx_immutable_owned_pause(8, t->display);
     rc = publish_boundary(t, cas);
-    if (rc == 0 && cas) fx_immutable_owned_pause(7, t->display);
     return rc;
 }
 int fx_owned_finish(void *handle, int mode) { return finish_owned(handle, mode, 0); }
@@ -308,7 +287,6 @@ int fx_owned_reject(void *handle)
     owned_t *t = handle;
     int rc = 0;
     if (!t->published) return 0;
-    fx_immutable_owned_pause(9, t->display);
     if (lock_parent(t) != 0) return -1;
     /* The held-directory lock excludes valid publishers across check/unlink. */
     if (fx_owned_same_entry(t->parent, t->name, t->published_fd)) {
@@ -335,7 +313,7 @@ int fx_owned_copy_source(void *handle, const char *path)
     owned_t *t = handle;
     char bytes[65536];
     struct stat st;
-    int input = open(path, O_RDONLY), rc = -1, paused = 0;
+    int input = open(path, O_RDONLY), rc = -1;
     if (input < 0 || fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) goto done;
     for (;;) {
         ssize_t n = read(input, bytes, sizeof(bytes)), offset = 0;
@@ -348,7 +326,6 @@ int fx_owned_copy_source(void *handle, const char *path)
             if (written <= 0) goto done;
             offset += written;
         }
-        if (!paused) { fx_immutable_copy_pause(t->display); paused = 1; }
     }
     rc = fsync(t->fd);
 done:

@@ -4,7 +4,8 @@ program test_action_result_store
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
     use fx_proc, only: proc_pid, proc_exec_silent
-    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_chmod
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_chmod, &
+        fx_test_temp_root
     use fx_test_process, only: test_process_is_executable
     use fx_test_process, only: test_process_wait_once, test_process_signal, &
         test_process_sleep_ms
@@ -42,12 +43,6 @@ program test_action_result_store
             import c_int
             integer(c_int), value :: status
         end subroutine exit_child
-        integer(c_int) function tmp_root(out, cap) &
-                bind(C, name='fx_immutable_test_tmp_root')
-            import c_char, c_int
-            character(kind=c_char), intent(out) :: out(*)
-            integer(c_int), value :: cap
-        end function tmp_root
     end interface
 
     type(test_suite_t) :: suite
@@ -68,7 +63,7 @@ program test_action_result_store
 
     call test_suite_init(suite, 'fx_action_result_store')
     scratch = c_null_char
-    ierr = tmp_root(scratch, 512_c_int)
+    ierr = fx_test_temp_root(scratch, 512)
     call test_assert_equal_int(suite, 0, ierr, 'physical test root resolves')
     end_path = index(scratch, c_null_char)
     if (end_path <= 1) stop 20

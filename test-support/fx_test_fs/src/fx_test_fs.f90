@@ -7,6 +7,7 @@ module fx_test_fs
     public :: fx_test_lock, fx_test_unlock
     public :: fx_test_descriptor_count
     public :: fx_test_source_files
+    public :: fx_test_lock_directory, fx_test_temp_root
 
     integer, parameter :: PATH_MAX_LEN = 4096
 
@@ -19,6 +20,17 @@ module fx_test_fs
             import :: c_int
             integer(c_int), value :: fd
         end function c_unlock
+        integer(c_int) function c_lock_directory(path) &
+                bind(C, name='fx_test_fs_lock_directory')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function c_lock_directory
+        integer(c_int) function c_temp_root(out, cap) &
+                bind(C, name='fx_test_fs_temp_root')
+            import :: c_char, c_int
+            character(kind=c_char), intent(out) :: out(*)
+            integer(c_int), value :: cap
+        end function c_temp_root
         integer(c_int) function c_descriptor_count() &
                 bind(C, name='fx_test_fs_descriptor_count')
             import :: c_int
@@ -161,9 +173,20 @@ contains
         fd = -1
     end function fx_test_unlock
 
+    integer function fx_test_lock_directory(path) result(fd)
+        character(len=*), intent(in) :: path
+        fd = int(c_lock_directory(trim(path)//c_null_char))
+    end function fx_test_lock_directory
+
     integer function fx_test_descriptor_count() result(count)
         count = c_descriptor_count()
     end function fx_test_descriptor_count
+
+    integer function fx_test_temp_root(out, cap) result(ierr)
+        character(kind=c_char), intent(out) :: out(*)
+        integer, intent(in) :: cap
+        ierr = int(c_temp_root(out, int(cap, c_int)))
+    end function fx_test_temp_root
 
     integer function fx_test_mkdir_p(path) result(ierr)
         character(len=*), intent(in) :: path

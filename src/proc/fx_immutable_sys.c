@@ -11,7 +11,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <dirent.h>
-#include <time.h>
 #ifdef __linux__
 #include <linux/fs.h>
 #include <sys/ioctl.h>
@@ -26,24 +25,6 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
-
-static char test_copy_ready[PATH_MAX];
-static char test_copy_release[PATH_MAX];
-static char test_publish_ready[PATH_MAX];
-static char test_publish_release[PATH_MAX];
-static char test_eexist_marker[PATH_MAX];
-static char test_mkdir_pause_path[PATH_MAX];
-static char test_mkdir_pause_ready[PATH_MAX];
-static char test_mkdir_pause_release[PATH_MAX];
-static char test_mkdir_existing_marker[PATH_MAX];
-
-static void copy_path(char *dst, size_t cap, const char *src)
-{
-    size_t n = src == NULL ? 0 : strlen(src);
-    if (n >= cap) n = 0;
-    if (n > 0) memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 static int directory_flags(void)
 {
@@ -108,83 +89,6 @@ int fx_immutable_open_directory(const char *path)
     return open_existing_directory(path);
 }
 
-static void record_test_marker(const char *path, const char *text)
-{
-    int fd;
-    size_t length, written = 0;
-    ssize_t n;
-    if (path == NULL || path[0] == '\0') return;
-    fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) return;
-    length = strlen(text);
-    while (written < length) {
-        n = write(fd, text + written, length - written);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
-        written += (size_t)n;
-    }
-    if (written == length) (void)write(fd, "\n", 1);
-    (void)fsync(fd);
-    (void)close(fd);
-}
-
-void fx_immutable_test_configure(const char *ready, const char *release,
-                                 const char *publish_ready,
-                                 const char *publish_release,
-                                 const char *eexist)
-{
-    copy_path(test_copy_ready, sizeof(test_copy_ready), ready);
-    copy_path(test_copy_release, sizeof(test_copy_release), release);
-    copy_path(test_publish_ready, sizeof(test_publish_ready), publish_ready);
-    copy_path(test_publish_release, sizeof(test_publish_release),
-              publish_release);
-    copy_path(test_eexist_marker, sizeof(test_eexist_marker), eexist);
-}
-
-void fx_immutable_test_mkdir_configure(const char *path, const char *ready,
-                                       const char *release,
-                                       const char *existing)
-{
-    copy_path(test_mkdir_pause_path, sizeof(test_mkdir_pause_path), path);
-    copy_path(test_mkdir_pause_ready, sizeof(test_mkdir_pause_ready), ready);
-    copy_path(test_mkdir_pause_release, sizeof(test_mkdir_pause_release),
-              release);
-    copy_path(test_mkdir_existing_marker, sizeof(test_mkdir_existing_marker),
-              existing);
-}
-
-static void pause_after_temp_write(const char *temp_path)
-{
-    struct timespec delay = {0, 10000000};
-    if (test_copy_ready[0] == '\0' || test_copy_release[0] == '\0') return;
-    record_test_marker(test_copy_ready, temp_path);
-    while (access(test_copy_release, F_OK) != 0) (void)nanosleep(&delay, NULL);
-    test_copy_ready[0] = '\0';
-}
-
-static void pause_before_publish(const char *temp_path)
-{
-    struct timespec delay = {0, 10000000};
-    if (test_publish_ready[0] == '\0' || test_publish_release[0] == '\0')
-        return;
-    record_test_marker(test_publish_ready, temp_path);
-    while (access(test_publish_release, F_OK) != 0) (void)nanosleep(&delay, NULL);
-    test_publish_ready[0] = '\0';
-}
-
-static void pause_mkdir_parent_sync(const char *component_path)
-{
-    struct timespec delay = {0, 10000000};
-    if (test_mkdir_pause_path[0] == '\0' ||
-        strcmp(test_mkdir_pause_path, component_path) != 0 ||
-        test_mkdir_pause_ready[0] == '\0' ||
-        test_mkdir_pause_release[0] == '\0') return;
-    record_test_marker(test_mkdir_pause_ready, component_path);
-    while (access(test_mkdir_pause_release, F_OK) != 0)
-        (void)nanosleep(&delay, NULL);
-    test_mkdir_pause_path[0] = '\0';
-}
-
 static int sync_dir(const char *path)
 {
     int fd = open_existing_directory(path);
@@ -246,7 +150,7 @@ int fx_immutable_mkdirs_sync(const char *path)
     const char *cursor, *start;
     size_t n, length, used;
     struct stat st;
-    int fd, next, created;
+    int fd, next;
     if (path == NULL || (n = strlen(path)) == 0 || n >= sizeof(clean))
         return -1;
     memcpy(clean, path, n + 1);
@@ -271,11 +175,7 @@ int fx_immutable_mkdirs_sync(const char *path)
         memcpy(component, start, length);
         component[length] = '\0';
         if (length == 1 && component[0] == '.') continue;
-        if (mkdirat(fd, component, 0777) == 0) {
-            created = 1;
-        } else if (errno == EEXIST) {
-            created = 0;
-        } else {
+        if (mkdirat(fd, component, 0777) != 0 && errno != EEXIST) {
             goto fail;
         }
         next = openat(fd, component, directory_flags());
@@ -290,15 +190,10 @@ int fx_immutable_mkdirs_sync(const char *path)
         memcpy(walked + used, component, length);
         used += length;
         walked[used] = '\0';
-        if (created) pause_mkdir_parent_sync(walked);
         if (fsync(next) != 0) { close(next); goto fail; }
         /* Also sync when another creator's mkdir is observed: it may still
            be waiting to persist this parent entry. */
         if (fsync(fd) != 0) { close(next); goto fail; }
-        if (!created && test_mkdir_existing_marker[0] != '\0' &&
-            strcmp(test_mkdir_pause_path, walked) == 0)
-            record_test_marker(test_mkdir_existing_marker,
-                               "EXIST_PARENT_SYNC");
         close(fd);
         fd = next;
     }
@@ -349,10 +244,6 @@ int fx_immutable_tempfile(int directory, const char *name)
 {
     return openat(directory, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 }
-void fx_immutable_copy_pause(const char *path) { pause_after_temp_write(path); }
-void fx_immutable_publish_pause(const char *path) { pause_before_publish(path); }
-void fx_immutable_eexist_record(void) { record_test_marker(test_eexist_marker, "EEXIST"); }
-
 int fx_immutable_tempdir(const char *parent, char *out, int cap)
 {
     char tmpl[PATH_MAX];
@@ -449,7 +340,6 @@ int fx_immutable_publish_tree(const char *tmp, const char *dst)
     if (dirfd < 0) return -1;
     if (fstatat(dirfd, base_tmp, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
         !S_ISDIR(st.st_mode)) { close(dirfd); return -1; }
-    pause_before_publish(tmp);
 #if defined(__linux__) && defined(SYS_renameat2)
     rc = (int)syscall(SYS_renameat2, dirfd, base_tmp, dirfd, base_dst,
                       RENAME_NOREPLACE);
@@ -463,7 +353,6 @@ int fx_immutable_publish_tree(const char *tmp, const char *dst)
     if (rc != 0) {
         if (errno == EEXIST) {
             rc = fsync(dirfd);
-            if (rc == 0) record_test_marker(test_eexist_marker, "EEXIST");
             close(dirfd);
             return rc == 0 ? 1 : -1;
         }

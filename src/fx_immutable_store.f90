@@ -5,7 +5,7 @@ module fx_immutable_store
     use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_close, owned_begin_path, owned_dispose, owned_materialize_blob, &
-        owned_file_info, owned_fd, owned_hash_fd, owned_pause, &
+        owned_file_info, owned_fd, owned_hash_fd, &
         owned_copy_source, owned_publish, owned_reject
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_IO_ERROR, &
         IMMUTABLE_INVALID, IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, &
@@ -182,7 +182,6 @@ contains
         capture = owned_begin_path(immutable_store_blob_path(store, id)//c_null_char, &
             0_c_int)
         if (.not. c_associated(capture)) return
-        call owned_pause(capture, 5_c_int)
         status = owned_copy_source(capture, trim(source)//c_null_char)
         if (status == 0_c_int) then
             call owned_hash_fd(owned_fd(capture), actual, ierr)

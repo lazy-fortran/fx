@@ -206,6 +206,35 @@ int fx_test_fs_descriptor_count(void)
     return count;
 }
 
+int fx_test_fs_lock_directory(const char *path)
+{
+    int flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+    int fd;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+    fd = open(path, flags);
+    if (fd < 0) return -1;
+    struct timespec delay = {0, 10000000};
+    for (int i = 0; i < 1500; ++i) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
+        if (errno != EWOULDBLOCK && errno != EINTR) break;
+        (void)nanosleep(&delay, NULL);
+    }
+    close(fd);
+    return -1;
+}
+
+int fx_test_fs_temp_root(char *out, int cap)
+{
+    char *path = realpath("/var/tmp", NULL);
+    int length;
+    if (!path) return -1;
+    length = snprintf(out, (size_t)cap, "%s", path);
+    free(path);
+    return length >= 0 && length < cap ? 0 : -1;
+}
+
 static int safe_fixture_root(const char *path)
 {
     static const char *const prefixes[] = {"/tmp/", "/var/tmp/"};

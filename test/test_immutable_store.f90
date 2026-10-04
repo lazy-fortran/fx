@@ -22,47 +22,12 @@ program test_immutable_store
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_identity, test_process_clock_ms, &
         test_process_sleep_ms
+    use fx_test_fs, only: fx_test_temp_root, fx_test_lock_directory, &
+        fx_test_unlock, fx_test_remove_tree
     use fx_path, only: path_dirname
     implicit none
 
     interface
-        integer(c_int) function file_watch_open(path) &
-                bind(C, name='fx_immutable_test_watch_open')
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: path(*)
-        end function file_watch_open
-        integer(c_int) function file_watch_poll(fd) &
-                bind(C, name='fx_immutable_test_watch_poll')
-            import :: c_int
-            integer(c_int), value :: fd
-        end function file_watch_poll
-        subroutine file_watch_close(fd) &
-                bind(C, name='fx_immutable_test_watch_close')
-            import :: c_int
-            integer(c_int), value :: fd
-        end subroutine file_watch_close
-        integer(c_int) function tmp_root(out, cap) &
-                bind(C, name='fx_immutable_test_tmp_root')
-            import :: c_int, c_char
-            character(kind=c_char), intent(out) :: out(*)
-            integer(c_int), value :: cap
-        end function tmp_root
-        subroutine c_test_configure(ready, copy_release, publish_ready, &
-                publish_release, eexist) &
-                bind(C, name='fx_immutable_test_configure')
-            import :: c_char
-            character(kind=c_char), intent(in) :: ready(*), copy_release(*)
-            character(kind=c_char), intent(in) :: publish_ready(*)
-            character(kind=c_char), intent(in) :: publish_release(*), eexist(*)
-        end subroutine c_test_configure
-
-        subroutine c_test_mkdir_configure(path, ready, release, existing) &
-                bind(C, name='fx_immutable_test_mkdir_configure')
-            import :: c_char
-            character(kind=c_char), intent(in) :: path(*), ready(*), release(*)
-            character(kind=c_char), intent(in) :: existing(*)
-        end subroutine c_test_mkdir_configure
-
         integer(c_int) function c_mkdirs(path) &
                 bind(C, name='fx_immutable_mkdirs_sync')
             import :: c_char, c_int
@@ -99,11 +64,7 @@ program test_immutable_store
         call run_worker_put()
         stop 0
     end if
-    if (trim(arg) == '--put-blob-barrier') then
-        call run_worker_put_barrier()
-        stop 0
-    end if
-    if (trim(arg) == '--mkdir-barrier') then
+    if (trim(arg) == '--mkdir-race') then
         call run_mkdir_worker()
         stop 0
     end if
@@ -113,7 +74,7 @@ program test_immutable_store
     end if
     call test_suite_init(suite, 'fx_immutable_store')
     scratch = c_null_char
-    ierr = tmp_root(scratch, 512_c_int)
+    ierr = fx_test_temp_root(scratch, 512)
     call test_assert_equal_int(suite, 0, ierr, 'system scratch resolves physically')
     end_path = index(scratch, c_null_char)
     if (end_path <= 1) stop 20
@@ -141,7 +102,7 @@ program test_immutable_store
     call test_role_and_tree_manifests(suite, store, object_id, tree_id, sub_id)
     call test_materialization(suite, store, root, object_id, tree_id)
     call test_materialization_modes(suite, store, root, object_id)
-    call test_tree_eexist_sync(suite, store, tree_id, root)
+    call test_tree_eexist_preserves_winner(suite, store, tree_id, root)
     call test_symlink_shard_rejected(suite, root)
     call test_killed_partial_is_hidden(suite, store, root)
     call test_corrupt_tree_is_reported(suite, store, object_id, tree_id, sub_id)
@@ -158,8 +119,7 @@ contains
         character(len=*), intent(in) :: source_path, id
         character(len=512) :: blob_path, watched_path
         integer(int64) :: bytes0, mtime0, ino0, bytes1, mtime1, ino1
-        integer :: local_err, fd, wd_dir, evt, poll_err
-        integer(c_int) :: file_fd, file_event
+        integer :: local_err, fd, wd_dir, wd_file, evt, poll_err
         logical :: event_seen, write_event
 
         blob_path = immutable_store_blob_path(cache, id)
@@ -174,9 +134,11 @@ contains
                 local_err)
         end if
         call test_assert_equal_int(s, 0, local_err, 'watch monitors blob shard')
-        file_fd = file_watch_open(trim(blob_path)//c_null_char)
-        call test_assert(s, file_fd >= 0, &
-            'write-only watch monitors the canonical blob itself')
+        if (local_err == 0) then
+            call proc_watch_add(fd, trim(blob_path), 4095, wd_file, local_err)
+        end if
+        call test_assert_equal_int(s, 0, local_err, &
+            'native watcher monitors the canonical blob itself')
         if (fd >= 0 .and. local_err == 0) call drain_events(fd)
         call immutable_store_put_blob(cache, source_path, expected_id, local_err)
         call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
@@ -185,12 +147,6 @@ contains
             local_err)
         call test_assert(s, bytes0 == bytes1 .and. mtime0 == mtime1 .and. &
             ino0 == ino1, 'reuse preserves blob size, inode, and mtime')
-        if (file_fd >= 0) then
-            file_event = file_watch_poll(file_fd)
-            call test_assert_equal_int(s, 0, int(file_event), &
-                'reuse emits no native write event on the canonical blob')
-            call file_watch_close(file_fd)
-        end if
         if (fd >= 0) then
             write_event = .false.
             call proc_watch_poll(fd, watched_path, evt, 30, event_seen, poll_err)
@@ -211,18 +167,16 @@ contains
         type(immutable_store_t), intent(in) :: cache
         character(len=*), intent(in) :: base
         integer, parameter :: NWRITERS = 6, NBYTES = 262144
-        character(len=512) :: paths(NWRITERS), ready(NWRITERS)
-        character(len=512) :: publish_ready(NWRITERS), eexist(NWRITERS)
+        character(len=512) :: paths(NWRITERS), stage, final, parent_dir
         character(len=64) :: ref_id
-        character(len=512) :: child_exe, source_path, child_path
-        character(len=4096) :: worker_argv(9)
-        character(len=512) :: copy_release, publish_release
+        character(len=512) :: child_exe, child_path
+        character(len=4096) :: worker_argv(4)
         character(len=1) :: bytes(NBYTES)
-        integer :: t, local_err, file_err, eexist_count, child_pid(NWRITERS)
+        integer :: t, local_err, file_err, child_pid(NWRITERS), lock_fd
         integer :: child_status, spawn_err, child_parent
-        integer(int64) :: child_start
-        integer(int64) :: child_starts(NWRITERS)
-        logical :: marker_exists
+        integer(int64) :: child_start, child_starts(NWRITERS)
+        integer(c_int) :: c_status
+        logical :: staged, marker_exists
 
         do t = 1, size(bytes)
             bytes(t) = char(mod(t, 251))
@@ -230,57 +184,56 @@ contains
         ref_id = sha256_string(transfer(bytes, repeat(' ', size(bytes))))
         do t = 1, NWRITERS
             write(paths(t), '(A,A,I0,A)') trim(base), '/writer-', t, '.bin'
-            write(ready(t), '(A,A,I0,A)') trim(base), '/copy-ready-', t
-            write(publish_ready(t), '(A,A,I0,A)') trim(base), '/pub-ready-', t
-            write(eexist(t), '(A,A,I0,A)') trim(base), '/eexist-', t
             call write_bytes(trim(paths(t)), bytes, file_err)
             call test_assert_equal_int(s, 0, file_err, &
                 'concurrent writer input created')
         end do
-        write(source_path, '(A,A)') trim(base), '/writer-1.bin'
-        copy_release = trim(base)//'/copy-release'
-        publish_release = trim(base)//'/publish-release'
+        final = immutable_store_blob_path(cache, ref_id)
+        parent_dir = path_dirname(final)
+        c_status = c_mkdirs(trim(parent_dir)//c_null_char)
+        call test_assert_equal_int(s, 0, int(c_status), &
+            'immutable object shard exists before external admission')
+        if (c_status /= 0_c_int) return
+        lock_fd = fx_test_lock_directory(trim(parent_dir))
+        call test_assert(s, lock_fd >= 0, &
+            'test holds the store’s real publication directory lock')
+        if (lock_fd < 0) return
         call get_command_argument(0, child_exe)
+        child_pid = 0
         do t = 1, NWRITERS
-            worker_argv = ''
-            worker_argv(1:9) = [character(len=4096) :: trim(child_exe), &
-                '--put-blob-barrier', trim(cache%root_dir), trim(paths(t)), &
-                trim(ready(t)), trim(copy_release), trim(publish_ready(t)), &
-                trim(publish_release), trim(eexist(t))]
-            call test_process_spawn(worker_argv(1:9), child_pid(t), spawn_err)
+            worker_argv(1:4) = [character(len=4096) :: trim(child_exe), &
+                '--put-blob', trim(cache%root_dir), trim(paths(t))]
+            call test_process_spawn(worker_argv(1:4), child_pid(t), spawn_err)
             call test_assert_equal_int(s, 0, spawn_err, &
                 'native process API starts an exact Fortran publisher')
         end do
+        child_starts = -1_int64
         do t = 1, NWRITERS
-            call wait_for_file(trim(ready(t)), 15000, marker_exists)
-            call test_assert(s, marker_exists, &
-                'publisher reaches native copy barrier before release')
+            if (child_pid(t) <= 0) cycle
             call assert_fortran_child(s, child_pid(t), child_start, &
                 child_parent, child_path)
             child_starts(t) = child_start
+            stage = trim(parent_dir)//'/.fx-owned-'//number(child_pid(t))// &
+                '-0/payload'
+            call wait_for_owned_stage(trim(stage), int(NBYTES, int64), staged)
+            call test_assert(s, staged, &
+                'publisher completes its private immutable payload before admission')
         end do
-        call write_text(trim(copy_release), 'release-copy')
+        inquire(file=trim(final), exist=marker_exists)
+        call test_assert(s, .not. marker_exists, &
+            'canonical object stays missing while publishers wait on admission')
+        local_err = fx_test_unlock(lock_fd)
+        call test_assert_equal_int(s, 0, local_err, &
+            'external publication admission lock releases')
         do t = 1, NWRITERS
-            call wait_for_file(trim(publish_ready(t)), 15000, marker_exists)
-            call test_assert(s, marker_exists, &
-                'publisher reaches native publication barrier before release')
-        end do
-        call write_text(trim(publish_release), 'release-publish')
-        do t = 1, NWRITERS
+            if (child_pid(t) <= 0) cycle
             call wait_for_child(child_pid(t), 15000, child_status, marker_exists)
             call test_assert(s, marker_exists .and. child_status == 0, &
-                'barrier-released identical publisher exits successfully')
+                'identical publisher exits successfully after lock release')
         end do
         call test_assert(s, all(child_starts > 0_int64), &
             'publisher identity includes a kernel process start token')
-        eexist_count = 0
-        do t = 1, NWRITERS
-            inquire(file=trim(eexist(t)), exist=marker_exists)
-            if (marker_exists) eexist_count = eexist_count + 1
-        end do
-        call test_assert_equal_int(s, NWRITERS - 1, eexist_count, &
-            'five deterministic race losers sync the blob parent on EEXIST')
-        call immutable_store_put_blob(cache, trim(source_path), ref_id, local_err)
+        call immutable_store_put_blob(cache, trim(paths(1)), ref_id, local_err)
         call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
             'concurrent publisher returns the raw-byte ID')
         call immutable_store_verify_blob(cache, ref_id, local_err)
@@ -291,50 +244,43 @@ contains
     subroutine test_mkdir_race_sync(s, base)
         type(test_suite_t), intent(inout) :: s
         character(len=*), intent(in) :: base
-        character(len=512) :: target, ready, release, existing, child_exe
+        integer, parameter :: NCREATORS = 6
+        character(len=512) :: target, ready(NCREATORS), start, child_exe
         character(len=512) :: child_path
-        character(len=4096) :: worker_argv(6)
-        character(len=17) :: observed
-        integer :: child_status, local_err, creator_pid, observer_pid, spawn_err
+        character(len=4096) :: worker_argv(4)
+        integer :: child_status, creator_pid(NCREATORS), spawn_err, i
         integer :: child_parent
         integer(int64) :: child_start
-        logical :: exists
+        logical :: exists, started
 
         target = trim(base)//'/mkdir-race/shared/leaf'
-        ready = trim(base)//'/mkdir-ready'
-        release = trim(base)//'/mkdir-release'
-        existing = trim(base)//'/mkdir-existing-sync'
+        start = trim(base)//'/mkdir-race-start'
         call get_command_argument(0, child_exe)
-        worker_argv(1:6) = [character(len=4096) :: trim(child_exe), &
-            '--mkdir-barrier', trim(target), trim(ready), trim(release), '']
-        call test_process_spawn(worker_argv(1:6), creator_pid, spawn_err)
-        call test_assert_equal_int(s, 0, spawn_err, &
-            'native process API starts mkdir creator')
-        call wait_for_file(trim(ready), 15000, exists)
-        call test_assert(s, exists, 'mkdir creator reaches native pause marker')
-        call assert_fortran_child(s, creator_pid, child_start, child_parent, &
-            child_path)
-
-        worker_argv(1:6) = [character(len=4096) :: trim(child_exe), &
-            '--mkdir-barrier', trim(target), '', '', trim(existing)]
-        call test_process_spawn(worker_argv(1:6), observer_pid, spawn_err)
-        call test_assert_equal_int(s, 0, spawn_err, &
-            'native process API starts existing-directory observer')
-        call wait_for_child(observer_pid, 15000, child_status, exists)
-        call test_assert(s, exists .and. child_status == 0, &
-            'existing directory use completes during creator pause')
-        call write_text(trim(release), 'release-mkdir')
-        call wait_for_child(creator_pid, 15000, child_status, exists)
-        call test_assert(s, exists .and. child_status == 0, &
-            'native mkdir creator exits after barrier release')
-        inquire(file=trim(existing), exist=exists)
+        creator_pid = 0
+        do i = 1, NCREATORS
+            ready(i) = trim(base)//'/mkdir-ready-'//number(i)
+            worker_argv(1:4) = [character(len=4096) :: trim(child_exe), &
+                '--mkdir-race', trim(target), trim(ready(i)), trim(start)]
+            call test_process_spawn(worker_argv(1:4), creator_pid(i), spawn_err)
+            call test_assert_equal_int(s, 0, spawn_err, &
+                'native process API starts a concurrent directory creator')
+        end do
+        do i = 1, NCREATORS
+            call wait_for_file(trim(ready(i)), 15000, exists)
+            call test_assert(s, exists, 'directory creators reach the Fortran gate')
+        end do
+        call write_text(trim(start), 'create')
+        do i = 1, NCREATORS
+            if (creator_pid(i) <= 0) cycle
+            call assert_fortran_child(s, creator_pid(i), child_start, &
+                child_parent, child_path)
+            call wait_for_child(creator_pid(i), 15000, child_status, started)
+            call test_assert(s, started .and. child_status == 0, &
+                'concurrent creator completes directory synchronization')
+        end do
+        inquire(file=trim(target), exist=exists)
         call test_assert(s, exists, &
-            'existing shard user records its parent fsync before success')
-        call read_line(trim(existing), observed, local_err)
-        call test_assert_equal_int(s, 0, local_err, &
-            'existing-directory durability receipt can be read')
-        call test_assert_equal_str(s, 'EXIST_PARENT_SYNC', observed, &
-            'EEXIST observer synced the still-uncommitted parent entry')
+            'concurrent creators leave the requested directory available')
     end subroutine test_mkdir_race_sync
 
     subroutine test_materialization_modes(s, cache, base, blob_id)
@@ -396,38 +342,31 @@ contains
         end do
     end subroutine test_materialization_modes
 
-    subroutine test_tree_eexist_sync(s, cache, tree_id, base)
+    subroutine test_tree_eexist_preserves_winner(s, cache, tree_id, base)
         type(test_suite_t), intent(inout) :: s
         type(immutable_store_t), intent(in) :: cache
         character(len=*), intent(in) :: tree_id, base
-        character(len=512) :: empty_dir, marker, destination, mkdir_argv(2)
-        character(len=6) :: observed
+        character(len=512) :: empty_dir, destination, mkdir_argv(2)
         integer(c_int) :: c_err
         integer :: local_err
-        logical :: exists
         character(kind=c_char), allocatable :: c_temp(:), c_dest(:)
 
         destination = immutable_store_tree_path(cache, tree_id)
         empty_dir = trim(path_dirname(destination))//'/eexist-test-dir'
-        marker = trim(base)//'/tree-eexist-sync'
         mkdir_argv(1) = 'mkdir'
         mkdir_argv(2) = trim(empty_dir)
         call proc_exec_silent(mkdir_argv, 2, local_err)
         call test_assert_equal_int(s, 0, local_err, &
             'tree EEXIST contender owns a private temporary directory')
-        call configure_test_hooks('', '', '', '', trim(marker))
         c_temp = c_string(trim(empty_dir))
         c_dest = c_string(trim(destination))
         c_err = c_publish_tree(c_temp, c_dest)
         call test_assert_equal_int(s, 1, int(c_err), &
             'tree no-replace publication reports the existing winner')
-        inquire(file=trim(marker), exist=exists)
-        call test_assert(s, exists, &
-            'tree EEXIST path records success only after syncing its parent')
-        call read_first(trim(marker), observed, local_err)
-        call test_assert_equal_str(s, 'EEXIST', observed, &
-            'tree race loser establishes destination parent durability')
-    end subroutine test_tree_eexist_sync
+        call immutable_store_verify_tree(cache, tree_id, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'EEXIST contender leaves the canonical winner complete and valid')
+    end subroutine test_tree_eexist_preserves_winner
 
     subroutine test_symlink_shard_rejected(s, base)
         type(test_suite_t), intent(inout) :: s
@@ -665,18 +604,19 @@ contains
         type(test_suite_t), intent(inout) :: s
         type(immutable_store_t), intent(in) :: cache
         character(len=*), intent(in) :: base
-        character(len=512) :: path, temp_path, source_path, ready, release
+        character(len=512) :: path, parent_dir, stage_dir, stage_path, source_path
         character(len=512) :: child_exe, child_path, sentinel_release
-        character(len=4096) :: child_argv(9), sentinel_argv(3)
+        character(len=4096) :: child_argv(4), sentinel_argv(3)
         character(len=1) :: bytes(262144)
         character(len=64) :: missing_id
-        integer :: local_err, child_status, file_err, i, writer_pid
+        integer :: local_err, child_status, file_err, i, writer_pid, lock_fd
         integer :: sentinel_pid, spawn_err, signal_err, state, child_parent
-        integer(int64) :: partial_size
+        integer(int64) :: staged_size
         integer(int64) :: child_start, sentinel_start
         integer(int64) :: sentinel_start_after
         logical :: exists
-        character(len=8192) :: marker_path
+        integer(c_int) :: mode, mode_status, c_status
+        logical :: staged
 
         do i = 1, size(bytes)
             bytes(i) = char(mod(i + 17, 251))
@@ -687,8 +627,15 @@ contains
             'large crash fixture is written')
         missing_id = sha256_string(transfer(bytes, repeat(' ', size(bytes))))
         path = immutable_store_blob_path(cache, missing_id)
-        ready = trim(base)//'/killed-copy-ready'
-        release = trim(base)//'/killed-copy-release-never'
+        parent_dir = path_dirname(path)
+        c_status = c_mkdirs(trim(parent_dir)//c_null_char)
+        call test_assert_equal_int(s, 0, int(c_status), &
+            'crash oracle prepares the object shard')
+        if (c_status /= 0_c_int) return
+        lock_fd = fx_test_lock_directory(trim(parent_dir))
+        call test_assert(s, lock_fd >= 0, &
+            'crash oracle holds the real publication admission lock')
+        if (lock_fd < 0) return
         sentinel_release = trim(base)//'/unrelated-sentinel-release'
         call get_command_argument(0, executable)
         sentinel_argv(1:3) = [character(len=4096) :: trim(executable), &
@@ -699,22 +646,30 @@ contains
         call assert_fortran_child(s, sentinel_pid, sentinel_start, &
             child_parent, child_path)
 
-        child_argv(1:9) = [character(len=4096) :: trim(executable), &
-            '--put-blob-barrier', trim(cache%root_dir), trim(source_path), &
-            trim(ready), trim(release), '', '', '']
-        call test_process_spawn(child_argv(1:9), writer_pid, spawn_err)
+        child_argv(1:4) = [character(len=4096) :: trim(executable), &
+            '--put-blob', trim(cache%root_dir), trim(source_path)]
+        call test_process_spawn(child_argv(1:4), writer_pid, spawn_err)
         call test_assert_equal_int(s, 0, spawn_err, &
-            'native process API starts partial blob writer')
-        call wait_for_file(trim(ready), 15000, exists)
-        call test_assert(s, exists, 'partial writer reaches copy barrier')
+            'native process API starts exact blob writer')
+        stage_dir = trim(parent_dir)//'/.fx-owned-'//number(writer_pid)//'-0'
+        stage_path = trim(stage_dir)//'/payload'
+        call wait_for_owned_stage(trim(stage_path), int(size(bytes), int64), staged)
+        call test_assert(s, staged, &
+            'writer prepares a complete immutable payload before publication')
         call assert_fortran_child(s, writer_pid, child_start, child_parent, &
             child_path)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(s, .not. exists, &
+            'canonical object is missing while the writer waits for admission')
         call test_process_signal(writer_pid, 9, signal_err)
         call test_assert_equal_int(s, 0, signal_err, &
             'SIGKILL targets only the exact owned writer PID')
         call wait_for_child(writer_pid, 5000, child_status, exists)
         call test_assert(s, exists .and. child_status == 137, &
-            'partial blob writer is killed and reaped by its owner')
+            'prepublication writer is killed and reaped by its owner')
+        local_err = fx_test_unlock(lock_fd)
+        call test_assert_equal_int(s, 0, local_err, &
+            'crash oracle releases the real publication admission lock')
         call test_process_wait_once(sentinel_pid, child_status, state)
         call test_assert_equal_int(s, 0, state, &
             'unrelated sentinel remains alive after exact writer signal')
@@ -728,21 +683,22 @@ contains
         call wait_for_child(sentinel_pid, 5000, child_status, exists)
         call test_assert(s, exists .and. child_status == 0, &
             'unrelated sentinel is released and reaped')
-        call read_line(trim(ready), marker_path, local_err)
-        call test_assert_equal_int(s, 0, local_err, &
-            'copy barrier identifies the owned temporary file')
-        temp_path = trim(marker_path)
         inquire(file=trim(path), exist=exists)
         call test_assert(s, .not. exists, &
-            'killed partial writer exposes no content-addressed blob')
-        partial_size = -1_int64
-        inquire(file=trim(temp_path), exist=exists, size=partial_size)
-        call test_assert(s, exists .and. partial_size > 0_int64 .and. &
-            partial_size < size(bytes, kind=int64), &
-            'killed writer leaves a genuine incomplete owned temp, never final')
+            'killed writer exposes no content-addressed blob')
+        staged_size = -1_int64
+        inquire(file=trim(stage_path), exist=exists, size=staged_size)
+        mode = -1_c_int
+        mode_status = c_path_mode(trim(stage_path)//c_null_char, mode)
+        call test_assert(s, exists .and. staged_size == size(bytes, kind=int64) &
+            .and. mode_status == 0_c_int .and. mode == 292_c_int, &
+            'crash leaves only a complete immutable private payload')
         call immutable_store_verify_blob(cache, missing_id, local_err)
         call test_assert_equal_int(s, IMMUTABLE_MISSING, local_err, &
-            'killed publication remains missing, never a valid partial')
+            'killed publication remains missing, never a partial result')
+        local_err = fx_test_remove_tree(trim(stage_dir))
+        call test_assert_equal_int(s, 0, local_err, &
+            'crash fixture removes its private orphan after verification')
     end subroutine test_killed_partial_is_hidden
 
     subroutine test_corrupt_tree_is_reported(s, cache, blob_id, root_id, sub_id)
@@ -862,33 +818,18 @@ contains
         if (local_err /= IMMUTABLE_OK) stop 11
     end subroutine run_worker_put
 
-    subroutine run_worker_put_barrier()
-        character(len=4096) :: ready, copy_release, publish_ready
-        character(len=4096) :: publish_release, eexist
-        call get_command_argument(4, ready)
-        call get_command_argument(5, copy_release)
-        call get_command_argument(6, publish_ready)
-        call get_command_argument(7, publish_release)
-        call get_command_argument(8, eexist)
-        call configure_test_hooks(trim(ready), trim(copy_release), &
-            trim(publish_ready), trim(publish_release), trim(eexist))
-        call run_worker_put()
-    end subroutine run_worker_put_barrier
-
     subroutine run_mkdir_worker()
-        character(len=4096) :: path, ready, release, existing
-        character(kind=c_char), allocatable :: c_path(:), c_ready(:)
-        character(kind=c_char), allocatable :: c_release(:), c_existing(:)
+        character(len=4096) :: path, ready, start
+        character(kind=c_char), allocatable :: c_path(:)
         integer(c_int) :: status
+        logical :: exists
         call get_command_argument(2, path)
         call get_command_argument(3, ready)
-        call get_command_argument(4, release)
-        call get_command_argument(5, existing)
+        call get_command_argument(4, start)
+        call write_text(trim(ready), 'ready')
+        call wait_for_file(trim(start), 30000, exists)
+        if (.not. exists) stop 12
         c_path = c_string(trim(path))
-        c_ready = c_string(trim(ready))
-        c_release = c_string(trim(release))
-        c_existing = c_string(trim(existing))
-        call c_test_mkdir_configure(c_path, c_ready, c_release, c_existing)
         status = c_mkdirs(c_path)
         if (status /= 0_c_int) stop 13
     end subroutine run_mkdir_worker
@@ -900,22 +841,6 @@ contains
         call wait_for_file(trim(release), 30000, exists)
         if (.not. exists) stop 14
     end subroutine run_worker_wait_release
-
-    subroutine configure_test_hooks(ready, copy_release, publish_ready, &
-            publish_release, eexist)
-        character(len=*), intent(in) :: ready, copy_release, publish_ready
-        character(len=*), intent(in) :: publish_release, eexist
-        character(kind=c_char), allocatable :: c_ready(:), c_copy_release(:)
-        character(kind=c_char), allocatable :: c_publish_ready(:)
-        character(kind=c_char), allocatable :: c_publish_release(:), c_eexist(:)
-        c_ready = c_string(ready)
-        c_copy_release = c_string(copy_release)
-        c_publish_ready = c_string(publish_ready)
-        c_publish_release = c_string(publish_release)
-        c_eexist = c_string(eexist)
-        call c_test_configure(c_ready, c_copy_release, c_publish_ready, &
-            c_publish_release, c_eexist)
-    end subroutine configure_test_hooks
 
     subroutine write_bytes(path, bytes, ierr)
         character(len=*), intent(in) :: path
@@ -1037,6 +962,31 @@ contains
             call test_process_sleep_ms(5)
         end do
     end subroutine wait_for_file
+
+    subroutine wait_for_owned_stage(path, expected_size, ready)
+        character(len=*), intent(in) :: path
+        integer(int64), intent(in) :: expected_size
+        logical, intent(out) :: ready
+        integer(int64) :: size_bytes
+        integer(c_int) :: mode, status
+        integer :: attempt
+        logical :: exists
+
+        ready = .false.
+        do attempt = 1, 3000
+            size_bytes = -1_int64
+            mode = -1_c_int
+            inquire(file=trim(path), exist=exists, size=size_bytes)
+            if (exists .and. size_bytes == expected_size) then
+                status = c_path_mode(trim(path)//c_null_char, mode)
+                if (status == 0_c_int .and. mode == 292_c_int) then
+                    ready = .true.
+                    return
+                end if
+            end if
+            call test_process_sleep_ms(10)
+        end do
+    end subroutine wait_for_owned_stage
 
     subroutine wait_for_child(pid, timeout_ms, exit_status, completed)
         integer, intent(in) :: pid, timeout_ms

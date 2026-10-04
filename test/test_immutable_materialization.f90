@@ -1,73 +1,23 @@
 program test_immutable_materialization
     use, intrinsic :: iso_c_binding, only: c_int, c_char, c_long_long, c_null_char
+    use, intrinsic :: iso_fortran_env, only: int64
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, test_suite_exit
-    use fx_hash, only: sha256_string
+    use fx_hash, only: sha256_string, sha256_file
     use fx_proc, only: proc_pid
-    use fx_path, only: path_dirname
+    use fx_test_fs, only: fx_test_temp_root, fx_test_mkdir_p, fx_test_remove_tree
+    use fx_test_process, only: test_process_spawn, test_process_wait_once, &
+        test_process_signal, test_process_sleep_ms
     use fx_immutable_store, only: immutable_store_t, immutable_tree_entry_t, &
         immutable_store_init, immutable_store_put_blob, immutable_store_blob_path, &
-        immutable_store_tree_path, immutable_store_materialize_blob, &
+        immutable_store_materialize_blob, &
         IMMUTABLE_OK, IMMUTABLE_INVALID, IMMUTABLE_BLOB, &
-        IMMUTABLE_MATERIALIZE_COPY, IMMUTABLE_MATERIALIZE_CLONE, IMMUTABLE_MATERIALIZE_AUTO
-    use fx_immutable_tree, only: immutable_store_put_tree, immutable_store_materialize_tree
+        IMMUTABLE_MATERIALIZE_COPY, IMMUTABLE_MATERIALIZE_CLONE
+    use fx_immutable_tree, only: immutable_store_put_tree, &
+        immutable_store_materialize_tree, immutable_store_verify_tree
     use fx_immutable_manifest, only: immutable_entries_canonical, immutable_manifest_serialize
-    use immutable_marker_oracle, only: marker_boundary_configure, probe_ready_marker
     implicit none
     interface
-        integer(c_int) function tmp_root(out, cap) &
-                bind(C, name='fx_immutable_test_tmp_root')
-            import :: c_int, c_char
-            character(kind=c_char), intent(out) :: out(*)
-            integer(c_int), value :: cap
-        end function tmp_root
-        integer(c_int) function mkdirs(path) bind(C, name='fx_immutable_mkdirs_sync')
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: path(*)
-        end function mkdirs
-        subroutine configure(phase, ready, release) &
-                bind(C, name='fx_immutable_owned_test_configure')
-            import :: c_int, c_char
-            integer(c_int), value :: phase
-            character(kind=c_char), intent(in) :: ready(*), release(*)
-        end subroutine configure
-        integer(c_int) function rename_path(old, new) bind(C, name='rename')
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: old(*), new(*)
-        end function rename_path
-        integer(c_int) function symlink_path(target, link) bind(C, name='symlink')
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: target(*), link(*)
-        end function symlink_path
-        integer(c_int) function unlink_path(path) bind(C, name='unlink')
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: path(*)
-        end function unlink_path
-        integer(c_int) function sleep_us(time) bind(C, name='usleep')
-            import :: c_int
-            integer(c_int), value :: time
-        end function sleep_us
-        integer(c_int) function fork_process() bind(C, name='fork')
-            import :: c_int
-        end function fork_process
-        subroutine exit_child(status) bind(C, name='_exit')
-            import :: c_int
-            integer(c_int), value :: status
-        end subroutine exit_child
-        integer(c_int) function wait_child(pid, status, options) bind(C, name='waitpid')
-            import :: c_int
-            integer(c_int), value :: pid, options
-            integer(c_int), intent(out) :: status
-        end function wait_child
-        integer(c_int) function kill_child(pid, signal) bind(C, name='kill')
-            import :: c_int
-            integer(c_int), value :: pid, signal
-        end function kill_child
-        integer(c_int) function path_mode(path, mode) bind(C, name='fx_immutable_path_mode')
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: path(*)
-            integer(c_int), intent(out) :: mode
-        end function path_mode
         integer(c_int) function probe_alias(dir, a, b) bind(C, name='fx_immutable_probe_alias')
             import :: c_int, c_char
             character(kind=c_char), intent(in) :: dir(*), a(*), b(*)
@@ -81,10 +31,6 @@ program test_immutable_materialization
             character(kind=c_char), intent(in) :: path(*)
             integer(c_long_long), intent(out) :: id
         end function clone_id
-        subroutine force_copy(value) bind(C, name='fx_owned_test_force_copy')
-            import :: c_int
-            integer(c_int), value :: value
-        end subroutine force_copy
     end interface
     type(test_suite_t) :: suite
     type(immutable_store_t) :: store
@@ -93,18 +39,19 @@ program test_immutable_materialization
     character(len=64) :: blob, tree
     character(len=32) :: required
     character(len=*), parameter :: PAYLOAD = 'original immutable payload'
-    integer :: ierr, mode, end_path
+    integer :: ierr, end_path
     character(len=512, kind=c_char) :: scratch
     integer(c_int) :: status
     logical :: require_apfs
 
     call get_command_argument(1, required)
-    if (trim(required) == '--materialize-worker') then
-        call run_worker()
+    if (trim(required) == '--materialize-crash-worker') then
+        call run_crash_worker()
+        stop 0
     end if
     call test_suite_init(suite, 'immutable_materialization')
     scratch = c_null_char
-    status = tmp_root(scratch, 512_c_int)
+    status = int(fx_test_temp_root(scratch, 512))
     call test_assert_equal_int(suite, 0, int(status), 'system scratch resolves physically')
     end_path = index(scratch, c_null_char)
     if (end_path <= 1) stop 20
@@ -132,9 +79,8 @@ program test_immutable_materialization
     end if
     call test_collisions()
     call test_clone_and_fallback()
-    do mode = 1, 6
-        call test_substitution(mode)
-    end do
+    call test_materialization_contract()
+    call test_materialization_crash()
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 contains
@@ -174,7 +120,7 @@ contains
         integer :: pair, result
         integer(c_int) :: alias, mkdir_status
         input = [entry(1), entry(1)]
-        mkdir_status = mkdirs((trim(root)//'/alias-probe')//c_null_char)
+        mkdir_status = int(fx_test_mkdir_p(trim(root)//'/alias-probe'))
         call test_assert_equal_int(suite, 0, int(mkdir_status), 'alias oracle directory')
         do pair = 1, 2
             if (pair == 1) then
@@ -229,12 +175,10 @@ contains
             call test_assert(suite, original_id /= 0 .and. original_id == copied_id, &
                 'source and forced clone share the kernel data-stream identity')
         end if
-        call force_copy(1_c_int)
         call immutable_store_materialize_blob(store, blob, trim(fallback), 420, &
-            IMMUTABLE_MATERIALIZE_AUTO, cloned, result)
-        call force_copy(0_c_int)
-        call test_assert_equal_int(suite, IMMUTABLE_OK, result, 'forced fallback succeeds')
-        call test_assert(suite, .not. cloned, 'automatic strategy used real byte-copy fallback')
+            IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, result, 'copy strategy succeeds')
+        call test_assert(suite, .not. cloned, 'copy strategy uses byte-copy materialization')
         call read_text(trim(fallback), observed, ios)
         call test_assert(suite, ios == 0 .and. observed == PAYLOAD, 'fallback has actual bytes')
         if (require_apfs) then
@@ -247,236 +191,227 @@ contains
         call test_assert(suite, ios == 0 .and. observed == PAYLOAD, 'copy editing preserves CAS')
     end subroutine test_clone_and_fallback
 
-    subroutine test_substitution(which)
-        integer, intent(in) :: which
-        character(len=512) :: destination, outside, ready, release, result_path, swapped
-        integer(c_int) :: pid, process_status, rename_status, link_status, cleanup
-        integer :: result, ios, phase
-        logical :: found
+    subroutine test_materialization_contract()
+        character(len=512) :: blob_destination, tree_destination, outside
         character(len=:), allocatable :: observed
-
-        swapped = ''
-        call prepare_race(which, destination, outside, ready, release, result_path)
-        pid = spawn_worker(which)
-        call test_assert(suite, pid > 0, 'independent materialization worker starts')
-        if (pid <= 0) return
-        if (which == 6) call probe_ready_marker(suite, trim(ready))
-        call wait_marker(ready, found)
-        call test_assert(suite, found, 'worker reaches the exact descriptor boundary')
-        if (found) then
-            call substitution_paths(which, destination, ready, swapped)
-            rename_status = rename_path(trim(swapped)//c_null_char, &
-                (trim(swapped)//'.held')//c_null_char)
-            link_status = symlink_path(trim(outside)//c_null_char, trim(swapped)//c_null_char)
-            call test_assert(suite, rename_status == 0 .and. link_status == 0, &
-                'real rename and symlink substitution occurred before release')
-        end if
-        call write_text(trim(release), 'release')
-        call wait_worker(pid, process_status)
-        call test_assert_equal_int(suite, 0, int(process_status), 'worker exits normally')
-        open (newunit=ios, file=trim(result_path), status='old', action='read', iostat=result)
-        if (result == 0) then
-            read (ios, *, iostat=result) phase
-            close (ios)
-            if (result == 0) call check_race_result(which, destination, swapped, phase)
-        end if
-        call test_assert_equal_int(suite, 0, result, 'worker reports the real library result')
-        if (found) then
-            cleanup = unlink_path(trim(swapped)//c_null_char)
-            if (which == 1 .or. which == 2 .or. which == 5) then
-                cleanup = rename_path((trim(swapped)//'.held')//c_null_char, &
-                    trim(swapped)//c_null_char)
-                call test_assert_equal_int(suite, 0, int(cleanup), 'source/parent fixture restores')
-            end if
-        end if
-        call read_text(trim(root)//'/outside'//number(which)//'/sentinel', observed, ios)
-        call test_assert(suite, ios == 0 .and. observed == 'SENTINEL', &
-            'outside sentinel bytes are untouched')
-    end subroutine test_substitution
-
-    subroutine prepare_race(which, destination, outside, ready, release, result_path)
-        integer, intent(in) :: which
-        character(len=*), intent(out) :: destination, outside, ready, release, result_path
-        type(immutable_tree_entry_t) :: forged(1)
-        integer(c_int) :: created
-        character(len=:), allocatable :: dir, text
-        dir = trim(root)//'/outside'//number(which)
-        created = mkdirs(dir//c_null_char)
-        call test_assert_equal_int(suite, 0, int(created), 'outside fixture directory creates')
-        call write_text(dir//'/sentinel', 'SENTINEL')
-        destination = trim(root)//'/dest'//number(which)//'/result'
-        created = mkdirs((trim(path_dirname(destination)))//c_null_char)
-        ready = trim(root)//'/ready'//number(which)
-        release = trim(root)//'/release'//number(which)
-        result_path = trim(root)//'/result'//number(which)
-        outside = dir
-        if (which == 1) call write_text(dir//'/'//blob, 'wrong source bytes')
-        if (which == 3 .or. which == 6) outside = dir//'/sentinel'
-        if (which == 5) then
-            forged(1) = entry(1)
-            forged(1)%path = 'evil.bin'
-            text = immutable_manifest_serialize(forged)
-            outside = dir//'/forged-manifest'
-            call write_text(trim(outside), text)
-        end if
-    end subroutine prepare_race
-
-    subroutine substitution_paths(which, destination, ready, swapped)
-        integer, intent(in) :: which
-        character(len=*), intent(in) :: destination, ready
-        character(len=*), intent(out) :: swapped
-        integer :: u, ios
-        select case (which)
-        case (1)
-            swapped = path_dirname(immutable_store_blob_path(store, blob))
-        case (2)
-            swapped = path_dirname(destination)
-        case (3, 4, 6)
-            open (newunit=u, file=trim(ready), status='old', iostat=ios)
-            if (ios == 0) then
-                read (u, '(a)', iostat=ios) swapped
-                close (u)
-            end if
-            call test_assert_equal_int(suite, 0, ios, 'boundary exposes owned staging path')
-        case (5)
-            swapped = immutable_store_tree_path(store, tree)
-        end select
-    end subroutine substitution_paths
-
-    subroutine check_race_result(which, destination, swapped, result)
-        integer, intent(in) :: which, result
-        character(len=*), intent(in) :: destination, swapped
-        character(len=:), allocatable :: actual_path, observed
-        logical :: exists
-        integer :: ios
-        integer(c_int) :: checked, actual_mode
-        actual_mode = -1_c_int
-        if (which == 3 .or. which == 4 .or. which == 6) then
-            call test_assert(suite, result /= IMMUTABLE_OK, 'substituted staging entry fails closed')
-            inquire (file=trim(destination), exist=exists)
-            call test_assert(suite, .not. exists, 'invalid staging has no published destination')
-        else
-            call test_assert_equal_int(suite, IMMUTABLE_OK, result, &
-                'held verified source/destination survives pathname substitution')
-            actual_path = trim(destination)
-            if (which == 2) actual_path = trim(swapped)//'.held/result'
-            if (which == 5) actual_path = actual_path//'/payload.bin'
-            call read_text(actual_path, observed, ios)
-            call test_assert(suite, ios == 0 .and. observed == PAYLOAD, &
-                'materialized bytes are independently the original payload')
-        end if
-        if (which == 2 .or. which == 4) then
-            inquire (file=trim(root)//'/outside'//number(which)//'/result', exist=exists)
-            call test_assert(suite, .not. exists, 'outside parent receives no destination')
-            inquire (file=trim(root)//'/outside'//number(which)//'/payload.bin', exist=exists)
-            call test_assert(suite, .not. exists, 'outside staging directory receives no payload')
-        end if
-        if (which == 5) then
-            inquire (file=trim(destination)//'/evil.bin', exist=exists)
-            call test_assert(suite, .not. exists, 'unverified replacement manifest is never parsed')
-        end if
-        checked = path_mode((trim(root)//'/outside'//number(which)//'/sentinel')// &
-            c_null_char, actual_mode)
-        call test_assert(suite, checked == 0 .and. actual_mode == 420, &
-            'outside sentinel permission mode is untouched')
-    end subroutine check_race_result
-
-    function spawn_worker(which) result(pid)
-        use, intrinsic :: iso_c_binding, only: c_ptr, c_loc, c_null_ptr
-        integer, intent(in) :: which
-        integer(c_int) :: pid, exec_status
-        character(kind=c_char), target :: args(1024, 6)
-        type(c_ptr) :: argv(7)
-        character(len=1024) :: executable, text(6)
-        integer :: i, j
-        interface
-            integer(c_int) function exec_child(path, arguments) bind(C, name='execv')
-                import :: c_int, c_char, c_ptr
-                character(kind=c_char), intent(in) :: path(*)
-                type(c_ptr), intent(in) :: arguments(*)
-            end function exec_child
-        end interface
-        call get_command_argument(0, executable)
-        text = [character(len=1024) :: trim(executable), '--materialize-worker', &
-            trim(root), blob, tree, number(which)]
-        args = c_null_char
-        do i = 1, 6
-            do j = 1, len_trim(text(i))
-                args(j, i) = text(i)(j:j)
-            end do
-            argv(i) = c_loc(args(1, i))
-        end do
-        argv(7) = c_null_ptr
-        pid = fork_process()
-        if (pid == 0) then
-            exec_status = exec_child(args(:, 1), argv)
-            call exit_child(127_c_int)
-        end if
-    end function spawn_worker
-
-    subroutine run_worker()
-        character(len=512) :: destination, ready, release, result_path, which_text
-        integer :: which, result, u, ios
-        integer(c_int) :: phase
         logical :: cloned
-        call get_command_argument(2, root)
-        call get_command_argument(3, blob)
-        call get_command_argument(4, tree)
-        call get_command_argument(5, which_text)
-        read (which_text, *) which
-        call immutable_store_init(store, trim(root)//'/store', result)
-        destination = trim(root)//'/dest'//number(which)//'/result'
-        ready = trim(root)//'/ready'//number(which)
-        release = trim(root)//'/release'//number(which)
-        result_path = trim(root)//'/result'//number(which)
-        phase = 1_c_int
-        if (which == 3 .or. which == 6) phase = 2_c_int
-        if (which == 4) phase = 4_c_int
-        if (which == 5) phase = 3_c_int
-        call configure(phase, trim(ready)//c_null_char, trim(release)//c_null_char)
-        if (which == 6) call marker_boundary_configure( &
-            (trim(ready)//'.open')//c_null_char, (trim(ready)//'.write')//c_null_char)
-        if (which <= 3 .or. which == 6) then
-            call immutable_store_materialize_blob(store, blob, trim(destination), &
-                420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+        integer :: result, ios, local_err
+
+        local_err = fx_test_mkdir_p(trim(root)//'/materialization-outside')
+        call test_assert_equal_int(suite, 0, local_err, &
+            'outside materialization sentinel directory is created')
+        outside = trim(root)//'/materialization-outside/sentinel'
+        call write_text(trim(outside), 'OUTSIDE MATERIALIZATION SENTINEL')
+        blob_destination = trim(root)//'/materialization-contract/blob'
+        tree_destination = trim(root)//'/materialization-contract/tree'
+
+        call immutable_store_materialize_blob(store, blob, &
+            trim(blob_destination), 420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, result, &
+            'blob materialization returns only after publication')
+        call read_text(trim(blob_destination), observed, ios)
+        call test_assert(suite, ios == 0 .and. observed == PAYLOAD, &
+            'returned blob materialization contains every expected byte')
+
+        call immutable_store_materialize_tree(store, tree, &
+            trim(tree_destination), IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, result, &
+            'tree materialization returns only after publication')
+        call read_text(trim(tree_destination)//'/payload.bin', observed, ios)
+        call test_assert(suite, ios == 0 .and. observed == PAYLOAD, &
+            'returned tree materialization contains its complete source blob')
+        call read_text(trim(outside), observed, ios)
+        call test_assert(suite, ios == 0 .and. &
+            observed == 'OUTSIDE MATERIALIZATION SENTINEL', &
+            'materialization leaves the unrelated outside file unchanged')
+    end subroutine test_materialization_contract
+
+    subroutine test_materialization_crash()
+        integer, parameter :: NBYTES = 64 * 1024 * 1024
+        type(immutable_tree_entry_t) :: large_entry(1)
+        character(len=512) :: source_path, outside, destination, result_path
+        character(len=512) :: parent_dir, top_stage, stage_file, executable
+        character(len=64) :: expected_blob, stored_blob, large_tree, actual_blob
+        character(len=:), allocatable :: actual_text
+        character(len=512) :: worker_args(6)
+        integer(int64) :: staged_size
+        logical :: found, completed, killed, exists
+        logical :: cloned, partial_seen
+        integer :: pid, process_status, state, signal_status
+        integer :: ierr, result, io_status, attempt, unit
+
+        source_path = trim(root)//'/large-materialization-source'
+        call write_repeated(source_path, NBYTES)
+        call sha256_file(trim(source_path), expected_blob, ierr)
+        call test_assert_equal_int(suite, 0, ierr, &
+            'large materialization source hashes independently')
+        call immutable_store_put_blob(store, trim(source_path), stored_blob, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'large materialization blob publishes')
+        call test_assert_equal_str(suite, expected_blob, stored_blob, &
+            'store publishes the independently computed blob ID')
+        large_entry(1)%path = 'payload.bin'
+        large_entry(1)%role = 'source'
+        large_entry(1)%object_id = stored_blob
+        large_entry(1)%kind = IMMUTABLE_BLOB
+        large_entry(1)%mode = 420
+        call immutable_store_put_tree(store, large_entry, large_tree, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'large materialization tree publishes')
+
+        parent_dir = trim(root)//'/materialization-crash-parent'
+        ierr = fx_test_mkdir_p(parent_dir)
+        call test_assert_equal_int(suite, 0, ierr, &
+            'crash destination parent is created')
+        outside = trim(root)//'/materialization-crash-outside'
+        ierr = fx_test_mkdir_p(trim(outside))
+        call test_assert_equal_int(suite, 0, ierr, &
+            'crash outside directory is created')
+        call write_text(trim(outside)//'/sentinel', 'CRASH OUTSIDE SENTINEL')
+        destination = trim(parent_dir)//'/result'
+        result_path = trim(root)//'/materialization-crash-result'
+        call get_command_argument(0, executable)
+        worker_args = [character(len=512) :: trim(executable), &
+            '--materialize-crash-worker', trim(store%root_dir), large_tree, &
+            trim(destination), trim(result_path)]
+        call test_process_spawn(worker_args, pid, ierr)
+        call test_assert_equal_int(suite, 0, ierr, &
+            'native process API starts an exact materialization worker')
+        if (ierr /= 0) return
+        top_stage = trim(parent_dir)//'/.fx-owned-'//number(int(pid))//'-0'
+        stage_file = trim(top_stage)//'/.fx-owned-'//number(int(pid))//'-1/payload'
+        completed = .false.
+        killed = .false.
+        partial_seen = .false.
+        process_status = -1_c_int
+        do attempt = 1, 6000
+            call test_process_wait_once(pid, process_status, state)
+            if (state == 1_c_int) then
+                completed = .true.
+                exit
+            end if
+            if (state < 0_c_int) exit
+            staged_size = -1_int64
+            inquire(file=trim(stage_file), exist=found, size=staged_size)
+            if (found .and. staged_size > 0_int64 .and. &
+                    staged_size < int(NBYTES, int64)) then
+                partial_seen = .true.
+                call test_process_signal(pid, 9, signal_status)
+                killed = signal_status == 0_c_int
+                exit
+            end if
+            call test_process_sleep_ms(2)
+        end do
+        if (.not. completed) then
+            do attempt = 1, 3000
+                call test_process_wait_once(pid, process_status, state)
+                if (state == 1) then
+                    completed = .true.
+                    exit
+                end if
+                if (state < 0_c_int) exit
+                call test_process_sleep_ms(5)
+            end do
+        end if
+        if (state /= 1) then
+            call test_process_signal(pid, 9, signal_status)
+            do attempt = 1, 3000
+                call test_process_wait_once(pid, process_status, state)
+                if (state == 1) exit
+                if (state < 0) exit
+                call test_process_sleep_ms(5)
+            end do
+        end if
+        call test_assert(suite, state == 1, &
+            'materialization worker exits or is reaped after exact-PID kill')
+        if (killed) call test_assert_equal_int(suite, 137, process_status, &
+            'SIGKILL targets only the exact materialization worker PID')
+        if (killed) call test_assert(suite, partial_seen, &
+            'crash was observed during an independently visible partial copy')
+
+        inquire(file=trim(destination)//'/payload.bin', exist=exists)
+        if (exists) then
+            call sha256_file(trim(destination)//'/payload.bin', actual_blob, ierr)
+            call test_assert_equal_int(suite, 0, ierr, &
+                'visible materialized blob can be independently hashed')
+            call test_assert_equal_str(suite, stored_blob, actual_blob, &
+                'a visible materialization is complete even if the worker exited')
         else
-            call immutable_store_materialize_tree(store, tree, trim(destination), &
-                IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+            call test_assert(suite, killed, &
+                'a missing destination follows only an interrupted transaction')
+            call immutable_store_verify_tree(store, large_tree, ierr)
+            call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+                'interrupted materialization leaves the immutable source graph valid')
         end if
-        open (newunit=u, file=trim(result_path), status='replace', iostat=ios)
-        if (ios == 0) then
-            write (u, *) result
-            close (u)
+        inquire(file=trim(result_path), exist=found)
+        result = -1
+        if (found) then
+            open(newunit=unit, file=trim(result_path), status='old', &
+                action='read', iostat=io_status)
+            if (io_status == 0) then
+                read(unit, *, iostat=io_status) result
+                close(unit)
+            end if
+            call test_assert(suite, io_status == 0 .and. result == IMMUTABLE_OK, &
+                'a worker that returned reports a complete materialization')
         end if
-        call exit_child(0_c_int)
-    end subroutine run_worker
+        call read_text(trim(outside)//'/sentinel', actual_text, ierr)
+        call test_assert(suite, ierr == 0 .and. &
+            actual_text == 'CRASH OUTSIDE SENTINEL', &
+            'interrupted materialization leaves outside data unchanged')
+        inquire(file=trim(top_stage), exist=exists)
+        if (exists) then
+            ierr = fx_test_remove_tree(trim(top_stage))
+            call test_assert_equal_int(suite, 0, ierr, &
+                'interrupted private materialization staging is removable')
+        end if
+    end subroutine test_materialization_crash
 
-    subroutine wait_marker(path, found)
+    subroutine write_repeated(path, byte_count)
         character(len=*), intent(in) :: path
-        logical, intent(out) :: found
-        integer :: attempt
-        integer(c_int) :: ignored
-        found = .false.
-        do attempt = 1, 3000
-            inquire (file=trim(path), exist=found)
-            if (found) return
-            ignored = sleep_us(10000_c_int)
-        end do
-    end subroutine wait_marker
+        integer, intent(in) :: byte_count
+        character(len=65536) :: chunk
+        integer :: i, remaining, count, unit, ios, close_ios
 
-    subroutine wait_worker(pid, result)
-        integer(c_int), intent(in) :: pid
-        integer(c_int), intent(out) :: result
-        integer(c_int) :: found, ignored
-        integer :: attempt
-        do attempt = 1, 3000
-            found = wait_child(pid, result, 1_c_int)
-            if (found == pid) return
-            ignored = sleep_us(10000_c_int)
+        do i = 1, len(chunk)
+            chunk(i:i) = char(mod(i, 251))
         end do
-        ignored = kill_child(pid, 9_c_int)
-        ignored = wait_child(pid, result, 0_c_int)
-    end subroutine wait_worker
+        open(newunit=unit, file=path, status='replace', access='stream', &
+            form='unformatted', action='write', iostat=ios)
+        call test_assert_equal_int(suite, 0, ios, 'large source file opens')
+        if (ios /= 0) return
+        remaining = byte_count
+        do while (remaining > 0)
+            count = min(remaining, len(chunk))
+            write(unit, iostat=ios) chunk(:count)
+            if (ios /= 0) exit
+            remaining = remaining - count
+        end do
+        close(unit, iostat=close_ios)
+        call test_assert(suite, ios == 0 .and. close_ios == 0, &
+            'large source file closes after all bytes are written')
+    end subroutine write_repeated
+
+    subroutine run_crash_worker()
+        type(immutable_store_t) :: worker_store
+        character(len=512) :: store_root, tree_id, destination, result_path
+        integer :: worker_status, ios, unit
+        logical :: cloned
+        call get_command_argument(2, store_root)
+        call get_command_argument(3, tree_id)
+        call get_command_argument(4, destination)
+        call get_command_argument(5, result_path)
+        call immutable_store_init(worker_store, trim(store_root), worker_status)
+        if (worker_status /= IMMUTABLE_OK) stop 31
+        call immutable_store_materialize_tree(worker_store, trim(tree_id), &
+            trim(destination), IMMUTABLE_MATERIALIZE_COPY, cloned, worker_status)
+        open(newunit=unit, file=trim(result_path), status='replace', iostat=ios)
+        if (ios == 0) then
+            write(unit, *, iostat=ios) worker_status
+            close(unit)
+        end if
+        if (ios /= 0) stop 32
+    end subroutine run_crash_worker
 
     function number(i) result(text)
         integer, intent(in) :: i

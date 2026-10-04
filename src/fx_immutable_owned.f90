@@ -10,7 +10,7 @@ module fx_immutable_owned
     implicit none
     private
     public :: owned_open_store, owned_begin_path, owned_begin_at, owned_fd
-    public :: owned_finish, owned_dispose, owned_close, owned_sync, owned_pause
+    public :: owned_finish, owned_dispose, owned_close, owned_sync
     public :: owned_open_verified, owned_hash_fd, owned_read_manifest
     public :: owned_materialize_blob, owned_file_info
     public :: owned_copy_source, owned_write, owned_publish, owned_reject
@@ -70,11 +70,6 @@ module fx_immutable_owned
             import :: c_ptr
             type(c_ptr), value :: handle
         end subroutine owned_dispose
-        subroutine owned_pause(handle, phase) bind(C, name='fx_owned_pause')
-            import :: c_ptr, c_int
-            type(c_ptr), value :: handle
-            integer(c_int), value :: phase
-        end subroutine owned_pause
         integer(c_int) function owned_close(fd) bind(C, name='fx_owned_close')
             import :: c_int
             integer(c_int), value :: fd
@@ -218,7 +213,6 @@ contains
         used_clone = .false.
         call owned_open_verified(root, 1_c_int, id, fd, ierr)
         if (ierr /= IMMUTABLE_OK) return
-        call owned_pause(handle, 1_c_int)
         status = fill_blob(handle, fd, int(strategy, c_int), cloned)
         cleanup = owned_close(fd)
         ierr = IMMUTABLE_IO_ERROR
@@ -230,7 +224,6 @@ contains
             ierr = IMMUTABLE_CORRUPT
             return
         end if
-        call owned_pause(handle, 2_c_int)
         status = owned_finish(handle, int(mode, c_int))
         ierr = IMMUTABLE_IO_ERROR
         if (status /= 0_c_int) return
