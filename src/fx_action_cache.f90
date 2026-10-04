@@ -16,6 +16,7 @@ module fx_action_cache
         action_result_store_init, &
         action_result_publish_files, action_result_lookup, &
         action_result_materialize_blob, action_result_file_mode, &
+        action_result_compile_action_key, &
         ACTION_RESULT_OK, ACTION_RESULT_MISSING
     implicit none
     private
@@ -28,6 +29,7 @@ module fx_action_cache
     public :: cache_store_action, cache_restore_action, cache_action_mod_key
     public :: cache_store_binary, cache_restore_binary, &
         cache_binary_matches
+    public :: action_result_compile_action_key
     public :: cache_debug_write_action_record, cache_debug_corrupt_object_payload
     public :: cache_set_file_hash_hook, cache_clear_file_hash_hook
 

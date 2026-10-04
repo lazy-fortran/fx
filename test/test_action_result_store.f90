@@ -6,13 +6,16 @@ program test_action_result_store
     use fx_proc, only: proc_pid
     use fx_immutable_store, only: immutable_tree_entry_t, &
         immutable_store_blob_path
+    use fx_immutable_tree, only: immutable_store_verify_tree
+    use fx_immutable_constants, only: IMMUTABLE_OK
     use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_publish_files, &
         action_result_lookup, action_result_conflicts, &
         action_result_put_blob, action_result_publish, &
         action_result_materialize_blob, ACTION_RESULT_OK, &
         ACTION_RESULT_CONFLICT, ACTION_RESULT_QUARANTINED, &
-        ACTION_RESULT_MISSING, ACTION_RESULT_CORRUPT
+        ACTION_RESULT_MISSING, ACTION_RESULT_CORRUPT, &
+        action_result_action_key_parts, action_result_compile_action_key
     implicit none
 
     interface
@@ -42,6 +45,11 @@ program test_action_result_store
             integer(c_int), value :: phase
             character(kind=c_char), intent(in) :: ready(*), release(*)
         end function configure_barrier
+        integer(c_int) function race_barrier(ready, release) &
+                bind(C, name='fx_action_result_test_barrier')
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: ready(*), release(*)
+        end function race_barrier
         integer(c_int) function tmp_root(out, cap) &
                 bind(C, name='fx_immutable_test_tmp_root')
             import c_char, c_int
@@ -78,6 +86,8 @@ program test_action_result_store
     call test_assert_equal_int(suite, 0, ierr, 'versioned action store initializes')
 
     call test_complete_outputs()
+    call test_action_key_completeness()
+    call test_manifest_metadata_mutants()
     call test_conflicting_publication()
     call test_missing_companion()
     call test_corrupt_companion()
@@ -90,6 +100,94 @@ program test_action_result_store
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_action_key_completeness()
+        character(len=96) :: source_key, flags, toolchain, runtime, oracle
+        character(len=64) :: baseline, changed
+        character(len=96) :: collision_parts(2)
+
+        source_key = 'source-tree:sha256:source-1'
+        flags = '-O2 -fopenmp'
+        toolchain = 'gfortran-16.2.1'
+        runtime = 'libgfortran-16'
+        oracle = 'fx-test-schema-43'
+        baseline = action_result_compile_action_key(source_key, flags, &
+            toolchain, runtime, oracle)
+        changed = action_result_compile_action_key(source_key, '-O0 -fopenmp', &
+            toolchain, runtime, oracle)
+        call test_assert(suite, changed /= baseline, &
+            'action key changes when compiler flags change')
+        changed = action_result_compile_action_key(source_key, flags, &
+            'gfortran-17.0.0', runtime, oracle)
+        call test_assert(suite, changed /= baseline, &
+            'action key changes when toolchain changes')
+        changed = action_result_compile_action_key(source_key, flags, toolchain, &
+            'libgfortran-17', oracle)
+        call test_assert(suite, changed /= baseline, &
+            'action key changes when runtime changes')
+        changed = action_result_compile_action_key(source_key, flags, toolchain, &
+            runtime, 'fx-test-schema-44')
+        call test_assert(suite, changed /= baseline, &
+            'action key changes when output oracle changes')
+        changed = action_result_compile_action_key(source_key, flags, toolchain, '', &
+            oracle)
+        call test_assert(suite, len_trim(changed) == 0, &
+            'action key refuses a missing runtime identity')
+        changed = action_result_compile_action_key('source-tree:source-2', flags, &
+            toolchain, runtime, oracle)
+        call test_assert(suite, changed /= baseline, &
+            'action key changes when the source tree changes')
+        collision_parts = ''
+        collision_parts(1) = 'ab'
+        collision_parts(2) = 'c'
+        baseline = action_result_action_key_parts(collision_parts, 2)
+        collision_parts(1) = 'a'
+        collision_parts(2) = 'bc'
+        changed = action_result_action_key_parts(collision_parts, 2)
+        call test_assert(suite, changed /= baseline, &
+            'length-prefixed action components cannot alias by concatenation')
+    end subroutine test_action_key_completeness
+
+    subroutine test_manifest_metadata_mutants()
+        character(len=512) :: source
+        type(immutable_tree_entry_t) :: baseline_entry(1), mutant_entry(1)
+        character(len=64) :: baseline_id, mutant_id
+
+        source = trim(root)//'/manifest-mutant'
+        call write_text(trim(source), 'same bytes, distinct manifest')
+        baseline_entry(1) = output_entry('program', 'executable', 493)
+        call action_result_publish_files(store, 'metadata-baseline', [source], &
+            baseline_entry, baseline_id, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+            'baseline manifest publishes')
+
+        mutant_entry = baseline_entry
+        mutant_entry(1)%mode = 420
+        call action_result_publish(store, 'metadata-mode-mutant', mutant_entry, &
+            mutant_id, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+            'mode mutant manifest publishes')
+        call test_assert(suite, mutant_id /= baseline_id, &
+            'result identity includes executable mode')
+
+        mutant_entry = baseline_entry
+        mutant_entry(1)%role = 'runtime-companion'
+        call action_result_publish(store, 'metadata-role-mutant', mutant_entry, &
+            mutant_id, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+            'role mutant manifest publishes')
+        call test_assert(suite, mutant_id /= baseline_id, &
+            'result identity includes output role')
+
+        mutant_entry = baseline_entry
+        mutant_entry(1)%path = 'renamed-program'
+        call action_result_publish(store, 'metadata-path-mutant', mutant_entry, &
+            mutant_id, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+            'path mutant manifest publishes')
+        call test_assert(suite, mutant_id /= baseline_id, &
+            'result identity includes companion path')
+    end subroutine test_manifest_metadata_mutants
 
     subroutine prepare_race_entries(action_tag)
         character(len=*), intent(in) :: action_tag
@@ -126,6 +224,18 @@ contains
         end if
         call exit_child(1_c_int)
     end subroutine concurrent_publish_child
+
+    subroutine synchronized_publish_child(action_id, entries, ready_path, &
+            release_path)
+        character(len=*), intent(in) :: action_id, ready_path, release_path
+        type(immutable_tree_entry_t), intent(in) :: entries(:)
+        integer(c_int) :: barrier_status
+
+        barrier_status = race_barrier(trim(ready_path)//c_null_char, &
+            trim(release_path)//c_null_char)
+        if (barrier_status /= 0_c_int) call exit_child(2_c_int)
+        call concurrent_publish_child(action_id, entries)
+    end subroutine synchronized_publish_child
 
     subroutine start_paused_conflict(phase, tag, entries, child)
         integer(c_int), intent(in) :: phase
@@ -166,13 +276,18 @@ contains
     subroutine test_equal_concurrent_publishers()
         integer(c_int) :: child, wait_status, wait_rc
         character(len=64) :: result_id
+        character(len=512) :: ready_path, release_path
         type(immutable_tree_entry_t), allocatable :: restored_entries(:)
 
         call prepare_race_entries('equal-race')
+        ready_path = trim(root)//'/equal-race-ready'
+        release_path = trim(root)//'/equal-race-release'
         child = fork_process()
         call test_assert(suite, child >= 0_c_int, 'equal publication worker forks')
-        if (child == 0_c_int) &
-            call concurrent_publish_child('equal-race-action', race_entry_a)
+        if (child == 0_c_int) call synchronized_publish_child( &
+            'equal-race-action', race_entry_a, ready_path, release_path)
+        call wait_for_file(trim(ready_path))
+        call write_text(trim(release_path), 'go')
         call action_result_publish(store, 'equal-race-action', race_entry_a, &
             result_id, ierr)
         call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
@@ -194,13 +309,18 @@ contains
     subroutine test_conflicting_concurrent_publishers()
         integer(c_int) :: child, wait_status, wait_rc
         character(len=64) :: result_id, ids(2)
+        character(len=512) :: ready_path, release_path
         type(immutable_tree_entry_t), allocatable :: restored_entries(:)
 
         call prepare_race_entries('conflict-race')
+        ready_path = trim(root)//'/conflict-race-ready'
+        release_path = trim(root)//'/conflict-race-release'
         child = fork_process()
         call test_assert(suite, child >= 0_c_int, 'conflicting publisher forks')
-        if (child == 0_c_int) &
-            call concurrent_publish_child('conflict-race-action', race_entry_b)
+        if (child == 0_c_int) call synchronized_publish_child( &
+            'conflict-race-action', race_entry_b, ready_path, release_path)
+        call wait_for_file(trim(ready_path))
+        call write_text(trim(release_path), 'go')
         call action_result_publish(store, 'conflict-race-action', race_entry_a, &
             result_id, ierr)
         call test_assert(suite, ierr == ACTION_RESULT_OK .or. &
@@ -260,10 +380,10 @@ contains
 
     subroutine test_crash_after_conflict_rename()
         integer(c_int) :: child, wait_status, configured, killed, wait_rc
-        character(len=64) :: result_id
+        character(len=64) :: result_id, ids(2)
         type(action_result_store_t) :: recovered_store
         type(immutable_tree_entry_t), allocatable :: restored_entries(:)
-        integer :: init_status
+        integer :: init_status, tree_status
 
         call prepare_race_entries('crash-after')
         call action_result_publish(store, 'crash-after-action', race_entry_a, &
@@ -291,20 +411,35 @@ contains
             restored_entries, result_id, ierr)
         call test_assert_equal_int(suite, ACTION_RESULT_QUARANTINED, ierr, &
             'crash after conflict rename recovers as quarantined')
+        call action_result_conflicts(recovered_store, 'crash-after-action', &
+            ids, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_QUARANTINED, ierr, &
+            'recovered conflict record exposes both result IDs')
+        call test_assert(suite, includes_id(ids, race_result_a), &
+            'recovery retains the exact original result ID')
+        call test_assert(suite, includes_id(ids, race_result_b), &
+            'recovery retains the exact conflicting result ID')
+        call immutable_store_verify_tree(recovered_store%objects, race_result_a, &
+            tree_status)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, tree_status, &
+            'original manifest remains verifiable after conflict recovery')
+        call immutable_store_verify_tree(recovered_store%objects, race_result_b, &
+            tree_status)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, tree_status, &
+            'conflicting manifest remains verifiable after conflict recovery')
     end subroutine test_crash_after_conflict_rename
 
     subroutine test_complete_outputs()
-        character(len=512) :: sources(4), destination
-        integer :: i
-
-        character(len=512) :: c_source, object_file
+        character(len=512) :: sources(4), destinations(4), destination
+        character(len=512) :: c_source, object_file, consumer_source
         integer :: command_status, command_status_run, executable_index
+        integer :: archive_index, shared_index, runtime_index, i
 
         c_source = trim(root)//'/demo.c'
         object_file = trim(root)//'/demo.o'
         sources(1) = trim(root)//'/program'
         call write_text(trim(sources(1)), '#!/bin/sh'//achar(10)// &
-            'printf ACTION43'//achar(10))
+            'echo ACTION43'//achar(10))
         call execute_command_line('chmod 755 -- '//trim(sources(1)), &
             exitstat=command_status)
         call test_assert_equal_int(suite, 0, command_status, &
@@ -345,16 +480,25 @@ contains
             'result manifest retains every output')
         call test_assert(suite, has_role(restored, 'runtime-companion'), &
             'runtime companion is part of the result manifest')
+        call test_assert(suite, has_role(restored, 'archive'), &
+            'archive output is part of the result manifest')
+        call test_assert(suite, has_role(restored, 'shared-library'), &
+            'shared-library output is part of the result manifest')
 
         executable_index = role_index(restored, 'executable')
-        destination = trim(root)//'/restored-program'
-        call action_result_materialize_blob(store, &
-            restored(executable_index)%object_id, trim(destination), &
-            restored(executable_index)%mode, ierr)
-        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
-            'real executable payload materializes')
+        archive_index = role_index(restored, 'archive')
+        shared_index = role_index(restored, 'shared-library')
+        runtime_index = role_index(restored, 'runtime-companion')
+        do i = 1, size(restored)
+            destinations(i) = trim(root)//'/restored-'//trim(restored(i)%path)
+            call action_result_materialize_blob(store, restored(i)%object_id, &
+                trim(destinations(i)), restored(i)%mode, ierr)
+            call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+                'every manifest companion materializes for its consumer')
+        end do
+        destination = destinations(executable_index)
         call test_assert(suite, file_has_bytes(trim(destination), &
-            '#!/bin/sh'//achar(10)//'printf ACTION43'//achar(10)), &
+            '#!/bin/sh'//achar(10)//'echo ACTION43'//achar(10)), &
             'materialized executable bytes match producer output')
         call execute_command_line(trim(destination), exitstat=command_status_run, &
             cmdstat=command_status)
@@ -362,6 +506,25 @@ contains
             'materialized executable starts successfully')
         call test_assert_equal_int(suite, 0, command_status_run, &
             'materialized executable returns success')
+
+        consumer_source = trim(root)//'/consumer.c'
+        call write_text(trim(consumer_source), &
+            'int fx_demo(void); int main(void) { return fx_demo() == 43 ? 0 : 1; }'//achar(10))
+        call execute_command_line('cc '//trim(consumer_source)//' '// &
+            trim(destinations(archive_index))//' -o '//trim(root)// &
+            '/use-archive && '//trim(root)//'/use-archive', &
+            exitstat=command_status)
+        call test_assert_equal_int(suite, 0, command_status, &
+            'materialized archive links and runs in a real consumer')
+        call execute_command_line('cc '//trim(consumer_source)//' '// &
+            trim(destinations(shared_index))//' -Wl,-rpath,'//trim(root)// &
+            ' -o '//trim(root)//'/use-shared && '//trim(root)//'/use-shared', &
+            exitstat=command_status)
+        call test_assert_equal_int(suite, 0, command_status, &
+            'materialized shared library links and runs in a real consumer')
+        call test_assert(suite, file_has_bytes(trim(destinations(runtime_index)), &
+            'runtime companion data'), &
+            'materialized runtime companion bytes reach the consumer')
     end subroutine test_complete_outputs
 
     subroutine test_conflicting_publication()
