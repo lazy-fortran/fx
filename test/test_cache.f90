@@ -7,7 +7,9 @@ program test_cache
         test_assert_equal_int, test_assert_equal_str, &
         test_suite_summary, test_suite_exit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
-        c_null_char
+        c_int64_t, c_null_char
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, &
+        fx_test_sleep_ms
     implicit none
 
     interface
@@ -376,25 +378,16 @@ contains
 
     subroutine cleanup_tree(path)
         character(len=*), intent(in) :: path
+        integer :: ierr
 
-        call execute_command_line('rm -rf -- ' // trim(path))
+        ierr = fx_test_remove_tree(path)
+        if (ierr /= 0) error stop 'fixture tree removal failed'
     end subroutine cleanup_tree
 
     subroutine ensure_dir(path, ierr)
         character(len=*), intent(in) :: path
         integer, intent(out) :: ierr
-        integer :: exitstat
-        integer :: cmdstat
-        character(len=256) :: cmdmsg
-
-        call execute_command_line('mkdir -p -- ' // trim(path), &
-            exitstat=exitstat, cmdstat=cmdstat, &
-            cmdmsg=cmdmsg)
-        if (cmdstat == 0 .and. exitstat == 0) then
-            ierr = 0
-        else
-            ierr = 1
-        end if
+        ierr = fx_test_mkdir_p(path)
     end subroutine ensure_dir
 
     subroutine write_text_file(path, text, ierr)
@@ -571,20 +564,7 @@ contains
     subroutine wait_seconds(seconds, ierr)
         integer, intent(in) :: seconds
         integer, intent(out) :: ierr
-        integer :: exitstat
-        integer :: cmdstat
-        character(len=256) :: cmdmsg
-        character(len=16) :: seconds_text
-
-        write(seconds_text, '(I0)') seconds
-        call execute_command_line('sleep ' // trim(seconds_text), &
-            exitstat=exitstat, cmdstat=cmdstat, &
-            cmdmsg=cmdmsg)
-        if (cmdstat == 0 .and. exitstat == 0) then
-            ierr = 0
-        else
-            ierr = 1
-        end if
+        ierr = fx_test_sleep_ms(int(seconds, c_int64_t) * 1000_c_int64_t)
     end subroutine wait_seconds
 
     subroutine touch_older(path, hours, ierr)
@@ -626,7 +606,8 @@ contains
 
         counter = counter + 1
         write(counter_text, '(I0)') counter
-        path = '/tmp/fx-cache-' // trim(tag) // '-' // trim(counter_text)
+        path = '/tmp/fx cache;$(fixture)-' // trim(tag) // '-' // &
+            trim(counter_text)
     end function temp_root
 
 end program test_cache

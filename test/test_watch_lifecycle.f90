@@ -1,5 +1,6 @@
 program test_watch_lifecycle
     use, intrinsic :: iso_c_binding, only: c_int
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_rename
     use fx_watch, only: watcher_t, watcher_init, watcher_add, watcher_remove, &
         watcher_poll, watcher_close
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
@@ -28,14 +29,14 @@ program test_watch_lifecycle
     integer :: pid
 
     pid = getpid()
-    write (root, '(a,i0)') '/var/tmp/fx-watch-lifecycle-', pid
+    write (root, '(a,i0)') '/var/tmp/fx watch;$(fixture)-lifecycle-', pid
     call test_suite_init(suite, 'watch lifecycle')
     call test_repeated_add()
     call test_replaced_tree()
     call test_file_directory_replacement()
     call test_registration_failure()
     call test_poll_outcomes()
-    call command('rm -rf -- '//trim(root))
+    call remove_tree(trim(root))
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 contains
@@ -44,13 +45,29 @@ contains
         if (count < 0) error stop 'cannot enumerate process descriptors'
     end function descriptor_count
 
-    subroutine command(text)
-        character(len=*), intent(in) :: text
-        integer :: status
+    subroutine make_dir(path)
+        character(len=*), intent(in) :: path
+        integer :: ierr
 
-        call execute_command_line(text, exitstat=status)
-        if (status /= 0) error stop 'fixture command failed'
-    end subroutine command
+        ierr = fx_test_mkdir_p(path)
+        if (ierr /= 0) error stop 'fixture directory creation failed'
+    end subroutine make_dir
+
+    subroutine remove_tree(path)
+        character(len=*), intent(in) :: path
+        integer :: ierr
+
+        ierr = fx_test_remove_tree(path)
+        if (ierr /= 0) error stop 'fixture tree removal failed'
+    end subroutine remove_tree
+
+    subroutine rename_path(source, destination)
+        character(len=*), intent(in) :: source, destination
+        integer :: ierr
+
+        ierr = fx_test_rename(source, destination)
+        if (ierr /= 0) error stop 'fixture rename failed'
+    end subroutine rename_path
 
     subroutine write_input()
         integer :: unit
@@ -64,7 +81,7 @@ contains
         type(watcher_t) :: watch
         integer :: before, subscribed, ierr, i
 
-        call command('mkdir -p -- '//trim(root))
+        call make_dir(trim(root))
         call write_input()
         before = descriptor_count()
         call watcher_init(watch, ierr)
@@ -94,14 +111,14 @@ contains
         call watcher_add(watch, trim(root), .true., ierr)
         subscribed = descriptor_count()
         do i = 1, 16
-            call command('mv -- '//trim(root)//' '//trim(root)//'-retired')
-            call command('mkdir -p -- '//trim(root))
+            call rename_path(trim(root), trim(root)//'-retired')
+            call make_dir(trim(root))
             call write_input()
             call watcher_add(watch, trim(root), .true., ierr)
             call test_assert_equal_int(suite, 0, ierr, 'replacement refresh succeeds')
             call test_assert_equal_int(suite, subscribed, descriptor_count(), &
                 'replacement retires the superseded descriptors')
-            call command('rm -rf -- '//trim(root)//'-retired')
+            call remove_tree(trim(root)//'-retired')
         end do
         call write_input()
         do i = 1, 64
@@ -126,8 +143,8 @@ contains
         before = descriptor_count()
         call watcher_init(watch, ierr)
         call watcher_add(watch, trim(root), .true., ierr)
-        call command('rm -- '//trim(root)//'/input.f90')
-        call command('mkdir -- '//trim(root)//'/input.f90')
+        call remove_tree(trim(root)//'/input.f90')
+        call make_dir(trim(root)//'/input.f90')
         open (newunit=unit, file=trim(root)//'/input.f90/child', status='replace')
         write (unit, '(a)') 'before subscription'
         close (unit)
@@ -145,7 +162,7 @@ contains
             if (matched) exit
         end do
         call test_assert(suite, matched, 'file to directory replacement observes nested edit')
-        call command('rm -rf -- '//trim(root)//'/input.f90')
+        call remove_tree(trim(root)//'/input.f90')
         call write_input()
         do i = 1, 32
             call watcher_poll(watch, changed, kind, 0, got_event, ierr)
@@ -177,7 +194,7 @@ contains
         open (newunit=unit, file=trim(root)//'-replacement', status='replace')
         write (unit, '(a)') 'atomic replacement'
         close (unit)
-        call command('mv -- '//trim(root)//'-replacement '//trim(root)//'/input.f90')
+        call rename_path(trim(root)//'-replacement', trim(root)//'/input.f90')
         ignored = fail_registration_after(0)
         call watcher_poll(watch, changed, kind, 1000, got_event, ierr)
         call test_assert(suite, ierr /= 0, 'existing child registration failure propagates')

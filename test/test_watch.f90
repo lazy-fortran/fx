@@ -1,5 +1,8 @@
 program test_watch
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, &
+        c_null_char
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, &
+        fx_test_rename, fx_test_symlink, fx_test_sleep_ms
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, &
         test_suite_summary, test_suite_exit
@@ -72,7 +75,7 @@ contains
         nested = join_path(root, 'src/nested')
         file_path = join_path(nested, 'module.f90')
 
-        call run_cmd('mkdir -p -- ' // trim(nested))
+        call make_dir(nested)
         call write_file(file_path, 'module a')
 
         call watcher_init(w, ierr)
@@ -109,13 +112,13 @@ contains
         preexisting_file = join_path(new_dir, 'preexisting.f90')
         later_file = join_path(new_dir, 'later.f90')
 
-        call run_cmd('mkdir -p -- ' // trim(root))
+        call make_dir(root)
 
         call watcher_init(w, ierr)
         call watcher_add(w, root, .true., ierr)
         call test_assert_equal_int(suite, 0, ierr, 'new dir add ierr')
 
-        call run_cmd('mkdir -p -- ' // trim(new_dir))
+        call make_dir(new_dir)
         call write_file(preexisting_file, 'module preexisting')
         call watcher_poll(w, changed_path, event_type, 1000, got_event)
         call test_assert(suite, got_event, 'new dir create got event')
@@ -157,7 +160,7 @@ contains
         root = temp_root('selfwrite')
         file_path = join_path(root, 'self.f90')
 
-        call run_cmd('mkdir -p -- ' // trim(root))
+        call make_dir(root)
         call write_file(file_path, 'module self')
 
         call watcher_init(w, ierr)
@@ -200,7 +203,7 @@ contains
         child_file = join_path(child_dir, 'gone.f90')
         sibling_file = join_path(root, 'survivor.f90')
 
-        call run_cmd('mkdir -p -- ' // trim(child_dir))
+        call make_dir(child_dir)
         call write_file(child_file, 'module gone')
         call write_file(sibling_file, 'module survive')
 
@@ -208,7 +211,7 @@ contains
         call watcher_add(w, root, .true., ierr)
         call test_assert_equal_int(suite, 0, ierr, 'delete add ierr')
 
-        call run_cmd('rm -rf -- ' // trim(child_dir))
+        call remove_tree(child_dir)
         call poll_until_match(w, child_dir, WATCH_DELETE, 200, 10, &
             got_event, changed_path, event_type)
         call test_assert(suite, got_event, 'delete event received')
@@ -250,14 +253,14 @@ contains
         source_file = join_path(staging, 'incoming.f90')
         moved_file = join_path(root, 'arrived.f90')
 
-        call run_cmd('mkdir -p -- ' // trim(staging))
+        call make_dir(staging)
         call write_file(source_file, 'module incoming')
 
         call watcher_init(w, ierr)
         call watcher_add(w, root, .true., ierr)
         call test_assert_equal_int(suite, 0, ierr, 'moved add ierr')
 
-        call run_cmd('mv -- ' // trim(source_file) // ' ' // trim(moved_file))
+        call rename_path(source_file, moved_file)
         call poll_until_match(w, moved_file, WATCH_CREATE, 200, 10, &
             got_event, changed_path, event_type)
         call test_assert(suite, got_event, 'moved-to event received')
@@ -289,10 +292,10 @@ contains
         link_dir = join_path(root, 'link')
         target_file = join_path(target_dir, 'linked.f90')
 
-        call run_cmd('mkdir -p -- ' // trim(root))
-        call run_cmd('mkdir -p -- ' // trim(target_dir))
+        call make_dir(root)
+        call make_dir(target_dir)
         call write_file(target_file, 'module target')
-        call run_cmd('ln -s -- ' // trim(target_dir) // ' ' // trim(link_dir))
+        call make_symlink(target_dir, link_dir)
 
         call watcher_init(w, ierr)
         call watcher_add(w, root, .true., ierr)
@@ -321,7 +324,7 @@ contains
         root = temp_root('enospc')
         stderr_path = join_path(root, 'stderr.log')
 
-        call run_cmd('mkdir -p -- ' // trim(root))
+        call make_dir(root)
         call watcher_init(w, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'enospc init ierr')
 
@@ -347,17 +350,37 @@ contains
         call cleanup_tree(root)
     end subroutine test_watch_enospc_warning
 
-    subroutine run_cmd(cmd)
-        character(len=*), intent(in) :: cmd
-        integer :: exitstat
-        integer :: cmdstat
+    subroutine make_dir(path)
+        character(len=*), intent(in) :: path
+        integer :: ierr
 
-        call execute_command_line(trim(cmd), exitstat=exitstat, cmdstat=cmdstat, &
-            wait=.true.)
-        if (cmdstat /= 0 .or. exitstat /= 0) then
-            error stop 'command failed: ' // trim(cmd)
-        end if
-    end subroutine run_cmd
+        ierr = fx_test_mkdir_p(path)
+        if (ierr /= 0) error stop 'fixture directory creation failed'
+    end subroutine make_dir
+
+    subroutine remove_tree(path)
+        character(len=*), intent(in) :: path
+        integer :: ierr
+
+        ierr = fx_test_remove_tree(path)
+        if (ierr /= 0) error stop 'fixture tree removal failed'
+    end subroutine remove_tree
+
+    subroutine rename_path(source, destination)
+        character(len=*), intent(in) :: source, destination
+        integer :: ierr
+
+        ierr = fx_test_rename(source, destination)
+        if (ierr /= 0) error stop 'fixture rename failed'
+    end subroutine rename_path
+
+    subroutine make_symlink(target, link_path)
+        character(len=*), intent(in) :: target, link_path
+        integer :: ierr
+
+        ierr = fx_test_symlink(target, link_path)
+        if (ierr /= 0) error stop 'fixture symlink creation failed'
+    end subroutine make_symlink
 
     subroutine write_file(path, text)
         character(len=*), intent(in) :: path
@@ -389,18 +412,10 @@ contains
 
     subroutine wait_ms(ms)
         integer, intent(in) :: ms
-        integer :: start
-        integer :: current
-        integer :: rate
-        integer :: elapsed
+        integer :: ierr
 
-        call system_clock(count_rate=rate)
-        call system_clock(count=start)
-        do
-            call system_clock(count=current)
-            elapsed = (current - start) * 1000 / max(1, rate)
-            if (elapsed >= ms) exit
-        end do
+        ierr = fx_test_sleep_ms(int(ms, c_int64_t))
+        if (ierr /= 0) error stop 'monotonic fixture sleep failed'
     end subroutine wait_ms
 
     function temp_root(tag) result(path)
@@ -415,7 +430,8 @@ contains
         call system_clock(count=count)
         write(count_buf, '(i0)') count
         write(serial_buf, '(i0)') serial
-        path = '/tmp/fx-watch-' // trim(tag) // '-' // trim(count_buf) // &
+        path = '/tmp/fx watch;$(fixture)-' // trim(tag) // '-' // &
+            trim(count_buf) // &
             '-' // trim(serial_buf)
     end function temp_root
 
@@ -437,7 +453,7 @@ contains
         character(len=*), intent(in) :: path
 
         if (len_trim(path) == 0) return
-        call run_cmd('rm -rf -- ' // trim(path))
+        call remove_tree(path)
     end subroutine cleanup_tree
 
     subroutine read_text_file(path, text, ierr)

@@ -13,6 +13,7 @@ library = true
 
 [dev-dependencies]
 fx_mcp_test_os = { path = "test-support/fx_mcp_test_os" }
+fx_test_fs = { path = "test-support/fx_test_fs" }
 
 [[executable]]
 name = "fx-mcp-server"

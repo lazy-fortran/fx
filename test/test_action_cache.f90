@@ -9,6 +9,7 @@ program test_action_cache
     use fx_cache, only: cache_init, cache_store_bytes
     use fx_cache_key, only: cache_file_content_key
     use fx_cache_fs, only: cache_entry_path, CACHE_PATH_LEN
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_str, test_suite_summary, test_suite_exit
     implicit none
@@ -326,7 +327,7 @@ contains
         call cache_store_action(c, 'legacy-valid-action', object_file, root, '', &
             result_id, ierr)
         call test_assert(suite, ierr == 0, 'seed complete legacy compile record')
-        call execute_command_line('rm -rf -- '//trim(c%root_dir)//'/store/v2')
+        call remove_tree(trim(c%root_dir)//'/store/v2')
         call test_assert(suite, cache_lookup(c, 'legacy-valid-action'), &
             'validated legacy payloads lazily import into v2 result store')
 
@@ -336,7 +337,7 @@ contains
         call test_assert(suite, ierr == 0, 'seed second legacy compile record')
         call cache_debug_corrupt_object_payload(c, 'legacy-corrupt-action', ierr)
         call test_assert(suite, ierr == 0, 'corrupt only its old payload copy')
-        call execute_command_line('rm -rf -- '//trim(c%root_dir)//'/store/v2')
+        call remove_tree(trim(c%root_dir)//'/store/v2')
         call test_assert(suite, .not. cache_lookup(c, 'legacy-corrupt-action'), &
             'invalid legacy payload is rejected during lazy import')
         call cleanup_tree(root)
@@ -350,20 +351,31 @@ contains
 
         counter = counter + 1
         write (counter_text, '(I0)') counter
-        path = '/var/tmp/fx-action-'//trim(tag)//'-'//trim(counter_text)
+        path = '/var/tmp/fx action;$(fixture)-'//trim(tag)//'-'// &
+            trim(counter_text)
     end function temp_root
 
     subroutine make_dir(path)
         character(len=*), intent(in) :: path
+        integer :: ierr
 
-        call execute_command_line('mkdir -p -- '//trim(path))
+        ierr = fx_test_mkdir_p(path)
+        if (ierr /= 0) error stop 'fixture directory creation failed'
     end subroutine make_dir
 
     subroutine cleanup_tree(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('rm -rf -- '//trim(path))
+        call remove_tree(path)
     end subroutine cleanup_tree
+
+    subroutine remove_tree(path)
+        character(len=*), intent(in) :: path
+        integer :: ierr
+
+        ierr = fx_test_remove_tree(path)
+        if (ierr /= 0) error stop 'fixture tree removal failed'
+    end subroutine remove_tree
 
     subroutine write_file(path, content)
         character(len=*), intent(in) :: path, content
