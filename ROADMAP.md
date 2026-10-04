@@ -47,11 +47,10 @@ one immutable filesystem store shared by ordinary fo and Gremlin:
    visibility for action-result no-follow and locking APIs. Cold macOS
    publication/conflict/recovery oracles and the complete Linux fx gate pass
    without weakening either platform's semantics.
-7. **Active cleanup:** [#51](https://github.com/lazy-fortran/fx/issues/51)
-   removes the older immutable-store production test synchronization hooks found
-   during #44's final review. Independent Fortran oracles will control the same
-   real locks/process boundaries through test-only OS shims; collection remains
-   disabled and the Phase A public root/lease contract does not change.
+7. **Delivered through `afb7137`:** [#51](https://github.com/lazy-fortran/fx/issues/51)
+   removes the older immutable-store production synchronization hooks. Native
+   oracles observe real staging, admission and partial-copy crash behavior.
+   Collection remains disabled and the Phase A root/lease contract is unchanged.
 
 fo #165--#168 consumes those primitives as compact input generations,
 lane-private transactional build sessions, one ordinary/Gremlin build engine and
@@ -94,6 +93,26 @@ structured error offsets. Generic duplicate decoded keys remain valid JSON;
 domain validation owns duplicate-key rejection. The exact combined native
 parser/extraction gate passes 2/2 (each oracle below 0.01s), with no wider suite
 or cache reset. fo #150 remains the typed adapter adoption task.
+
+#51/#55/#56's integrated Linux gate at `afb7137` passes nine selected public
+targets in 31.06s, using exact fo driver SHA256
+`7dd3dfeedb313c04f6c8007ac4d1f6435274f13214186a532918dbe7d98c0c86`.
+The gate covers immutable store/materialization/publication/races, action-result
+store/read leases, immutable leases, MCP and watcher lifecycle. The 64 MiB
+partial-copy crash oracle is explicitly slow and uses the existing normal slow
+case budget. No blanket timeout increase or full-suite claim is made.
+
+#55 retires the executable-language compliance meta-test and its sole-use
+classifier/tracer/inventory machinery. Fortran test policy remains a source
+review rule, without a replacement runtime policing framework. Meaningful native
+OS/test helpers remain. #51 intentionally drops deterministic internal-phase
+pauses and forced automatic fallback; explicit COPY and public lifecycle oracles
+remain, without claiming identical phase-by-phase coverage.
+
+#56 restores Darwin feature declarations for immutable leases. Its Mac provider
+build passes; named Mac test linkage with an older fo bootstrap was blocked by
+missing test-only C helpers. Current-fo Mac verification remains pending, and
+the Linux lease receipts above do not substitute for it.
 
 #53's cleanup is integrated at `fc9a1ec`: production watcher controls, including
 the old synthetic ENOSPC trigger, are removed. Descriptor measurement lives in
