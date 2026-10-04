@@ -3,7 +3,8 @@ module action_publication_oracle
     use fx_proc, only: proc_pid
     use fx_action_result_store, only: action_result_action_key
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_lock, fx_test_unlock
-    use fx_test_process, only: test_process_identity, test_process_sleep_ms
+    use fx_test_process, only: test_process_identity, test_process_sleep_ms, &
+        test_process_wait_once
     implicit none
     private
     public :: publication_probe_t, publication_probe_lock, publication_probe_observe
@@ -37,19 +38,32 @@ contains
         if (probe%action_lock < 0) ierr = -1
     end subroutine publication_probe_lock
 
-    subroutine publication_probe_observe(probe, pid, pending_id, ierr)
+    subroutine publication_probe_observe(probe, pid, pending_id, ierr, &
+            child_exited, child_exit_status)
         type(publication_probe_t), intent(inout) :: probe
         integer, intent(in) :: pid
         character(len=*), intent(out) :: pending_id
         integer, intent(out) :: ierr
-        integer :: attempt
+        logical, intent(out), optional :: child_exited
+        integer, intent(out), optional :: child_exit_status
+        integer :: attempt, child_state, exit_status
 
         probe%pid = pid
         pending_id = ''
         ierr = -1
+        if (present(child_exited)) child_exited = .false.
         do attempt = 1, 1500
             call read_pending_id(probe, pending_id)
             if (len_trim(pending_id) == 64) exit
+            if (present(child_exited)) then
+                call test_process_wait_once(pid, exit_status, child_state)
+                if (child_state /= 0) then
+                    child_exited = .true.
+                    if (present(child_exit_status)) &
+                        child_exit_status = exit_status
+                    return
+                end if
+            end if
             call test_process_sleep_ms(10)
         end do
         if (len_trim(pending_id) /= 64) return

@@ -254,7 +254,11 @@ contains
         else
             call action_result_store_init(child_store, &
                 trim(base)//'/cache/store/v2', local_err)
-            if (local_err /= 0) stop 73
+            if (local_err /= 0) then
+                write (*, '(A,I0,2A)') 'action store init error=', local_err, &
+                    ' root=', trim(base)//'/cache/store/v2'
+                stop 73
+            end if
             paths = [character(len=512) :: trim(base)//'/source.o', &
                 trim(base)//'/widget.mod']
             outputs(1) = result_entry('object', 'object', 420)
@@ -346,8 +350,9 @@ contains
         character(len=*), intent(out) :: pending_id
         character(len=512) :: child_args(4)
         character(len=64) :: key
-        integer :: local_err
+        integer :: local_err, exit_status
         logical :: found
+        logical :: publisher_exited
 
         pid = -1
         call publication_probe_lock(trim(store_root), 'pending-action', probe, local_err)
@@ -361,7 +366,17 @@ contains
             call publication_probe_unlock(probe)
             return
         end if
-        call publication_probe_observe(probe, pid, pending_id, local_err)
+        call publication_probe_observe(probe, pid, pending_id, local_err, &
+            publisher_exited, exit_status)
+        if (publisher_exited) then
+            write (*, '(A,I0,2A)') 'pending publisher exited=', exit_status, &
+                ' store root=', trim(base)//'/cache/store/v2'
+            call test_assert(suite, .false., &
+                'publisher exited before pending lease was observable')
+            call publication_probe_unlock(probe)
+            pid = -1
+            return
+        end if
         call test_assert_equal_int(suite, 0, local_err, &
             'exact publisher identity waits after durable P observation')
         call test_assert(suite, len_trim(pending_id) == 64, &
