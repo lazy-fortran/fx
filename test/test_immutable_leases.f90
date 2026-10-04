@@ -1,4 +1,5 @@
 program test_immutable_leases
+    use, intrinsic :: iso_fortran_env, only: int64
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
@@ -9,26 +10,29 @@ program test_immutable_leases
         immutable_store_publication_lease_acquire, &
         immutable_store_publication_commit, immutable_store_read_lease_acquire, &
         immutable_store_lease_release
-    use fx_proc, only: proc_pid, proc_exec, proc_kill, proc_result_t
+    use fx_proc, only: proc_pid
+    use fx_test_process, only: test_process_spawn, test_process_wait_once, &
+        test_process_signal, test_process_clock_ms, test_process_sleep_ms
     implicit none
 
     type(test_suite_t) :: suite
     type(immutable_store_t) :: store
     type(immutable_lease_t) :: publication, reader
-    character(len=512) :: root, source, executable, marker, command, pid_text
+    character(len=512) :: root, source, executable, marker, argument
+    character(len=512) :: child_args(5)
     character(len=64) :: object_id, ids(1)
     character(len=8) :: kinds(1) = ['blob    ']
     character(len=1) :: bytes(8) = ['l', 'e', 'a', 's', 'e', 's', '!', char(10)]
     integer(kind=8) :: epoch1, epoch2, epoch3
-    integer :: ierr, status, ios, child_pid
-    logical :: exists
+    integer :: ierr, status, child_pid
+    logical :: exists, completed
 
-    call get_command_argument(1, command)
-    if (trim(command) == '--barrier-worker') then
+    call get_command_argument(1, argument)
+    if (trim(argument) == '--barrier-worker') then
         call barrier_worker()
         stop 0
     end if
-    if (trim(command) == '--crash-worker') then
+    if (trim(argument) == '--crash-worker') then
         call crash_worker()
         stop 0
     end if
@@ -81,16 +85,17 @@ program test_immutable_leases
 
     call get_command_argument(0, executable)
     marker = trim(root)//'/crash-ready'
-    command = '"'//trim(executable)//'" --crash-worker "'//trim(root)// &
-        '" "'//trim(object_id)//'" "'//trim(marker)//'" >/dev/null 2>&1 & echo $!'
-    call run_shell(trim(command), pid_text, status)
-    read(pid_text, *, iostat=ios) child_pid
-    call test_assert(suite, status == 0 .and. ios == 0, &
+    child_args = [character(len=512) :: trim(executable), '--crash-worker', &
+        trim(root), trim(object_id), trim(marker)]
+    call test_process_spawn(child_args, child_pid, ierr)
+    call test_assert_equal_int(suite, 0, ierr, &
         'crash worker starts as a separate process')
     call wait_for_file(trim(marker), exists)
     call test_assert(suite, exists, 'crash worker durably commits its root')
-    if (ios == 0) call proc_kill(child_pid, 9, ierr)
+    call test_process_signal(child_pid, 9, ierr)
     call test_assert(suite, ierr == 0, 'committed-root worker is killed')
+    call wait_for_child(child_pid, 5000, status, completed)
+    call test_assert(suite, completed, 'killed worker is reaped')
     call read_metadata_epoch(trim(root)//'/.fx-metadata/leases', epoch3, ierr)
     call test_assert_equal_int(suite, 0, ierr, &
         'restarted reader opens committed root metadata')
@@ -169,10 +174,9 @@ contains
         type(test_suite_t), intent(inout) :: s
         character(len=*), intent(in) :: base, id
         character(len=512) :: child, ready_a, ready_b, done_a, done_b
-        character(len=2048) :: release, shell_line
-        character(len=512) :: shell_output
-        integer :: shell_status
-        logical :: ready
+        character(len=512) :: release, arguments(9)
+        integer :: launch_error, pid_a, pid_b, exit_a, exit_b
+        logical :: ready, complete_a, complete_b
 
         call get_command_argument(0, child)
         ready_a = trim(base)//'/parallel-a-ready'
@@ -180,24 +184,33 @@ contains
         done_a = trim(base)//'/parallel-a-done'
         done_b = trim(base)//'/parallel-b-done'
         release = trim(base)//'/parallel-release'
-        shell_line = '"'//trim(child)//'" --barrier-worker "'//trim(base)// &
-            '" owner_d start_4 "'//id//'" "'//trim(ready_a)//'" "'// &
-            trim(release)//'" "'//trim(done_a)// &
-            '" >/dev/null 2>&1 & "'//trim(child)// &
-            '" --barrier-worker "'//trim(base)// &
-            '" owner_e start_5 "'//id//'" "'//trim(ready_b)//'" "'// &
-            trim(release)//'" "'//trim(done_b)//'" >/dev/null 2>&1 & exit 0'
-        call run_shell(trim(shell_line), shell_output, shell_status)
+        arguments = [character(len=512) :: trim(child), '--barrier-worker', &
+            trim(base), 'owner_d', 'start_4', trim(id), trim(ready_a), &
+            trim(release), trim(done_a)]
+        call test_process_spawn(arguments, pid_a, launch_error)
+        call test_assert_equal_int(s, 0, launch_error, 'publisher A launches')
+        arguments(4) = 'owner_e'
+        arguments(5) = 'start_5'
+        arguments(7) = trim(ready_b)
+        arguments(9) = trim(done_b)
+        call test_process_spawn(arguments, pid_b, launch_error)
+        call test_assert_equal_int(s, 0, launch_error, 'publisher B launches')
         call wait_for_file(trim(ready_a), ready)
         call test_assert(s, ready, 'publisher A holds its lease at barrier')
         call wait_for_file(trim(ready_b), ready)
         call test_assert(s, ready, 'publisher B holds its lease at barrier')
         call create_marker(trim(release))
-        call test_assert_equal_int(s, 0, shell_status, 'barrier workers launch')
+        call test_assert_equal_int(s, 0, launch_error, 'barrier workers launch')
         call wait_for_file(trim(done_a), ready)
         call test_assert(s, ready, 'publisher A commits after the barrier')
         call wait_for_file(trim(done_b), ready)
         call test_assert(s, ready, 'publisher B commits after the barrier')
+        call wait_for_child(pid_a, 15000, exit_a, complete_a)
+        call wait_for_child(pid_b, 15000, exit_b, complete_b)
+        call test_assert(s, complete_a, 'publisher A process is reaped')
+        call test_assert(s, complete_b, 'publisher B process is reaped')
+        call test_assert_equal_int(s, 0, exit_a, 'publisher A exits successfully')
+        call test_assert_equal_int(s, 0, exit_b, 'publisher B exits successfully')
         call assert_metadata_has(s, trim(base)//'/.fx-metadata/leases', &
             'R||owner_d|start_4|parallel|blob|'//id, &
             'concurrent publisher A root is retained')
@@ -231,24 +244,6 @@ contains
         close(unit)
     end subroutine create_marker
 
-    subroutine run_shell(line, output, exit_code)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: output
-        integer, intent(out) :: exit_code
-        ! Use fx_proc's subprocess wrapper so the oracle does not call shell APIs
-        ! from the production store implementation.
-        character(len=8192) :: argv(3)
-        type(proc_result_t) :: result
-
-        argv(1) = '/bin/sh'
-        argv(2) = '-c'
-        argv(3) = line
-        call proc_exec(argv, 3, result)
-        output = ''
-        if (allocated(result%stdout_text)) output = result%stdout_text
-        exit_code = result%exit_code
-    end subroutine run_shell
-
     subroutine wait_for_file(path, found)
         character(len=*), intent(in) :: path
         logical, intent(out) :: found
@@ -258,15 +253,43 @@ contains
         do i = 1, 500
             inquire(file=path, exist=found)
             if (found) return
-            call delay_tick()
+            call test_process_sleep_ms(10)
         end do
     end subroutine wait_for_file
 
-    subroutine delay_tick()
-        integer :: local_err
+    subroutine wait_for_child(pid, timeout_ms, exit_status, completed)
+        integer, intent(in) :: pid, timeout_ms
+        integer, intent(out) :: exit_status
+        logical, intent(out) :: completed
+        integer :: child_state, signal_error
+        integer(int64) :: deadline
 
-        call execute_command_line('sleep 0.01', wait=.true., exitstat=local_err)
-    end subroutine delay_tick
+        completed = .false.
+        exit_status = -1
+        deadline = test_process_clock_ms() + int(timeout_ms, int64)
+        do
+            call test_process_wait_once(pid, exit_status, child_state)
+            if (child_state == 1) then
+                completed = .true.
+                return
+            end if
+            if (child_state < 0) exit
+            if (test_process_clock_ms() >= deadline) exit
+            call test_process_sleep_ms(5)
+        end do
+        call test_process_signal(pid, 9, signal_error)
+        deadline = test_process_clock_ms() + 5000_int64
+        do
+            call test_process_wait_once(pid, exit_status, child_state)
+            if (child_state == 1) then
+                completed = .true.
+                return
+            end if
+            if (child_state < 0) exit
+            if (test_process_clock_ms() >= deadline) exit
+            call test_process_sleep_ms(5)
+        end do
+    end subroutine wait_for_child
 
     subroutine assert_metadata_has(s, path, needle, label)
         type(test_suite_t), intent(inout) :: s
