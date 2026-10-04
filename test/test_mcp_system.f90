@@ -1,11 +1,12 @@
 program test_mcp_system
-    use iso_c_binding, only: c_int,c_char,c_ptr,c_null_ptr,c_null_char,c_associated
+    use iso_c_binding, only: c_char
     use mcp_test_json, only: document_t,parse_json,child,string_is,atom_is,array_size
-    use fx_mcp_test_os, only: fx_test_spawn_argv, fx_test_is_executable, &
-        fx_test_write, fx_test_read, fx_test_close
+    use fx_test_process, only: test_process_t, test_process_spawn_piped, &
+        test_process_is_executable, test_process_write, test_process_read, &
+        test_process_close
     implicit none
     type :: session_t
-        type(c_ptr) :: handle=c_null_ptr
+        type(test_process_t) :: process
         character(len=:), allocatable :: pending
         logical :: io_failed=.false.
     end type
@@ -64,7 +65,7 @@ contains
         else
             path=sibling
         end if
-        found=fx_test_is_executable(trim(path)//c_null_char)==1
+        found=test_process_is_executable(trim(path))==1
     end subroutine
 
     logical function ends_with(text,suffix)
@@ -82,19 +83,13 @@ contains
         type(session_t)::s
         type(document_t)::d
         character(len=:),allocatable::response,request
-        character(kind=c_char),allocatable::arguments(:)
-        integer::position,i
-        integer::root,result,tools,error,code,bytes
+        integer::i
+        integer::root,result,tools,error,code,bytes,spawn_error
+        logical::timed_out
         character(len=32)::label
-        allocate(arguments(len_trim(path)+1))
-        position=1
-        do i=1,len_trim(path)
-            arguments(position)=path(i:i); position=position+1
-        end do
-        arguments(position)=c_null_char
-        s%handle=fx_test_spawn_argv(arguments,1_c_int,0_c_int)
-        call check(c_associated(s%handle),'server process starts')
-        if(.not.c_associated(s%handle)) return
+        call test_process_spawn_piped([trim(path)],s%process,.false.,spawn_error)
+        call check(spawn_error==0,'server process starts')
+        if(spawn_error/=0) return
         if(framed) then; label='Content-Length'; else; label='bare JSON'; end if
         write(*,'(A)') '--- '//trim(label)//' ---'
 
@@ -172,8 +167,8 @@ contains
         call send_request(s,'{"jsonrpc":"2.0","id":11,"method":"shutdown"}',framed)
         call receive_response(s,framed,response); call parse_json(response,d)
         call check(atom_is(d,child(d,1,'id'),'11').and.atom_is(d,child(d,1,'result'),'null'),'shutdown responds')
-        code=fx_test_close(s%handle,3000); s%handle=c_null_ptr
-        call check(code==0,'server exits cleanly within bounded shutdown')
+        call test_process_close(s%process,3000,code,timed_out)
+        call check(code==0.and..not.timed_out,'server exits cleanly within bounded shutdown')
     end subroutine
 
     function boundary_request(target,id,nbytes) result(out)
@@ -206,8 +201,8 @@ contains
     subroutine send_raw(s,bytes)
         type(session_t),intent(inout)::s
         character(len=*),intent(in)::bytes
-        integer(c_int)::n
-        n=fx_test_write(s%handle,bytes,int(len(bytes),c_int))
+        integer::n
+        n=test_process_write(s%process%input_fd,bytes)
         call check(n==len(bytes),'request bytes written')
     end subroutine
 
@@ -260,9 +255,9 @@ contains
         type(session_t),intent(inout)::s
         character(kind=c_char)::buf(8192)
         character(len=8192)::chunk
-        integer(c_int)::n
+        integer::n
         integer::i
-        n=fx_test_read(s%handle,buf,8192_c_int,10000_c_int)
+        n=test_process_read(s%process%output_fd,buf,10000)
         if(n<=0) then
             s%io_failed=.true.
             call check(.false.,'server output arrives before timeout')
