@@ -25,7 +25,7 @@ program test_immutable_leases
     character(len=1) :: bytes(8) = ['l', 'e', 'a', 's', 'e', 's', '!', char(10)]
     integer(kind=8) :: epoch1, epoch2, epoch3
     integer :: ierr, status, child_pid
-    logical :: exists, completed
+    logical :: exists, completed, child_exited
 
     call get_command_argument(1, argument)
     if (trim(argument) == '--barrier-worker') then
@@ -92,7 +92,16 @@ program test_immutable_leases
     call test_process_spawn(child_args, child_pid, ierr)
     call test_assert_equal_int(suite, 0, ierr, &
         'crash worker starts as a separate process')
-    call wait_for_file(trim(marker), exists)
+    call wait_for_file(trim(marker), exists, child_pid, status, child_exited)
+    if (child_exited) then
+        write (*, '(A,I0,2A)') 'crash worker exited=', status, &
+            ' store root=', trim(root)
+        call test_assert(suite, .false., &
+            'crash worker exited before durable root marker')
+        call test_suite_summary(suite)
+        call test_suite_exit(suite)
+        stop
+    end if
     call test_assert(suite, exists, 'crash worker durably commits its root')
     call test_process_signal(child_pid, 9, ierr)
     call test_assert(suite, ierr == 0, 'committed-root worker is killed')
@@ -125,6 +134,11 @@ contains
         call get_command_argument(3, child_id)
         call get_command_argument(4, ready)
         call immutable_store_init(child_store, trim(child_root), local_err)
+        if (local_err /= IMMUTABLE_OK) then
+            write (*, '(A,I0,2A)') 'crash worker store init error=', &
+                local_err, ' root=', trim(child_root)
+            stop 41
+        end if
         child_ids(1) = child_id
         call immutable_store_root_set(child_store, 'crash_owner', 'crash_start', &
             'recovered', child_kinds, child_ids, local_err)

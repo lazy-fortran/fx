@@ -51,6 +51,8 @@ program test_action_result_read_lease
     call test_assert_equal_int(suite, 0, cleanup, 'isolated fixture root created')
     store_root = trim(root)//'/store/v2'
     call action_result_store_init(store, trim(store_root), ierr)
+    if (ierr /= 0) write (*, '(A,I0,2A)') 'action store init error=', &
+        ierr, ' root=', trim(store_root)
     call test_assert_equal_int(suite, 0, ierr, 'action result store initializes')
     call get_command_argument(0, executable)
     call test_pending_publication(.false.)
