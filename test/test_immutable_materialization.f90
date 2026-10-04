@@ -1,5 +1,6 @@
 program test_immutable_materialization
-    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_long_long, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_long_long, c_null_char, &
+        c_ptr, c_associated
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, test_suite_exit
@@ -16,6 +17,9 @@ program test_immutable_materialization
         IMMUTABLE_MATERIALIZE_COPY, IMMUTABLE_MATERIALIZE_CLONE
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_materialize_tree, immutable_store_verify_tree
+    use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
+        owned_begin_path, owned_fd, owned_finish, owned_dispose, owned_close, &
+        owned_hash_fd
     use fx_immutable_manifest, only: immutable_entries_canonical, immutable_manifest_serialize
     implicit none
     interface
@@ -32,6 +36,13 @@ program test_immutable_materialization
             character(kind=c_char), intent(in) :: path(*)
             integer(c_long_long), intent(out) :: id
         end function clone_id
+        integer(c_int) function fill_blob(handle, source, strategy, cloned) &
+                bind(C, name='fx_owned_fill')
+            import :: c_int, c_ptr
+            type(c_ptr), value :: handle
+            integer(c_int), value :: source, strategy
+            integer(c_int), intent(out) :: cloned
+        end function fill_blob
     end interface
     type(test_suite_t) :: suite
     type(immutable_store_t) :: store
@@ -81,6 +92,7 @@ program test_immutable_materialization
     call test_collisions()
     call test_clone_and_fallback()
     call test_materialization_contract()
+    call test_open_descriptor_survives_unlink()
     call test_failed_materialization_preserves_destination()
     call test_materialization_crash()
     call test_suite_summary(suite)
@@ -227,6 +239,76 @@ contains
             observed == 'OUTSIDE MATERIALIZATION SENTINEL', &
             'materialization leaves the unrelated outside file unchanged')
     end subroutine test_materialization_contract
+
+    subroutine test_open_descriptor_survives_unlink()
+        character(len=512) :: destination
+        character(len=64) :: observed_id
+        character(len=:), allocatable :: stored, observed
+        type(c_ptr) :: transaction
+        integer(c_int) :: root_fd, source_fd, status, cleanup, cloned
+        integer :: ierr, local_err, ios
+
+        destination = trim(root)//'/materialization-held-fd/destination'
+        local_err = fx_test_mkdir_p(trim(root)//'/materialization-held-fd')
+        call test_assert_equal_int(suite, 0, local_err, &
+            'held-descriptor destination parent is created')
+        stored = immutable_store_blob_path(store, blob)
+        root_fd = owned_open_store(store%root_dir//c_null_char)
+        if (root_fd < 0_c_int) then
+            call test_assert(suite, .false., 'store descriptor opens')
+            return
+        end if
+        call owned_open_verified(root_fd, 1_c_int, blob, source_fd, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'blob opens and verifies before its path is removed')
+        if (ierr /= IMMUTABLE_OK) then
+            cleanup = owned_close(root_fd)
+            return
+        end if
+        transaction = owned_begin_path(trim(destination)//c_null_char, 0_c_int)
+        call test_assert(suite, c_associated(transaction), &
+            'private materialization transaction opens')
+        if (.not. c_associated(transaction)) then
+            cleanup = owned_close(source_fd)
+            cleanup = owned_close(root_fd)
+            return
+        end if
+        local_err = fx_test_remove_tree(stored)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'source pathname unlinks while the verified descriptor stays open')
+        if (local_err /= 0) then
+            call owned_dispose(transaction)
+            cleanup = owned_close(source_fd)
+            cleanup = owned_close(root_fd)
+            return
+        end if
+        status = fill_blob(transaction, source_fd, &
+            int(IMMUTABLE_MATERIALIZE_COPY, c_int), cloned)
+        cleanup = owned_close(source_fd)
+        call test_assert_equal_int(suite, 0, int(status), &
+            'copy reads the already-open blob after unlink')
+        if (status == 0_c_int) then
+            call owned_hash_fd(owned_fd(transaction), observed_id, ierr)
+            call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+                'copied bytes hash independently after source unlink')
+            call test_assert_equal_str(suite, blob, observed_id, &
+                'held-descriptor copy retains the published blob identity')
+            if (ierr == IMMUTABLE_OK .and. observed_id == blob) then
+                status = owned_finish(transaction, 420_c_int)
+                call test_assert_equal_int(suite, 0, int(status), &
+                    'verified held-descriptor bytes publish atomically')
+            else
+                status = -1_c_int
+            end if
+        end if
+        call owned_dispose(transaction)
+        cleanup = owned_close(root_fd)
+        if (status == 0_c_int) then
+            call read_text(trim(destination), observed, ios)
+            call test_assert(suite, ios == 0 .and. observed == PAYLOAD, &
+                'published output retains actual source bytes after unlink')
+        end if
+    end subroutine test_open_descriptor_survives_unlink
 
     subroutine test_failed_materialization_preserves_destination()
         character(len=512) :: destination
