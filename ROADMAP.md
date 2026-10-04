@@ -6,16 +6,18 @@ fo/FortFront diagnostic contract. It does not define parsing or lowering.
 
 ## Current truth and priority
 
-Current integration head is `084bac3`; `6beeec4` is the immutable-store
+Current integration head is `ecca77c`; `6beeec4` is the immutable-store
 implementation checkpoint and `c1da80d` is the watcher-lifecycle checkpoint. The digest-part concurrency issue #36 and watcher
 issues #39/#40 are closed with behavioral evidence. The active provider work is
 one immutable filesystem store shared by ordinary fo and Gremlin:
 
 1. **Complete:** [#42](https://github.com/lazy-fortran/fx/issues/42) publishes
    verified raw blobs and canonical trees without rewriting existing content.
-2. [#43](https://github.com/lazy-fortran/fx/issues/43) publishes complete action
-   results and reports conflicting outputs for one action instead of overwriting.
-3. [#44](https://github.com/lazy-fortran/fx/issues/44) first lands owner/reason
+2. **Complete through `ecca77c`:** [#43](https://github.com/lazy-fortran/fx/issues/43)
+   publishes complete action results, materializes complete executable/archive/
+   shared/runtime graphs and durably quarantines conflicting outputs for one
+   action instead of overwriting.
+3. **Active:** [#44](https://github.com/lazy-fortran/fx/issues/44) first lands owner/reason
    roots plus read/publication leases and a monotonic epoch with collection
    disabled. After fo exposes complete semantic roots, its second phase collects
    only unreachable objects with bounded, crash-safe work.
