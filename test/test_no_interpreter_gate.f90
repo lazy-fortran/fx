@@ -2,14 +2,14 @@ program test_no_interpreter_gate
     use, intrinsic :: iso_c_binding, only: c_char, c_null_char
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_suite_summary, test_suite_exit
-    use fx_proc, only: proc_result_t, proc_exec, proc_exec_silent, &
-        proc_pid, proc_scan_files, proc_file_read, proc_file_write
+    use fx_proc, only: proc_exec_silent, proc_pid, proc_scan_files, &
+        proc_file_read, proc_file_write
     use fx_test_executable_policy, only: forbidden_executable
     use fx_test_process, only: test_process_trace_execs, &
         test_process_is_executable, test_process_trace_supported, &
         test_process_spawn, test_process_sleep_ms
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, &
-        fx_test_symlink, fx_test_chmod
+        fx_test_symlink, fx_test_chmod, fx_test_source_files
     implicit none
 
     integer, parameter :: TRACE_CAPACITY = 1024 * 1024
@@ -60,8 +60,8 @@ program test_no_interpreter_gate
 
     call check_command_names()
     call check_shebang_forms()
-    call check_tracked_inventory('.', 0, 'repository')
-    call check_temporary_tracked_mutants()
+    call check_source_inventory_controls()
+    call check_source_inventory('.', 0, 'repository')
     call check_generated_inventory()
     call check_generated_outputs()
     trace_supported = test_process_trace_supported()
@@ -182,85 +182,56 @@ contains
         end do
     end subroutine check_shebang_forms
 
-    subroutine check_tracked_inventory(directory, expected, label)
+    subroutine check_source_inventory(directory, expected, label)
         character(len=*), intent(in) :: directory, label
         integer, intent(in) :: expected
-        type(proc_result_t) :: listing
+        character(len=:), allocatable :: files(:)
         character(len=:), allocatable :: path
-        character(len=4096) :: arguments(4)
-        integer :: start, finish, next_line, forbidden_count, file_count
-        arguments(1) = 'git'
-        arguments(2) = '-C'
-        arguments(3) = directory
-        arguments(4) = 'ls-files'
-        call proc_exec(arguments, 4, listing)
-        call check_equal(listing%exit_code, 0, label//' tracked inventory succeeds')
-        forbidden_count = 0
-        file_count = 0
-        start = 1
-        do while (start <= len(listing%stdout_text))
-            next_line = index(listing%stdout_text(start:), achar(10))
-            finish = len(listing%stdout_text)
-            if (next_line > 0) finish = start + next_line - 2
-            if (finish >= start) then
-                path = directory//'/'//listing%stdout_text(start:finish)
-                file_count = file_count + 1
-                if (forbidden_executable(path, read_shebang(path))) then
-                    forbidden_count = forbidden_count + 1
-                    if (expected == 0) call check(.false., &
-                        'tracked interpreter executable: '//path)
-                end if
-            end if
-            if (next_line == 0) exit
-            start = finish + 2
-        end do
-        call check(file_count > 0, label//' tracked inventory is nonempty')
-        call check_equal(forbidden_count, expected, &
-            label//' tracked interpreter controls are classified')
-    end subroutine check_tracked_inventory
+        integer :: ierr, i, forbidden_count
 
-    subroutine check_temporary_tracked_mutants()
-        character(len=:), allocatable :: directory, path
-        character(len=4096) :: arguments(7)
-        integer :: ierr, i, unit
-        directory = root//'/tracked-controls'
-        call check_equal(fx_test_mkdir_p(directory), 0, &
-            'temporary tracked-control repository is created')
-        arguments(1) = 'git'
-        arguments(2) = '-C'
-        arguments(3) = directory
-        arguments(4) = 'init'
-        arguments(5) = '--quiet'
-        arguments(6) = '--template='
-        call proc_exec_silent(arguments, 6, ierr)
-        call check_equal(ierr, 0, 'temporary native Git repository initializes')
-        do i = 1, size(mutant_names)
-            path = directory//'/control_'//trim(mutant_names(i))//'.fixture'
-            call write_generated_control(path, &
-                '#!/usr/bin/env '//trim(mutant_names(i)))
+        call fx_test_source_files(directory, files, ierr)
+        call check_equal(ierr, 0, label//' source inventory succeeds')
+        forbidden_count = 0
+        do i = 1, size(files)
+            path = trim(files(i))
+            if (forbidden_executable(path, read_shebang(path))) then
+                forbidden_count = forbidden_count + 1
+                if (expected == 0) call check(.false., &
+                    'source-tree interpreter executable: '//path)
+            end if
         end do
-        do i = 1, size(mutant_classes)
-            path = directory//'/extension_'//trim(mutant_classes(i))// &
-                trim(mutant_extensions(i))
-            call write_generated_control(path, trim(mutant_source(i)))
-        end do
-        call write_generated_control(directory//'/env_assignment.fixture', &
-            '#!/usr/bin/env FOO=bar python3')
-        call write_generated_control(directory//'/env_unset.fixture', &
-            '#!/usr/bin/env -u FOO python3')
-        open (newunit=unit, file=directory//'/native.f90', status='replace')
+        call check(size(files) > 0, label//' source inventory is nonempty')
+        call check_equal(forbidden_count, expected, &
+            label//' interpreter controls are classified')
+    end subroutine check_source_inventory
+
+    subroutine check_source_inventory_controls()
+        character(len=:), allocatable :: directory
+        integer :: ierr, unit
+
+        directory = root//'/exported-source'
+        call check_equal(fx_test_mkdir_p(directory//'/src'), 0, &
+            'exported source fixture is created without Git metadata')
+        call check_equal(fx_test_mkdir_p(directory//'/.git/hooks'), 0, &
+            'ignored Git metadata directory is created')
+        call check_equal(fx_test_mkdir_p(directory//'/build/scripts'), 0, &
+            'ignored generated build directory is created')
+        open (newunit=unit, file=directory//'/src/native.f90', status='replace')
         write (unit, '(A)') 'program native_control'
         write (unit, '(A)') 'end program'
         close (unit)
-        arguments(4) = 'add'
-        arguments(5) = '-f'
-        arguments(6) = '--'
-        arguments(7) = '.'
-        call proc_exec_silent(arguments, 7, ierr)
-        call check_equal(ierr, 0, 'temporary Fortran-generated controls are indexed')
-        call check_tracked_inventory(directory, size(mutant_names) + &
-            size(mutant_classes) + 2, 'temporary controls')
-    end subroutine check_temporary_tracked_mutants
+        call write_generated_control(directory// &
+            '/.git/hooks/ignored.py', '#!/usr/bin/env python3')
+        call write_generated_control(directory//'/build/scripts/ignored.sh', &
+            '#!/bin/sh')
+
+        call check_source_inventory(directory, 0, &
+            'exported source with only ignored generated controls')
+        call write_generated_control(directory//'/src/forbidden.py', &
+            '#!/usr/bin/env python3')
+        call check_source_inventory(directory, 1, &
+            'exported source with injected interpreter script')
+    end subroutine check_source_inventory_controls
 
     subroutine check_generated_inventory()
         character(len=:), allocatable :: files(:), path, fixture_path
