@@ -7,8 +7,9 @@ program test_mcp_system
             import c_ptr,c_char
             character(kind=c_char), intent(in) :: path(*)
         end function
-        integer(c_int) function fx_test_find_server(path,n) bind(C)
+        integer(c_int) function fx_test_find_server(test_binary,path,n) bind(C)
             import c_int,c_char
+            character(kind=c_char), intent(in) :: test_binary(*)
             character(kind=c_char), intent(out) :: path(*)
             integer(c_int), value :: n
         end function
@@ -63,9 +64,13 @@ contains
 
     subroutine find_server(path)
         character(len=*),intent(out)::path
+        character(len=4096)::test_binary
         integer(c_int)::found
+        integer::n
         path=' '
-        found=fx_test_find_server(path,int(len(path),c_int))
+        test_binary=' '
+        call get_command_argument(0,test_binary,length=n)
+        found=fx_test_find_server(trim(test_binary)//c_null_char,path,int(len(path),c_int))
         if(found==0) path=' '
     end subroutine
 

@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
-#include <glob.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -17,20 +16,42 @@ typedef struct {
     int output;
 } fx_test_child;
 
-int fx_test_find_server(char *out, int capacity) {
-    const char *override = getenv("FX_MCP_SERVER");
-    glob_t matches;
-    const char *path = NULL;
-    if (override && access(override, X_OK) == 0) path = override;
-    else if (glob("build/*/app/fx-mcp-server", 0, NULL, &matches) == 0) {
-        if (matches.gl_pathc > 0) path = matches.gl_pathv[0];
-        if (path && strlen(path) < (size_t)capacity) strcpy(out, path);
-        globfree(&matches);
-        return path && strlen(path) < (size_t)capacity ? 1 : 0;
+static int fx_test_build(void) {
+    pid_t pid = fork();
+    int status = 0, elapsed = 0;
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        execlp("fpm", "fpm", "build", (char *)NULL);
+        _exit(127);
     }
-    if (!path || strlen(path) >= (size_t)capacity) return 0;
-    strcpy(out, path);
-    return 1;
+    while (elapsed <= 300000) {
+        pid_t result = waitpid(pid, &status, WNOHANG);
+        if (result == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (result < 0 && errno != EINTR) return 0;
+        struct timespec delay = {0, 10000000};
+        nanosleep(&delay, NULL);
+        elapsed += 10;
+    }
+    kill(pid, SIGKILL);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return 0;
+}
+
+int fx_test_find_server(const char *test_binary, char *out, int capacity) {
+    const char *override = getenv("FX_MCP_SERVER");
+    const char *slash = strrchr(test_binary, '/');
+    if (override && access(override, X_OK) == 0) {
+        if (strlen(override) >= (size_t)capacity) return 0;
+        strcpy(out, override);
+        return 1;
+    }
+    if (!slash) return 0;
+    size_t directory_len = (size_t)(slash - test_binary);
+    if (directory_len + sizeof("/../app/fx-mcp-server") > (size_t)capacity) return 0;
+    memcpy(out, test_binary, directory_len);
+    strcpy(out + directory_len, "/../app/fx-mcp-server");
+    if (!fx_test_build()) return 0;
+    return access(out, X_OK) == 0;
 }
 
 void *fx_test_spawn(const char *path) {
