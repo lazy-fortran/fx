@@ -109,19 +109,22 @@ OS/test helpers remain. #51 intentionally drops deterministic internal-phase
 pauses and forced automatic fallback; explicit COPY and public lifecycle oracles
 remain, without claiming identical phase-by-phase coverage.
 
-#56 restores Darwin feature declarations for immutable leases. Its Mac provider
-build passes. Current-Fo verification exposed unsupported `sigtimedwait` in the
-shared test helper. Published narrow helper repair `e427a10` clears that compile
-failure; both Mac lease/read-lease tests then time out at their unchanged 10s
-budget (child STOP 42/73). Those source sites report publication-lease acquisition
-and action-store initialization errors; the next execution must expose return
-statuses/resolved paths and stop parent waits on child failure before altering
-budgets. The runtime cause remains unknown. Linux receipts do not substitute
-for Mac success; helper promotion and runtime repair remain parked.
+#56's runtime repair is integrated through `cabf848`. The root cause was Darwin's
+ordinary `/var/tmp` alias, which descriptor-rooted creation rejected before
+initializing the store or restoring an artifact. Resolve caller root aliases
+once and restoration parents before entering the existing no-follow operations;
+preserve owned final-name publication. The shared test helper drains SIGPIPE
+using supported POSIX calls, and failed child startup now ends the observer
+promptly with its real diagnostic.
 
-The latest replacement workspace AGENTS instruction permits only documents and
-issue maintenance until a new execution trigger. All workers and owned jobs are
-stopped; source task branches, failures and exact driver receipts are preserved.
+Exact task source `894ff9a` passes native immutable lease/read-lease cases on
+faepmac1 (0.46s/1.33s) using pinned Fo SHA256 `f68e0916`, and the same two-case
+Linux gate passes (6.89s) with pinned Fo SHA256 `206228c5`. No timeout was raised.
+Linux receipt SHA256:
+`a1bc2278710df3810cef7af4bbdaa3cc177d4182c9cc100695f29fe1c568042f`.
+Source integration preserves the tested patch; prior failures remain historical
+evidence. Broader platform coverage remains explicit rather than implied by
+these two targets. Execution is authorized again under the continuation request.
 
 #53's cleanup is integrated at `fc9a1ec`: production watcher controls, including
 the old synthetic ENOSPC trigger, are removed. Descriptor measurement lives in
