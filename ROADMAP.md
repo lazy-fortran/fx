@@ -159,6 +159,20 @@ and owner roots, while fx supplies deterministic clocks/limits for behavioral
 oracles. Ordinary one-shot fo retains its stat-memo-assisted fast path and is
 not required to recapture a complete tree merely to use this store.
 
+## Remove compliance meta-testing (#55)
+
+The initial audit found no repository-documentation conformity tests. Further
+inspection found an actual implementation-policy meta-test: the 558-line
+`test_no_interpreter_gate`, its executable/shebang classifier and dedicated
+process-tracing machinery. [#55](https://github.com/lazy-fortran/fx/issues/55)
+removes that registered target, its separate CI step and sole-consumer helpers.
+Fortran remains the implementation requirement, checked during source review;
+no replacement runtime compliance/security framework or doc/layout test is added.
+Retain native process/filesystem APIs used by public MCP/store/watch oracles.
+Coordinate #51's shared test-support additions, and verify retained behavior with
+existing focused native targets. This removes policy enforcement cost without
+claiming a measured speedup or deleting meaningful product behavior.
+
 ## Delivery gate
 
 Cache changes need a behavioral producer/consumer oracle, forced misses for
