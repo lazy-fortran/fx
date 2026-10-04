@@ -158,6 +158,18 @@ contains
         end if
         if (ierr /= ACTION_RESULT_OK) return
         call action_result_read_lookup(store, read, entries, result_id, ierr)
+        if (ierr == ACTION_RESULT_MISSING) then
+            call action_result_read_release(store, read, release_status)
+            if (release_status /= ACTION_RESULT_OK) then
+                ierr = ACTION_RESULT_IO_ERROR
+                return
+            end if
+            call import_legacy_compile_result(c, store, action_id, ierr)
+            if (ierr /= ACTION_RESULT_OK) return
+            call action_result_read_acquire(store, action_id, read, ierr)
+            if (ierr /= ACTION_RESULT_OK) return
+            call action_result_read_lookup(store, read, entries, result_id, ierr)
+        end if
         if (ierr /= ACTION_RESULT_OK) then
             call action_result_read_release(store, read, release_status)
         end if
