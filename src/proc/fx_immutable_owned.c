@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <unistd.h>
 #ifdef __linux__
 #include <linux/fs.h>
@@ -31,11 +32,13 @@ void fx_immutable_publish_pause(const char *path);
 void fx_immutable_eexist_record(void);
 
 typedef struct {
-    int parent, fd, staging, tree, published;
+    int parent, fd, staging, tree, published, published_fd;
     char temp[96], name[PATH_MAX], display[PATH_MAX];
 } owned_t;
 static _Atomic unsigned long serial;
 static int force_copy;
+static int no_atomic_clone;
+void fx_owned_test_no_atomic_clone(int forced) { no_atomic_clone = forced; }
 void fx_owned_test_force_copy(int forced) { force_copy = forced; }
 static int dir_flags(void) { return O_RDONLY | O_DIRECTORY | O_NOFOLLOW; }
 
@@ -113,6 +116,7 @@ void *fx_owned_begin_at(int parent, const char *name, int tree)
     if (!t) return NULL;
     t->parent = dup(parent);
     t->fd = -1;
+    t->published_fd = -1;
     t->staging = -1;
     t->tree = tree;
     strcpy(t->name, name);
@@ -206,17 +210,78 @@ int fx_owned_fill(void *handle, int input, int strategy, int *cloned)
     }
     return 0;
 }
-static int publish_owned_file(owned_t *t)
+static int publish_owned_file(owned_t *t, int cas)
 {
 #ifdef __linux__
+    (void)cas;
     /* /proc's fd link binds the held inode even for an unprivileged caller. */
     char source[64];
     snprintf(source, sizeof(source), "/proc/self/fd/%d", t->fd);
     return linkat(AT_FDCWD, source, t->parent, t->name, AT_SYMLINK_FOLLOW);
-#else
-    /* The staging directory is exclusively owned and retained by descriptor. */
+#elif defined(__APPLE__)
+    if (cas) {
+        if (no_atomic_clone) { errno = ENOTSUP; return -1; }
+        /* Atomic exclusive clone from the verified descriptor, never its name. */
+        return fclonefileat(t->fd, t->parent, t->name, CLONE_NOOWNERCOPY);
+    }
     return linkat(t->staging, "payload", t->parent, t->name, 0);
+#else
+    (void)cas;
+    errno = ENOTSUP;
+    return -1;
 #endif
+}
+static int retain_publication(owned_t *t, int cas)
+{
+    t->published = 1;
+#ifdef __APPLE__
+    if (cas) t->published_fd = openat(t->parent, t->name, O_RDONLY | O_NOFOLLOW);
+    else
+#endif
+    t->published_fd = dup(t->fd);
+    if (t->published_fd < 0) return -1;
+    if (!fx_owned_same_entry(t->parent, t->name, t->published_fd)) return -1;
+    return 0;
+}
+static int lock_parent(owned_t *t)
+{
+    int rc;
+    do { rc = flock(t->parent, LOCK_EX); } while (rc != 0 && errno == EINTR);
+    return rc;
+}
+static int publish_boundary(owned_t *t, int cas)
+{
+    int rc;
+    if (cas && lock_parent(t) != 0) return -1;
+    if (t->tree) {
+#if defined(__linux__) && defined(SYS_renameat2)
+        rc = (int)syscall(SYS_renameat2, t->parent, t->temp,
+            t->parent, t->name, RENAME_NOREPLACE);
+#elif defined(__APPLE__)
+        rc = renameatx_np(t->parent, t->temp, t->parent, t->name, RENAME_EXCL);
+#else
+        return 2;
+#endif
+    } else {
+        rc = publish_owned_file(t, cas);
+    }
+    if (rc != 0) {
+        if (cas && errno == EEXIST && fsync(t->parent) == 0) {
+            fx_immutable_eexist_record();
+            rc = 1;
+            goto done;
+        }
+        rc = (errno == ENOTSUP || errno == EOPNOTSUPP) ? 2 : -1;
+        goto done;
+    }
+    if (retain_publication(t, cas) != 0 || fsync(t->published_fd) != 0) {
+        rc = -1;
+        goto done;
+    }
+    rc = fsync(t->parent);
+done:
+    if (cas && flock(t->parent, LOCK_UN) != 0) return -1;
+    return rc;
 }
 static int finish_owned(owned_t *t, int mode, int cas)
 {
@@ -231,26 +296,8 @@ static int finish_owned(owned_t *t, int mode, int cas)
             !fx_owned_same_entry(t->staging, "payload", t->fd)) return -1;
     }
     if (fchmod(t->fd, (mode_t)mode) != 0 || fsync(t->fd) != 0) return -1;
-    if (t->tree) {
-#if defined(__linux__) && defined(SYS_renameat2)
-        rc = (int)syscall(SYS_renameat2, t->parent, t->temp,
-            t->parent, t->name, RENAME_NOREPLACE);
-#elif defined(__APPLE__)
-        rc = renameatx_np(t->parent, t->temp, t->parent, t->name, RENAME_EXCL);
-#else
-        return 2;
-#endif
-    } else rc = publish_owned_file(t);
-    if (rc != 0) {
-        if (cas && errno == EEXIST && fsync(t->parent) == 0) {
-            fx_immutable_eexist_record();
-            return 1;
-        }
-        return -1;
-    }
-    t->published = 1;
-    if (!fx_owned_same_entry(t->parent, t->name, t->fd)) return -1;
-    rc = fsync(t->parent);
+    if (cas) fx_immutable_owned_pause(8, t->display);
+    rc = publish_boundary(t, cas);
     if (rc == 0 && cas) fx_immutable_owned_pause(7, t->display);
     return rc;
 }
@@ -259,11 +306,17 @@ int fx_owned_publish(void *handle) { return finish_owned(handle, 0444, 1); }
 int fx_owned_reject(void *handle)
 {
     owned_t *t = handle;
+    int rc = 0;
     if (!t->published) return 0;
-    if (!fx_owned_same_entry(t->parent, t->name, t->fd)) return -1;
-    if (unlinkat(t->parent, t->name, 0) != 0) return -1;
-    t->published = 0;
-    return fsync(t->parent);
+    fx_immutable_owned_pause(9, t->display);
+    if (lock_parent(t) != 0) return -1;
+    /* The held-directory lock excludes valid publishers across check/unlink. */
+    if (fx_owned_same_entry(t->parent, t->name, t->published_fd)) {
+        if (unlinkat(t->parent, t->name, 0) != 0) rc = -1;
+        else { t->published = 0; rc = fsync(t->parent); }
+    }
+    if (flock(t->parent, LOCK_UN) != 0) rc = -1;
+    return rc;
 }
 int fx_owned_write(void *handle, const char *text, int count)
 {
@@ -335,6 +388,7 @@ void fx_owned_dispose(void *handle)
         if (removed == 0 && fx_owned_same_entry(t->parent, t->temp, t->staging))
             (void)unlinkat(t->parent, t->temp, AT_REMOVEDIR);
     }
+    if (t->published_fd >= 0) close(t->published_fd);
     close(t->fd);
     close(t->staging);
     close(t->parent);

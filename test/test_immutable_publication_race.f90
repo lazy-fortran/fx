@@ -1,5 +1,5 @@
-program test_immutable_publication
-    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_loc, &
+program test_immutable_publication_race
+    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_loc, c_long_long, &
         c_null_char, c_null_ptr
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_suite_summary, test_suite_exit
@@ -8,11 +8,32 @@ program test_immutable_publication
     use fx_hash, only: sha256_string
     use fx_immutable_store, only: immutable_store_t, immutable_tree_entry_t, &
         immutable_store_init, immutable_store_put_blob, immutable_store_blob_path, &
-        immutable_store_tree_path, IMMUTABLE_OK, IMMUTABLE_BLOB
+        immutable_store_tree_path, IMMUTABLE_OK, IMMUTABLE_BLOB, IMMUTABLE_UNSUPPORTED
     use fx_immutable_tree, only: immutable_store_put_tree
     use fx_immutable_manifest, only: immutable_manifest_serialize
     implicit none
     interface
+        subroutine chain(first, second, ready, release, after_ready, after_release) &
+                bind(C, name='fx_immutable_owned_test_chain')
+            import :: c_int, c_char
+            integer(c_int), value :: first, second
+            character(kind=c_char), intent(in) :: ready(*), release(*)
+            character(kind=c_char), intent(in) :: after_ready(*), after_release(*)
+        end subroutine chain
+        subroutine no_atomic_clone(forced) bind(C, name='fx_owned_test_no_atomic_clone')
+            import :: c_int
+            integer(c_int), value :: forced
+        end subroutine no_atomic_clone
+        integer(c_int) function is_apfs(path) bind(C, name='fx_immutable_is_apfs')
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: path(*)
+        end function is_apfs
+        integer(c_int) function file_info(path, bytes, mtime, inode) &
+                bind(C, name='fx_immutable_file_info')
+            import :: c_int, c_char, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: bytes, mtime, inode
+        end function file_info
         integer(c_int) function tmp_root(out, cap) &
                 bind(C, name='fx_immutable_test_tmp_root')
             import :: c_int, c_char
@@ -85,16 +106,19 @@ program test_immutable_publication
     call test_assert_equal_int(suite, 0, int(status), 'physical system scratch resolves')
     end_path = index(scratch, c_null_char)
     if (end_path <= 1) stop 20
-    write (root, '(a,i0)') scratch(1:end_path - 1)//'/fx-publish42-', proc_pid()
+    write (root, '(a,i0)') scratch(1:end_path - 1)//'/fx-publish42-late-', proc_pid()
     trial = 0
     do kind = 1, 2
-        do phase = 5, 7
-            do attack = 1, 2
-                if (phase == 7 .and. attack == 2) cycle
-                trial = trial + 1
-                call test_capture(kind, phase, attack, trial)
-            end do
+        do attack = 1, 2
+            trial = trial + 1
+            call test_after_check(kind, attack, trial)
         end do
+        trial = trial + 1
+        call test_cleanup_winner(kind, trial)
+        if (is_apfs(trim(root)//c_null_char) == 1_c_int) then
+            trial = trial + 1
+            call test_atomic_unavailable(kind, trial)
+        end if
     end do
     call test_suite_summary(suite)
     call test_suite_exit(suite)
@@ -177,75 +201,178 @@ contains
         entry%mode = 420
     end function tree_entry
 
-    subroutine test_capture(kind, phase, attack, trial)
-        integer, intent(in) :: kind, phase, attack, trial
+    subroutine test_after_check(kind, attack, trial)
+        integer, intent(in) :: kind, attack, trial
         type(immutable_store_t) :: store
         character(len=64) :: id
-        character(len=:), allocatable :: base, expected, observed, final, temp
-        integer(c_int) :: pid, child_status, actual_mode, checked
-        integer :: result, ios
-        logical :: found, exists
+        character(len=:), allocatable :: base, expected, temp, final
+        integer(c_int) :: pid, changed
         base = trim(root)//'/case-'//number(trial)
         call fixture(base, kind, store, id, expected)
         call write_text(base//'/sentinel', 'OUTSIDE SENTINEL')
-        final = immutable_store_blob_path(store, id)
-        if (kind == 2) final = immutable_store_tree_path(store, id)
-        pid = spawn_worker(base, kind, phase)
-        call test_assert(suite, pid > 0, 'independent publication worker starts')
+        final = canonical(store, kind, id)
+        pid = spawn_worker(base, kind, 8)
+        call test_assert(suite, pid > 0, 'late publication worker starts')
         if (pid <= 0) return
-        call wait_marker(base//'/ready', found)
-        call test_assert(suite, found, 'worker reaches exact capture/publication boundary')
-        temp = ''
-        if (found) then
-            call read_text(base//'/ready', temp, ios)
-            call test_assert_equal_int(suite, 0, ios, 'boundary records owned temporary')
-            ios = index(temp, achar(10))
-            if (ios > 0) temp = temp(:ios - 1)
-            temp = trim(temp)
-            call replace_entry(base, temp, final, phase, attack)
+        call boundary(base//'/ready', temp)
+        changed = rename_path(temp//c_null_char, (temp//'.held')//c_null_char)
+        call test_assert_equal_int(suite, 0, int(changed), 'entry moves after final ownership check')
+        if (attack == 1) then
+            changed = symlink_path((base//'/sentinel')//c_null_char, temp//c_null_char)
+            call test_assert_equal_int(suite, 0, int(changed), 'late entry becomes outside symlink')
+        else
+            call write_text(temp, 'ARBITRARY SUBSTITUTED BYTES')
         end if
         call write_text(base//'/release', 'release')
-        call wait_worker(pid, child_status)
-        call test_assert_equal_int(suite, 0, int(child_status), 'publication worker exits normally')
-        call read_text(base//'/result', observed, ios)
-        result = IMMUTABLE_OK
-        if (ios == 0) read (observed, *, iostat=ios) result
-        call test_assert_equal_int(suite, 0, ios, 'worker reports real API status')
-        call test_assert(suite, result /= IMMUTABLE_OK, 'substitution/corruption never reports success')
-        inquire (file=final, exist=exists)
-        call test_assert(suite, .not. exists, 'arbitrary bytes are absent under requested object ID')
-        call read_text(base//'/sentinel', observed, ios)
-        call test_assert(suite, ios == 0 .and. observed == 'OUTSIDE SENTINEL', &
-            'outside sentinel bytes survive capture and publication')
-        actual_mode = -1_c_int
-        checked = path_mode((base//'/sentinel')//c_null_char, actual_mode)
-        call test_assert(suite, checked == 0 .and. actual_mode == 420, &
-            'outside sentinel permissions survive')
-        if (found) then
-            inquire (file=path_dirname(temp), exist=exists)
-            call test_assert(suite, .not. exists, 'owned temporary root and all entries are cleaned')
-        end if
-    end subroutine test_capture
+        call result_after_wait(pid, base, IMMUTABLE_OK)
+        call check_bytes(final, expected, 'descriptor publication preserves original bytes')
+        call check_outside_and_temps(base, temp)
+        call retry(store, base, kind, id)
+        call check_bytes(final, expected, 'retry keeps the correct canonical object')
+    end subroutine test_after_check
 
-    subroutine replace_entry(base, temp, final, phase, attack)
-        character(len=*), intent(in) :: base, temp, final
-        integer, intent(in) :: phase, attack
-        integer(c_int) :: renamed, linked
-        if (phase == 7) then
-            linked = chmod_path(final//c_null_char, 420_c_int)
-            call test_assert_equal_int(suite, 0, int(linked), 'published captured inode becomes writable')
-            call poison_existing(final)
-            return
-        end if
-        renamed = rename_path(temp//c_null_char, (temp//'.held')//c_null_char)
-        call test_assert_equal_int(suite, 0, int(renamed), 'captured entry is renamed before release')
-        if (attack == 1) then
-            linked = symlink_path((base//'/sentinel')//c_null_char, temp//c_null_char)
-            call test_assert_equal_int(suite, 0, int(linked), 'captured entry substitutes outside symlink')
+    subroutine test_cleanup_winner(kind, trial)
+        integer, intent(in) :: kind, trial
+        type(immutable_store_t) :: store
+        character(len=64) :: id
+        character(len=:), allocatable :: base, expected, temp, final, marker
+        integer(c_int) :: pid, changed
+        integer(c_long_long) :: winner_inode
+        base = trim(root)//'/case-'//number(trial)
+        call fixture(base, kind, store, id, expected)
+        call write_text(base//'/sentinel', 'OUTSIDE SENTINEL')
+        final = canonical(store, kind, id)
+        pid = spawn_worker(base, kind, 9)
+        call test_assert(suite, pid > 0, 'rejected publication worker starts')
+        if (pid <= 0) return
+        call boundary(base//'/ready', temp)
+        changed = chmod_path(final//c_null_char, 420_c_int)
+        call test_assert_equal_int(suite, 0, int(changed), 'actual published inode can be poisoned')
+        call poison_existing(final)
+        call write_text(base//'/release', 'release')
+        call boundary(base//'/cleanup-ready', marker)
+        changed = rename_path(final//c_null_char, (base//'/rejected-object')//c_null_char)
+        call test_assert_equal_int(suite, 0, int(changed), 'rejected inode leaves canonical slot')
+        call retry(store, base, kind, id)
+        winner_inode = inode_of(final)
+        call test_assert(suite, winner_inode > 0, 'concurrent valid winner has real inode')
+        call write_text(base//'/cleanup-release', 'release')
+        call result_after_wait(pid, base, -1)
+        call test_assert(suite, inode_of(final) == winner_inode, &
+            'rejection cleanup preserves the concurrent winner inode')
+        call check_bytes(final, expected, 'concurrent winner retains actual valid bytes')
+        call check_outside_and_temps(base, temp)
+        call retry(store, base, kind, id)
+    end subroutine test_cleanup_winner
+
+    subroutine test_atomic_unavailable(kind, trial)
+        integer, intent(in) :: kind, trial
+        type(immutable_store_t) :: store
+        character(len=64) :: id
+        character(len=:), allocatable :: base, expected, final
+        integer(c_int) :: pid
+        logical :: exists
+        base = trim(root)//'/case-'//number(trial)
+        call fixture(base, kind, store, id, expected)
+        final = canonical(store, kind, id)
+        pid = spawn_worker(base, kind, 10)
+        if (pid <= 0) stop 29
+        call result_after_wait(pid, base, IMMUTABLE_UNSUPPORTED)
+        inquire (file=final, exist=exists)
+        call test_assert(suite, .not. exists, 'no pathname fallback when atomic clone is unavailable')
+        call retry(store, base, kind, id)
+        call check_bytes(final, expected, 'retry after atomic clone failure publishes correct bytes')
+    end subroutine test_atomic_unavailable
+
+    function canonical(store, kind, id) result(path)
+        type(immutable_store_t), intent(in) :: store
+        integer, intent(in) :: kind
+        character(len=*), intent(in) :: id
+        character(len=:), allocatable :: path
+        path = immutable_store_blob_path(store, id)
+        if (kind == 2) path = immutable_store_tree_path(store, id)
+    end function canonical
+
+    subroutine boundary(ready, temp)
+        character(len=*), intent(in) :: ready
+        character(len=:), allocatable, intent(out) :: temp
+        logical :: found
+        integer :: ios
+        call wait_marker(ready, found)
+        call test_assert(suite, found, 'worker reaches the exact late boundary')
+        if (.not. found) stop 28
+        call read_text(ready, temp, ios)
+        call test_assert_equal_int(suite, 0, ios, 'owned temporary is recorded')
+        ios = index(temp, achar(10))
+        if (ios > 0) temp = temp(:ios - 1)
+        temp = trim(temp)
+    end subroutine boundary
+
+    subroutine result_after_wait(pid, base, expected)
+        integer(c_int), intent(in) :: pid
+        character(len=*), intent(in) :: base
+        integer, intent(in) :: expected
+        integer(c_int) :: child_status
+        character(len=:), allocatable :: observed
+        integer :: result, ios
+        call wait_worker(pid, child_status)
+        call test_assert_equal_int(suite, 0, int(child_status), 'worker exits normally')
+        call read_text(base//'/result', observed, ios)
+        if (ios == 0) read (observed, *, iostat=ios) result
+        call test_assert_equal_int(suite, 0, ios, 'worker reports the actual library status')
+        if (ios /= 0) return
+        if (expected == -1) then
+            call test_assert(suite, result /= IMMUTABLE_OK, 'poisoned publication fails verification')
         else
-            call write_text(temp, 'ARBITRARY UNVERIFIED BYTES')
+            call test_assert_equal_int(suite, expected, result, 'expected publication outcome')
         end if
-    end subroutine replace_entry
+    end subroutine result_after_wait
+
+    subroutine check_bytes(path, expected, label)
+        character(len=*), intent(in) :: path, expected, label
+        character(len=:), allocatable :: observed
+        integer :: ios
+        call read_text(path, observed, ios)
+        call test_assert(suite, ios == 0 .and. observed == expected, label)
+    end subroutine check_bytes
+
+    subroutine check_outside_and_temps(base, temp)
+        character(len=*), intent(in) :: base, temp
+        integer(c_int) :: checked, mode
+        logical :: exists
+        call check_bytes(base//'/sentinel', 'OUTSIDE SENTINEL', 'outside sentinel survives')
+        mode = -1_c_int
+        checked = path_mode((base//'/sentinel')//c_null_char, mode)
+        call test_assert(suite, checked == 0 .and. mode == 420, 'outside sentinel mode survives')
+        inquire (file=path_dirname(temp), exist=exists)
+        call test_assert(suite, .not. exists, 'owned temporary root is completely cleaned')
+    end subroutine check_outside_and_temps
+
+    function inode_of(path) result(inode)
+        character(len=*), intent(in) :: path
+        integer(c_long_long) :: inode, bytes, mtime
+        integer(c_int) :: checked
+        inode = -1_c_long_long
+        checked = file_info(path//c_null_char, bytes, mtime, inode)
+        if (checked /= 0_c_int) inode = -1_c_long_long
+    end function inode_of
+
+    subroutine retry(store, base, kind, expected_id)
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: base, expected_id
+        integer, intent(in) :: kind
+        type(immutable_tree_entry_t) :: entry(1)
+        character(len=64) :: id
+        integer :: ierr
+        if (kind == 1) then
+            call immutable_store_put_blob(store, base//'/source', id, ierr)
+        else
+            entry(1) = tree_entry(sha256_string(PAYLOAD))
+            call immutable_store_put_tree(store, entry, id, ierr)
+        end if
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'retry publishes/reuses correct object')
+        call test_assert(suite, id == expected_id, 'retry returns the independently expected ID')
+    end subroutine retry
 
     function spawn_worker(base, kind, phase) result(pid)
         character(len=*), intent(in) :: base
@@ -286,8 +413,17 @@ contains
         read (argument, *) phase
         call immutable_store_init(store, trim(base)//'/store', ierr)
         if (ierr /= IMMUTABLE_OK) call exit_child(25_c_int)
-        call configure(int(phase, c_int), (trim(base)//'/ready')//c_null_char, &
-            (trim(base)//'/release')//c_null_char)
+        if (phase == 9) then
+            call chain(7_c_int, 9_c_int, (trim(base)//'/ready')//c_null_char, &
+                (trim(base)//'/release')//c_null_char, &
+                (trim(base)//'/cleanup-ready')//c_null_char, &
+                (trim(base)//'/cleanup-release')//c_null_char)
+        else if (phase == 10) then
+            call no_atomic_clone(1_c_int)
+        else
+            call configure(int(phase, c_int), (trim(base)//'/ready')//c_null_char, &
+                (trim(base)//'/release')//c_null_char)
+        end if
         if (kind == 1) then
             call immutable_store_put_blob(store, trim(base)//'/source', id, ierr)
         else
@@ -328,4 +464,4 @@ contains
         waited = wait_child(pid, status, 0_c_int)
         status = 999_c_int
     end subroutine wait_worker
-end program test_immutable_publication
+end program test_immutable_publication_race

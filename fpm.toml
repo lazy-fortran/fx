@@ -48,3 +48,8 @@ main = "test_immutable_materialization.f90"
 name = "test_immutable_publication"
 source-dir = "test"
 main = "test_immutable_publication.f90"
+
+[[test]]
+name = "test_immutable_publication_race"
+source-dir = "test"
+main = "test_immutable_publication_race.f90"
