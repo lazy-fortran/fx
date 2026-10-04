@@ -25,6 +25,7 @@
 #endif
 int fx_immutable_open_directory(const char *path);
 int fx_immutable_mkdirs_sync(const char *path);
+int fx_immutable_resolve_root(const char *path, char *resolved, size_t capacity);
 int fx_immutable_tempfile(int directory, const char *name);
 
 typedef struct {
@@ -123,7 +124,7 @@ void *fx_owned_begin_at(int parent, const char *name, int tree)
 }
 void *fx_owned_begin_path(const char *path, int tree)
 {
-    char parent[PATH_MAX];
+    char parent[PATH_MAX], resolved_parent[PATH_MAX];
     const char *slash = strrchr(path, '/');
     const char *name = slash ? slash + 1 : path;
     size_t length = slash ? (size_t)(slash - path) : 1;
@@ -133,8 +134,10 @@ void *fx_owned_begin_path(const char *path, int tree)
     if (length >= sizeof(parent)) return NULL;
     if (slash) { memcpy(parent, path, length); parent[length] = '\0'; }
     else strcpy(parent, ".");
-    if (fx_immutable_mkdirs_sync(parent) != 0) return NULL;
-    fd = fx_immutable_open_directory(parent);
+    if (fx_immutable_resolve_root(parent, resolved_parent,
+                                  sizeof(resolved_parent)) != 0 ||
+        fx_immutable_mkdirs_sync(resolved_parent) != 0) return NULL;
+    fd = fx_immutable_open_directory(resolved_parent);
     if (fd < 0) return NULL;
     t = fx_owned_begin_at(fd, name, tree);
     close(fd);
