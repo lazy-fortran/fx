@@ -5,6 +5,7 @@ module fx_test_fs
     public :: fx_test_mkdir_p, fx_test_remove_tree, fx_test_rename
     public :: fx_test_symlink, fx_test_chmod, fx_test_sleep_ms
     public :: fx_test_lock, fx_test_unlock
+    public :: fx_test_descriptor_count
     public :: fx_test_source_files
 
     integer, parameter :: PATH_MAX_LEN = 4096
@@ -18,6 +19,10 @@ module fx_test_fs
             import :: c_int
             integer(c_int), value :: fd
         end function c_unlock
+        integer(c_int) function c_descriptor_count() &
+                bind(C, name='fx_test_fs_descriptor_count')
+            import :: c_int
+        end function c_descriptor_count
         integer(c_int) function c_mkdir_p(path) &
                 bind(C, name='fx_test_fs_mkdir_p')
             import :: c_char, c_int
@@ -155,6 +160,10 @@ contains
         ierr = int(c_unlock(int(fd, c_int)))
         fd = -1
     end function fx_test_unlock
+
+    integer function fx_test_descriptor_count() result(count)
+        count = c_descriptor_count()
+    end function fx_test_descriptor_count
 
     integer function fx_test_mkdir_p(path) result(ierr)
         character(len=*), intent(in) :: path

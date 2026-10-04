@@ -26,40 +26,6 @@
 #define PATH_MAX 4096
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
-static int fx_inotify_force_enospc_once = 0;
-#endif
-
-/* Deterministic watcher lifecycle oracles, like the existing ENOSPC hook. */
-#ifdef __APPLE__
-static int fx_registration_fail_after = -1;
-#endif
-int fx_c_watch_test_fail_registration_after(int successful_calls)
-{
-#ifdef __APPLE__
-    fx_registration_fail_after = successful_calls;
-    return 1;
-#else
-    (void)successful_calls;
-    return 0;
-#endif
-}
-int fx_c_watch_test_descriptor_count(void)
-{
-    DIR *directory = opendir("/dev/fd");
-    struct dirent *entry;
-    int count = 0;
-    if (directory == NULL) return -1;
-    while ((entry = readdir(directory)) != NULL) {
-        char *end;
-        long fd = strtol(entry->d_name, &end, 10);
-        if (*end || fd < 0 || fd > INT_MAX || fd == dirfd(directory)) continue;
-        if (fcntl((int)fd, F_GETFD) >= 0) ++count;
-    }
-    closedir(directory);
-    return count;
-}
-
 /*
  * fx_sys.c: C implementations for fx_proc.f90 Fortran interfaces.
  * Provides process execution, directory scanning, file I/O, and
@@ -443,13 +409,6 @@ int fx_c_kill(int pid, int signal)
 {
     return kill((pid_t)pid, signal);
 }
-
-#if defined(__linux__) || defined(__APPLE__)
-void fx_c_inotify_test_force_enospc_once(void)
-{
-    fx_inotify_force_enospc_once = 1;
-}
-#endif
 
 int fx_c_stderr_redirect(const char *path)
 {
@@ -1219,14 +1178,6 @@ int fx_c_inotify_add_watch(int fd, const char *path, int mask)
     if (state == NULL) return -1;
 
     fx_trim_path(path, clean, sizeof(clean));
-    if (fx_inotify_force_enospc_once) {
-        fx_inotify_force_enospc_once = 0;
-        errno = ENOSPC;
-        fprintf(stderr,
-                "fx_watch: inotify watch limit reached for %s\n",
-                clean);
-        return -1;
-    }
     effective_mask = mask;
     if (fx_path_kind(clean, &is_dir, &is_symlink_dir) == 0 &&
         is_symlink_dir && is_dir) {
@@ -1486,12 +1437,6 @@ static void fx_kq_child_remove_at(kq_watch_t *w, size_t idx)
 static int fx_kq_register(int kq, int fd, void *udata)
 {
     struct kevent kev;
-    if (fx_registration_fail_after == 0) {
-        fx_registration_fail_after = -1;
-        errno = ENOSPC;
-        return -1;
-    }
-    if (fx_registration_fail_after > 0) --fx_registration_fail_after;
     EV_SET(&kev, (uintptr_t) fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
            NOTE_WRITE | NOTE_DELETE | NOTE_RENAME | NOTE_EXTEND, 0, udata);
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) return -1;
@@ -1662,14 +1607,6 @@ int fx_c_inotify_add_watch(int fd, const char *path, int mask)
 
     fx_trim_path(path, clean, sizeof(clean));
 
-    if (fx_inotify_force_enospc_once) {
-        fx_inotify_force_enospc_once = 0;
-        errno = ENOSPC;
-        fprintf(stderr,
-                "fx_watch: inotify watch limit reached for %s\n", clean);
-        return -1;
-    }
-
     if (fx_path_kind(clean, &is_dir, &is_symlink_dir) != 0) return -1;
     if (!is_dir) return -1;
     for (w = s->watches; w != NULL; w = w->next) {
@@ -1817,7 +1754,6 @@ int fx_c_inotify_poll(int fd, char *path_buf, int path_len,
 }
 
 #else /* other platforms: stubs without a file-watch backend */
-void fx_c_inotify_test_force_enospc_once(void) { }
 int fx_c_inotify_init(void) { return -1; }
 int fx_c_inotify_add_watch(int fd, const char *path, int mask)
     { (void)fd; (void)path; (void)mask; return -1; }

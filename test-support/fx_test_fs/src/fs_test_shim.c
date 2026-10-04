@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -187,6 +188,22 @@ int fx_test_fs_unlock(int fd)
     int result = flock(fd, LOCK_UN);
     if (close(fd) != 0) result = -1;
     return result;
+}
+
+int fx_test_fs_descriptor_count(void)
+{
+    DIR *directory = opendir("/dev/fd");
+    struct dirent *entry;
+    int count = 0;
+    if (directory == NULL) return -1;
+    while ((entry = readdir(directory)) != NULL) {
+        char *end;
+        long fd = strtol(entry->d_name, &end, 10);
+        if (*end || fd < 0 || fd > INT_MAX || fd == dirfd(directory)) continue;
+        if (fcntl((int)fd, F_GETFD) >= 0) ++count;
+    }
+    closedir(directory);
+    return count;
 }
 
 static int safe_fixture_root(const char *path)

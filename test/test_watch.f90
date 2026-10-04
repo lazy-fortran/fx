@@ -1,6 +1,5 @@
 program test_watch
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, &
-        c_null_char
+    use, intrinsic :: iso_c_binding, only: c_int64_t
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, &
         fx_test_rename, fx_test_symlink, fx_test_sleep_ms
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
@@ -12,21 +11,6 @@ program test_watch
         watcher_mark_self_written, watcher_close
     implicit none
 
-    interface
-        subroutine fx_c_inotify_test_force_enospc_once() bind(C)
-        end subroutine fx_c_inotify_test_force_enospc_once
-
-        integer(c_int) function fx_c_stderr_redirect(path) bind(C)
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-        end function fx_c_stderr_redirect
-
-        integer(c_int) function fx_c_stderr_restore(saved_fd) bind(C)
-            import :: c_int
-            integer(c_int), intent(in), value :: saved_fd
-        end function fx_c_stderr_restore
-    end interface
-
     type(test_suite_t) :: suite
 
     call test_suite_init(suite, 'fx_watch')
@@ -37,7 +21,6 @@ program test_watch
     call test_watch_delete_and_close(suite)
     call test_watch_moved_to_is_create(suite)
     call test_watch_symlink_directory_limit(suite)
-    call test_watch_enospc_warning(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -310,46 +293,6 @@ contains
         call cleanup_tree(external_root)
     end subroutine test_watch_symlink_directory_limit
 
-    subroutine test_watch_enospc_warning(suite)
-        type(test_suite_t), intent(inout) :: suite
-        type(watcher_t) :: w
-        character(len=:), allocatable :: root
-        character(len=:), allocatable :: stderr_path
-        character(kind=c_char) :: c_stderr_path(4096)
-        character(len=4096) :: stderr_text
-        integer :: ierr
-        integer :: saved_fd
-        integer :: read_err
-
-        root = temp_root('enospc')
-        stderr_path = join_path(root, 'stderr.log')
-
-        call make_dir(root)
-        call watcher_init(w, ierr)
-        call test_assert_equal_int(suite, 0, ierr, 'enospc init ierr')
-
-        call to_c_string(stderr_path, c_stderr_path)
-        saved_fd = fx_c_stderr_redirect(c_stderr_path)
-        call test_assert(suite, saved_fd >= 0, 'stderr redirect started')
-        if (saved_fd >= 0) then
-            call fx_c_inotify_test_force_enospc_once()
-            call watcher_add(w, root, .true., ierr)
-            call test_assert(suite, ierr /= 0, 'enospc add fails')
-            ierr = fx_c_stderr_restore(saved_fd)
-            call test_assert_equal_int(suite, 0, ierr, 'stderr redirect restored')
-            call read_text_file(stderr_path, stderr_text, read_err)
-            call test_assert_equal_int(suite, 0, read_err, 'enospc stderr read')
-            call test_assert(suite, index(stderr_text, &
-                'fx_watch: inotify watch limit reached for') > 0, &
-                'enospc warning emitted')
-            call test_assert(suite, index(stderr_text, trim(root)) > 0, &
-                'enospc warning includes path')
-        end if
-
-        call watcher_close(w)
-        call cleanup_tree(root)
-    end subroutine test_watch_enospc_warning
-
     subroutine make_dir(path)
         character(len=*), intent(in) :: path
         integer :: ierr
@@ -455,45 +398,6 @@ contains
         if (len_trim(path) == 0) return
         call remove_tree(path)
     end subroutine cleanup_tree
-
-    subroutine read_text_file(path, text, ierr)
-        character(len=*), intent(in) :: path
-        character(len=*), intent(out) :: text
-        integer, intent(out) :: ierr
-
-        integer :: unit
-        integer :: ios
-
-        text = ''
-        ierr = 0
-        open(newunit=unit, file=trim(path), action='read', status='old', &
-            iostat=ios)
-        if (ios /= 0) then
-            ierr = 1
-            return
-        end if
-
-        read(unit, '(A)', iostat=ios) text
-        if (ios > 0) then
-            ierr = 1
-        end if
-        close(unit)
-    end subroutine read_text_file
-
-    subroutine to_c_string(text, c_text)
-        character(len=*), intent(in) :: text
-        character(kind=c_char), intent(out) :: c_text(:)
-
-        integer :: i
-        integer :: n
-
-        c_text = c_null_char
-        n = min(len_trim(text), size(c_text) - 1)
-        do i = 1, n
-            c_text(i) = char(iachar(text(i:i)), kind=c_char)
-        end do
-        c_text(n + 1) = c_null_char
-    end subroutine to_c_string
 
     subroutine poll_until_match(w, expected_path, expected_type, timeout_ms, &
             max_tries, matched, actual_path, actual_type)

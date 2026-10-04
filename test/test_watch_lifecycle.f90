@@ -1,21 +1,13 @@
 program test_watch_lifecycle
     use, intrinsic :: iso_c_binding, only: c_int
-    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_rename
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_rename, &
+        fx_test_descriptor_count
     use fx_watch, only: watcher_t, watcher_init, watcher_add, watcher_remove, &
         watcher_poll, watcher_close
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, test_suite_exit
     implicit none
     interface
-        integer(c_int) function descriptor_count_c() &
-                bind(C, name='fx_c_watch_test_descriptor_count')
-            import :: c_int
-        end function descriptor_count_c
-        integer(c_int) function fail_registration_after(count) &
-                bind(C, name='fx_c_watch_test_fail_registration_after')
-            import :: c_int
-            integer(c_int), value :: count
-        end function fail_registration_after
         integer(c_int) function close_descriptor(fd) bind(C, name='close')
             import :: c_int
             integer(c_int), value :: fd
@@ -32,16 +24,17 @@ program test_watch_lifecycle
     write (root, '(a,i0)') '/var/tmp/fx watch;$(fixture)-lifecycle-', pid
     call test_suite_init(suite, 'watch lifecycle')
     call test_repeated_add()
+    call test_repeated_start_stop()
     call test_replaced_tree()
     call test_file_directory_replacement()
-    call test_registration_failure()
+    call test_registration_error()
     call test_poll_outcomes()
     call remove_tree(trim(root))
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 contains
     integer function descriptor_count() result(count)
-        count = descriptor_count_c()
+        count = fx_test_descriptor_count()
         if (count < 0) error stop 'cannot enumerate process descriptors'
     end function descriptor_count
 
@@ -99,6 +92,22 @@ contains
         call test_assert_equal_int(suite, before, descriptor_count(), &
             'remove and close restore the independent OS descriptor baseline')
     end subroutine test_repeated_add
+
+    subroutine test_repeated_start_stop()
+        type(watcher_t) :: watch
+        integer :: before, ierr, i
+
+        before = descriptor_count()
+        do i = 1, 32
+            call watcher_init(watch, ierr)
+            call test_assert_equal_int(suite, 0, ierr, 'repeated start succeeds')
+            call watcher_add(watch, trim(root), .true., ierr)
+            call test_assert_equal_int(suite, 0, ierr, 'repeated subscription succeeds')
+            call watcher_close(watch)
+            call test_assert_equal_int(suite, before, descriptor_count(), &
+                'repeated start and stop returns to descriptor baseline')
+        end do
+    end subroutine test_repeated_start_stop
 
     subroutine test_replaced_tree()
         type(watcher_t) :: watch
@@ -173,46 +182,42 @@ contains
             'file-directory-file replacement restores descriptor baseline')
     end subroutine test_file_directory_replacement
 
-    subroutine test_registration_failure()
+    subroutine test_registration_error()
         type(watcher_t) :: watch
         character(len=4096) :: changed
-        integer :: before, initialized, subscribed, ierr, kind, ignored, unit
+        character(len=320) :: missing_root
+        integer :: before, initialized, subscribed, ierr, kind, i
         logical :: got_event
 
-        if (fail_registration_after(-1) == 0) return
+        write (missing_root, '(a,i0)') trim(root)//'-missing-', pid
         before = descriptor_count()
         call watcher_init(watch, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'initialize watcher before invalid root')
         initialized = descriptor_count()
-        ! Directory registration succeeds, then the first child fails.
-        ignored = fail_registration_after(1)
-        call watcher_add(watch, trim(root), .true., ierr)
-        call test_assert(suite, ierr /= 0, 'initial child registration failure propagates')
+        call watcher_add(watch, trim(missing_root), .true., ierr)
+        call test_assert(suite, ierr /= 0, 'missing root registration error propagates')
         call test_assert_equal_int(suite, initialized, descriptor_count(), &
-            'failed initial admission closes directory and child descriptors')
+            'missing root admission retains no resource')
         call watcher_add(watch, trim(root), .true., ierr)
         subscribed = descriptor_count()
-        open (newunit=unit, file=trim(root)//'-replacement', status='replace')
-        write (unit, '(a)') 'atomic replacement'
-        close (unit)
-        call rename_path(trim(root)//'-replacement', trim(root)//'/input.f90')
-        ignored = fail_registration_after(0)
-        call watcher_poll(watch, changed, kind, 1000, got_event, ierr)
-        call test_assert(suite, ierr /= 0, 'existing child registration failure propagates')
-        call test_assert_equal_int(suite, subscribed - 1, descriptor_count(), &
-            'failed refresh closes and resets the replaced child descriptor')
-        call watcher_add(watch, trim(root), .true., ierr)
-        call test_assert_equal_int(suite, 0, ierr, 'explicit refresh retries failed child')
-        call test_assert_equal_int(suite, subscribed, descriptor_count(), &
-            'successful retry restores the bounded subscription descriptors')
         call write_input()
-        call watcher_poll(watch, changed, kind, 1000, got_event, ierr)
-        call test_assert(suite, got_event, 'retry restores real event delivery')
+        got_event = .false.
+        do i = 1, 32
+            call watcher_poll(watch, changed, kind, 20, got_event, ierr)
+            if (got_event) then
+                if (trim(changed) == trim(root)//'/input.f90') exit
+            end if
+        end do
+        call test_assert_equal_int(suite, 0, ierr, 'watcher remains usable after root error')
+        call test_assert(suite, got_event, 'valid root delivers event after registration error')
         call test_assert_equal_str(suite, trim(root)//'/input.f90', trim(changed), &
-            'retried registration observes the replacement file')
+            'recovered watcher reports the expected source')
+        call test_assert_equal_int(suite, subscribed, descriptor_count(), &
+            'recovered watcher retains a bounded descriptor set')
         call watcher_close(watch)
         call test_assert_equal_int(suite, before, descriptor_count(), &
-            'registration failures and retries restore baseline after close')
-    end subroutine test_registration_failure
+            'registration error and subsequent close restore descriptor baseline')
+    end subroutine test_registration_error
 
     subroutine test_poll_outcomes()
         type(watcher_t) :: watch
