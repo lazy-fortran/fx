@@ -88,6 +88,13 @@ phases using interception frameworks. [#54](https://github.com/lazy-fortran/fx/i
 provides the shared strict JSON codec consumed by fo #150; generic grammar fixes
 belong here rather than another fo scanner.
 
+#54's shared parser is delivered at `553dd01`: both initialization APIs use one
+strict event parser; the explicit typed path carries int64/raw tokens and
+structured error offsets. Generic duplicate decoded keys remain valid JSON;
+domain validation owns duplicate-key rejection. The exact combined native
+parser/extraction gate passes 2/2 (each oracle below 0.01s), with no wider suite
+or cache reset. fo #150 remains the typed adapter adoption task.
+
 #53's cleanup is integrated at `fc9a1ec`: production watcher controls, including
 the old synthetic ENOSPC trigger, are removed. Descriptor measurement lives in
 the static test-only filesystem helper; native tests exercise real missing-root
