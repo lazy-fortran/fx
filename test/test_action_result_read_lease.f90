@@ -56,6 +56,11 @@ program test_action_result_read_lease
     call test_assert_equal_int(suite, 0, ierr, 'action result store initializes')
     call get_command_argument(0, executable)
     call test_pending_publication(.false.)
+    if (suite%n_fail > 0) then
+        call test_suite_summary(suite)
+        call test_suite_exit(suite)
+        stop
+    end if
     call test_pending_publication(.true.)
     store_root = trim(root)//'/store/v2'
     call action_result_store_init(store, trim(store_root), ierr)
