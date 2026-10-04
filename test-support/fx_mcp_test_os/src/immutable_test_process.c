@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE
 #include <errno.h>
 #include <signal.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,22 +17,98 @@
 #include <sys/user.h>
 #endif
 
+static char **make_argv(const char *bytes, const int *offsets, int count)
+{
+    if (count < 1 || !bytes || !offsets) return NULL;
+    char **argv = calloc((size_t)count + 1, sizeof(*argv));
+    if (!argv) return NULL;
+    for (int i = 0; i < count; ++i) argv[i] = (char *)bytes + offsets[i] - 1;
+    return argv;
+}
+
 int fx_test_process_spawn(const char *bytes, const int *offsets, int count,
                           int *child_pid)
 {
-    char **argv = calloc((size_t)count + 1, sizeof(*argv));
-    if (!argv) return ENOMEM;
-    for (int i = 0; i < count; ++i) argv[i] = (char *)bytes + offsets[i] - 1;
+    char **argv = make_argv(bytes, offsets, count);
+    if (!argv) return count < 1 ? EINVAL : ENOMEM;
     pid_t pid = fork();
     if (pid < 0) { int error = errno; free(argv); return error; }
-    if (pid == 0) {
-        execv(argv[0], argv);
-        _exit(127);
-    }
+    if (pid == 0) { execv(argv[0], argv); _exit(127); }
     *child_pid = (int)pid;
     free(argv);
     return 0;
 }
+
+int fx_test_process_spawn_piped(const char *bytes, const int *offsets, int count,
+                                int capture_stderr, int *child_pid,
+                                int *input_fd, int *output_fd)
+{
+    char **argv = make_argv(bytes, offsets, count);
+    if (!argv) return count < 1 ? EINVAL : ENOMEM;
+    int to_child[2], from_child[2];
+    if (pipe(to_child)) { int error = errno; free(argv); return error; }
+    if (pipe(from_child)) {
+        int error = errno; close(to_child[0]); close(to_child[1]);
+        free(argv); return error;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        int error = errno; close(to_child[0]); close(to_child[1]);
+        close(from_child[0]); close(from_child[1]); free(argv); return error;
+    }
+    if (pid == 0) {
+        close(to_child[1]); close(from_child[0]);
+        if (dup2(to_child[0], STDIN_FILENO) < 0 ||
+            dup2(from_child[1], STDOUT_FILENO) < 0 ||
+            (capture_stderr && dup2(from_child[1], STDERR_FILENO) < 0)) _exit(126);
+        close(to_child[0]); close(from_child[1]);
+        execv(argv[0], argv); _exit(127);
+    }
+    close(to_child[0]); close(from_child[1]); free(argv);
+    *child_pid = (int)pid; *input_fd = to_child[1]; *output_fd = from_child[0];
+    return 0;
+}
+
+int fx_test_process_pipe_read(int fd, char *bytes, int capacity, int timeout_ms)
+{
+    if (fd < 0 || !bytes || capacity < 1) return -1;
+    struct pollfd event = {fd, POLLIN | POLLHUP, 0};
+    int ready;
+    do { ready = poll(&event, 1, timeout_ms); } while (ready < 0 && errno == EINTR);
+    if (ready == 0) return -2;
+    if (ready < 0) return -1;
+    ssize_t n;
+    do { n = read(fd, bytes, (size_t)capacity); } while (n < 0 && errno == EINTR);
+    return n < 0 ? -1 : (int)n;
+}
+
+int fx_test_process_pipe_write(int fd, const char *bytes, int count)
+{
+    if (fd < 0 || (!bytes && count > 0) || count < 0) return -1;
+    sigset_t pipe_signal, old_mask, pending;
+    sigemptyset(&pipe_signal); sigaddset(&pipe_signal, SIGPIPE);
+    if (sigprocmask(SIG_BLOCK, &pipe_signal, &old_mask) != 0) return -1;
+    sigpending(&pending);
+    int had_pending = sigismember(&pending, SIGPIPE);
+    int done = 0, error = 0;
+    while (done < count) {
+        ssize_t n = write(fd, bytes + done, (size_t)(count - done));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { error = n < 0 ? errno : EIO; break; }
+        done += (int)n;
+    }
+    if (!had_pending && error == EPIPE) {
+        struct timespec immediate = {0, 0};
+        (void)sigtimedwait(&pipe_signal, NULL, &immediate);
+    }
+    (void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+    if (error) { errno = error; return -1; }
+    return done;
+}
+
+int fx_test_process_close_fd(int fd) { return fd < 0 ? 0 : close(fd); }
+int fx_test_process_is_executable(const char *path)
+{ return path && access(path, X_OK) == 0; }
 
 int fx_test_process_wait_once(int child_pid, int *exit_status)
 {
