@@ -12,6 +12,7 @@ program test_immutable_materialization
         IMMUTABLE_MATERIALIZE_COPY, IMMUTABLE_MATERIALIZE_CLONE, IMMUTABLE_MATERIALIZE_AUTO
     use fx_immutable_tree, only: immutable_store_put_tree, immutable_store_materialize_tree
     use fx_immutable_manifest, only: immutable_entries_canonical, immutable_manifest_serialize
+    use immutable_marker_oracle, only: marker_boundary_configure, probe_ready_marker
     implicit none
     interface
         integer(c_int) function tmp_root(out, cap) &
@@ -131,7 +132,7 @@ program test_immutable_materialization
     end if
     call test_collisions()
     call test_clone_and_fallback()
-    do mode = 1, 5
+    do mode = 1, 6
         call test_substitution(mode)
     end do
     call test_suite_summary(suite)
@@ -259,6 +260,7 @@ contains
         pid = spawn_worker(which)
         call test_assert(suite, pid > 0, 'independent materialization worker starts')
         if (pid <= 0) return
+        if (which == 6) call probe_ready_marker(suite, trim(ready))
         call wait_marker(ready, found)
         call test_assert(suite, found, 'worker reaches the exact descriptor boundary')
         if (found) then
@@ -309,7 +311,7 @@ contains
         result_path = trim(root)//'/result'//number(which)
         outside = dir
         if (which == 1) call write_text(dir//'/'//blob, 'wrong source bytes')
-        if (which == 3) outside = dir//'/sentinel'
+        if (which == 3 .or. which == 6) outside = dir//'/sentinel'
         if (which == 5) then
             forged(1) = entry(1)
             forged(1)%path = 'evil.bin'
@@ -329,7 +331,7 @@ contains
             swapped = path_dirname(immutable_store_blob_path(store, blob))
         case (2)
             swapped = path_dirname(destination)
-        case (3, 4)
+        case (3, 4, 6)
             open (newunit=u, file=trim(ready), status='old', iostat=ios)
             if (ios == 0) then
                 read (u, '(a)', iostat=ios) swapped
@@ -349,7 +351,7 @@ contains
         integer :: ios
         integer(c_int) :: checked, actual_mode
         actual_mode = -1_c_int
-        if (which == 3 .or. which == 4) then
+        if (which == 3 .or. which == 4 .or. which == 6) then
             call test_assert(suite, result /= IMMUTABLE_OK, 'substituted staging entry fails closed')
             inquire (file=trim(destination), exist=exists)
             call test_assert(suite, .not. exists, 'invalid staging has no published destination')
@@ -428,11 +430,13 @@ contains
         release = trim(root)//'/release'//number(which)
         result_path = trim(root)//'/result'//number(which)
         phase = 1_c_int
-        if (which == 3) phase = 2_c_int
+        if (which == 3 .or. which == 6) phase = 2_c_int
         if (which == 4) phase = 4_c_int
         if (which == 5) phase = 3_c_int
         call configure(phase, trim(ready)//c_null_char, trim(release)//c_null_char)
-        if (which <= 3) then
+        if (which == 6) call marker_boundary_configure( &
+            (trim(ready)//'.open')//c_null_char, (trim(ready)//'.write')//c_null_char)
+        if (which <= 3 .or. which == 6) then
             call immutable_store_materialize_blob(store, blob, trim(destination), &
                 420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
         else
