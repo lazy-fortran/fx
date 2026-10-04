@@ -1,5 +1,9 @@
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#else
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
