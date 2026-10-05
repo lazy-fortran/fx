@@ -18,7 +18,8 @@
 #define PATH_MAX 4096
 #endif
 #define SNAPSHOT_LIMIT (16 * 1024 * 1024)
-#define ROW_LIMIT 65536
+/* The snapshot byte limit is the effective bound on valid row counts. */
+#define ROW_LIMIT 262144
 
 static int safe_field(const char *s)
 {
@@ -83,6 +84,7 @@ static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t n
     char path[PATH_MAX], temp[PATH_MAX], header[64];
     static unsigned long serial;
     int fd = -1, n, rc = -1;
+    size_t total = 0;
     n = snprintf(path, sizeof(path), "%s/leases", dir);
     if (n < 0 || (size_t)n >= sizeof(path)) return -1;
     for (int attempt = 0; attempt < 32; ++attempt) {
@@ -98,9 +100,12 @@ static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t n
     n = snprintf(header, sizeof(header), "fxleases1|%llu\n",
                  (unsigned long long)epoch);
     if (n <= 0 || write_all(fd, header, (size_t)n) != 0) goto done;
+    total = (size_t)n;
     for (size_t i = 0; i < nrow; ++i) {
         size_t len = strlen(rows[i]);
+        if (len > (size_t)SNAPSHOT_LIMIT - total) goto done;
         if (write_all(fd, rows[i], len) != 0) goto done;
+        total += len;
     }
     if (fsync(fd) != 0) goto done;
     if (close(fd) != 0) { fd = -1; goto failed; }
@@ -110,6 +115,7 @@ static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t n
 done:
     close(fd);
 failed:
+    unlink(temp);
     return rc;
 }
 

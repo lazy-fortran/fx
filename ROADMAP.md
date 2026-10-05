@@ -48,6 +48,29 @@ The initial collection-disabled boundary remains until protection for all
 active paths is demonstrated. The collector's mechanism, metadata layout and
 cache handle design are agent decisions, not fixed recipes.
 
+### 2026-10-05 bounded lease publication repair
+
+Fo Gremlin's shared lease snapshot reached 64,962 rows against the prior
+65,536-row parser limit. FFC generation capture then failed while acquiring
+publication leases for its complete input closure. An isolated independent
+reproducer started with 65,000 existing root rows and acquired a 1,000-object
+publication lease: the prior implementation failed
+`test_immutable_leases` in Fo Gremlin session
+`3967236-1791213594-220184661`, generation
+`962a27fa53415c614e35f10bd53e8ab68194126fcf80a6bc1c58ace30ad2d3fb`, with
+“large publication fits…” expected status 0, actual 1.
+
+On base `ee897aa9757da2ff50d34bf1b230a229ea7056c7`, source/test patch SHA256
+`521590562ab3ef97674da58726068f456ec0cefafde234fb1a60e8b50b2d1d48` raises
+the row ceiling while keeping the 16 MiB snapshot bound authoritative. Snapshot
+writes enforce that byte ceiling as they stream and remove incomplete temporary
+files on failure. The same Gremlin test passed in session
+`3995766-1791214120-906510161`, generation
+`a01c0236352b1c37efd6a36a36ad207fe9f90c7a3787d98d2dcc52c4c32c785c`; its case
+log SHA256 is `be55e3342a0503932555145d20b6190b73436e5b18160a9336e9f752b3dd13d8`.
+The Fo candidate containing this provider fix subsequently captured and began
+building the current FFC generation, rechecking the original consumer path.
+
 Earlier detailed evidence remains at
 [the pre-revision roadmap](https://github.com/lazy-fortran/fx/blob/c8fb7efeb9b9d98cb9bbb06563b5f20c46d80483/ROADMAP.md).
 Fo's [PLAN](https://github.com/lazy-fortran/fo/blob/main/PLAN.md) orders the consumer

@@ -93,6 +93,12 @@ program test_immutable_leases
         call test_suite_exit(suite)
         stop
     end if
+    call test_large_publication_capacity(suite, trim(root))
+    if (suite%n_fail > 0) then
+        call test_suite_summary(suite)
+        call test_suite_exit(suite)
+        stop
+    end if
 
     call get_command_argument(0, executable)
     marker = trim(root)//'/crash-ready'
@@ -130,6 +136,85 @@ program test_immutable_leases
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_large_publication_capacity(s, base)
+        type(test_suite_t), intent(inout) :: s
+        character(len=*), intent(in) :: base
+        type(immutable_store_t) :: capacity_store
+        type(immutable_lease_t) :: capacity_lease
+        character(len=512) :: capacity_root, metadata_path
+        character(len=256) :: row
+        character(len=64) :: identity
+        character(len=64) :: bootstrap_ids(1)
+        character(len=8) :: bootstrap_kinds(1) = ['blob    ']
+        character(len=8), allocatable :: kinds(:)
+        character(len=64), allocatable :: ids(:)
+        integer :: local_err, unit, i
+
+        capacity_root = trim(base)//'/capacity'
+        metadata_path = trim(capacity_root)//'/.fx-metadata/leases'
+        call immutable_store_init(capacity_store, trim(capacity_root), local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'large lease fixture store initializes')
+        if (local_err /= IMMUTABLE_OK) return
+
+        bootstrap_ids(1) = repeat('0', 64)
+        call immutable_store_root_set(capacity_store, 'fixture', 'start', &
+            'bootstrap', bootstrap_kinds, bootstrap_ids, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'large lease fixture metadata initializes')
+        if (local_err /= IMMUTABLE_OK) return
+
+        open(newunit=unit, file=trim(metadata_path), status='replace', &
+            action='write', iostat=local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'large lease snapshot opens')
+        if (local_err /= 0) return
+        write(unit, '(a)', iostat=local_err) 'fxleases1|0'
+        do i = 1, 65000
+            if (local_err /= 0) exit
+            identity = lease_test_id(i)
+            row = 'R||fo-generation|'//identity//'|generation-'//identity// &
+                '|blob|'//identity
+            write(unit, '(a)', iostat=local_err) trim(row)
+        end do
+        close(unit)
+        call test_assert_equal_int(s, 0, local_err, &
+            'large lease snapshot fixture is written')
+        if (local_err /= 0) return
+
+        allocate(kinds(1000), ids(1000))
+        kinds = 'blob'
+        do i = 1, size(ids)
+            ids(i) = lease_test_id(100000 + i)
+        end do
+        call immutable_store_publication_lease_acquire(capacity_store, &
+            'fo-generation-capture', 'capture-start', 'generation-capture', &
+            kinds, ids, capacity_lease, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'large publication fits a bounded lease snapshot near the old row cap')
+        if (local_err /= IMMUTABLE_OK) return
+
+        call immutable_store_lease_release(capacity_store, capacity_lease, &
+            local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'large publication lease releases after the expanded snapshot')
+    end subroutine test_large_publication_capacity
+
+    function lease_test_id(value) result(identity)
+        integer, intent(in) :: value
+        character(len=64) :: identity
+        character(len=16), parameter :: digits = '0123456789abcdef'
+        integer :: remaining, nibble, position
+
+        identity = repeat('0', 64)
+        remaining = value
+        do position = 64, 57, -1
+            nibble = mod(remaining, 16)
+            identity(position:position) = digits(nibble + 1:nibble + 1)
+            remaining = remaining / 16
+        end do
+    end function lease_test_id
 
     subroutine crash_worker()
         type(immutable_store_t) :: child_store
