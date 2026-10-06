@@ -97,6 +97,104 @@ typedef struct {
     char object_id[256];
 } lease_record_t;
 
+typedef struct {
+    uint16_t offset[7];
+    uint16_t length[7];
+    uint16_t text_length;
+    uint8_t count;
+    uint8_t valid;
+    uint8_t object_identity;
+} lease_row_info_t;
+
+static int safe_field_slice(const char *s, size_t length)
+{
+    if (!s || length == 0 || length > 255) return 0;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+              c == ':')) return 0;
+    }
+    return 1;
+}
+
+static void index_lease_row_fields(const char *row, lease_row_info_t *info)
+{
+    size_t length = strnlen(row, ROW_TEXT_MAX), start = 0;
+    unsigned int count = 0;
+
+    memset(info, 0, sizeof(*info));
+    info->text_length = (uint16_t)length;
+    if (length >= ROW_TEXT_MAX) return;
+    if (length > 0 && row[length - 1] == '\n') --length;
+    for (size_t i = 0; i <= length; ++i) {
+        if (i != length && row[i] != '|') continue;
+        if (count < 7) {
+            info->offset[count] = (uint16_t)start;
+            info->length[count] = (uint16_t)(i - start);
+        }
+        if (count < 8) ++count;
+        start = i + 1;
+    }
+    info->count = (uint8_t)count;
+}
+
+static void index_lease_row(const char *row, lease_row_info_t *info)
+{
+    index_lease_row_fields(row, info);
+    if (info->count != 7) return;
+    if (info->length[0] != 1) return;
+    char type = row[info->offset[0]];
+    if (type != 'R' && type != 'P' && type != 'L') return;
+    for (int i = 1; i < 7; ++i) {
+        size_t field_length = info->length[i];
+        if (field_length >= sizeof(((lease_record_t *)0)->token)) return;
+        if (field_length == 0) {
+            if (i != 1 || type != 'R') return;
+        } else if (!safe_field_slice(row + info->offset[i], field_length)) {
+            return;
+        }
+    }
+    info->valid = 1;
+    if (info->length[6] != 64) return;
+    for (int i = 0; i < 64; ++i) {
+        char c = row[info->offset[6] + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return;
+    }
+    info->object_identity = 1;
+}
+
+static int row_field_equal(const char *row, const lease_row_info_t *info,
+                           int field, const char *value)
+{
+    size_t length = strlen(value);
+    return info->count == 7 && info->length[field] == length &&
+           memcmp(row + info->offset[field], value, length) == 0;
+}
+
+static int copy_row_field(char *destination, size_t capacity, const char *row,
+                          const lease_row_info_t *info, int field)
+{
+    size_t length = info->length[field];
+    if (info->count != 7 || length >= capacity) return -1;
+    memcpy(destination, row + info->offset[field], length);
+    destination[length] = '\0';
+    return 0;
+}
+
+static int same_row_group(const char *left, const lease_row_info_t *left_info,
+                          const char *right,
+                          const lease_row_info_t *right_info)
+{
+    if (!left_info->valid || !right_info->valid) return 0;
+    for (int i = 0; i < 6; ++i) {
+        if (left_info->length[i] != right_info->length[i] ||
+            memcmp(left + left_info->offset[i], right + right_info->offset[i],
+                   left_info->length[i]) != 0) return 0;
+    }
+    return 1;
+}
+
 static int copy_field(char *destination, size_t capacity, const char *source,
                       int allow_empty)
 {
@@ -105,42 +203,6 @@ static int copy_field(char *destination, size_t capacity, const char *source,
         (allow_empty && length > 0 && !safe_field(source))) return -1;
     memcpy(destination, source, length + 1);
     return 0;
-}
-
-static int parse_lease_record(const char *line, lease_record_t *record)
-{
-    char copy[ROW_TEXT_MAX], *part[7];
-    size_t length = strlen(line);
-    int count;
-
-    if (length >= sizeof(copy)) return 0;
-    memcpy(copy, line, length + 1);
-    if (length > 0 && copy[length - 1] == '\n') copy[--length] = '\0';
-    count = fields(copy, part, 7);
-    if (count != 7 || strlen(part[0]) != 1 ||
-        (strcmp(part[0], "R") != 0 && strcmp(part[0], "P") != 0 &&
-         strcmp(part[0], "L") != 0)) return 0;
-    if (copy_field(record->type, sizeof(record->type), part[0], 0) != 0 ||
-        copy_field(record->token, sizeof(record->token), part[1],
-                   strcmp(part[0], "R") == 0) != 0 ||
-        copy_field(record->owner, sizeof(record->owner), part[2], 0) != 0 ||
-        copy_field(record->start, sizeof(record->start), part[3], 0) != 0 ||
-        copy_field(record->reason, sizeof(record->reason), part[4], 0) != 0 ||
-        copy_field(record->kind, sizeof(record->kind), part[5], 0) != 0 ||
-        copy_field(record->object_id, sizeof(record->object_id), part[6], 0) != 0)
-        return 0;
-    return 1;
-}
-
-static int same_lease_group(const lease_record_t *left,
-                            const lease_record_t *right)
-{
-    return strcmp(left->type, right->type) == 0 &&
-           strcmp(left->token, right->token) == 0 &&
-           strcmp(left->owner, right->owner) == 0 &&
-           strcmp(left->start, right->start) == 0 &&
-           strcmp(left->reason, right->reason) == 0 &&
-           strcmp(left->kind, right->kind) == 0;
 }
 
 static int flush_snapshot(snapshot_writer_t *writer, int fd)
@@ -202,17 +264,9 @@ static int parse_compact_object(const char *line, char object_id[65])
     return 0;
 }
 
-static int is_object_identity(const char *value)
-{
-    if (strlen(value) != 64) return 0;
-    for (int i = 0; i < 64; ++i)
-        if (!((value[i] >= '0' && value[i] <= '9') ||
-              (value[i] >= 'a' && value[i] <= 'f'))) return 0;
-    return 1;
-}
-
-static int append_snapshot_row(char ***rows, size_t *nrow, const char *line,
-                               size_t length)
+static int append_snapshot_row(char ***rows, lease_row_info_t *info,
+                               size_t *nrow, const char *line, size_t length,
+                               int compact_member)
 {
     if (*nrow >= ROW_LIMIT || length >= ROW_TEXT_MAX) return -1;
     (*rows)[*nrow] = malloc(length + 2);
@@ -220,11 +274,24 @@ static int append_snapshot_row(char ***rows, size_t *nrow, const char *line,
     memcpy((*rows)[*nrow], line, length);
     (*rows)[*nrow][length] = '\n';
     (*rows)[*nrow][length + 1] = '\0';
+    if (compact_member) {
+        index_lease_row_fields((*rows)[*nrow], &info[*nrow]);
+        if (info[*nrow].count != 7 || info[*nrow].length[6] != 64) {
+            free((*rows)[*nrow]);
+            (*rows)[*nrow] = NULL;
+            return -1;
+        }
+        info[*nrow].valid = 1;
+        info[*nrow].object_identity = 1;
+    } else {
+        index_lease_row((*rows)[*nrow], &info[*nrow]);
+    }
     ++*nrow;
     return 0;
 }
 
-static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t nrow)
+static int write_snapshot(const char *dir, uint64_t epoch, char **rows,
+                          lease_row_info_t *info, size_t nrow)
 {
     char path[PATH_MAX], temp[PATH_MAX], header[64];
     static unsigned long serial;
@@ -250,28 +317,39 @@ static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t n
     for (size_t i = 0; i < nrow;) {
         lease_record_t first;
         size_t end = i + 1;
-        int compact = parse_lease_record(rows[i], &first) &&
-                      is_object_identity(first.object_id);
+        int compact = info[i].valid && info[i].object_identity;
         if (compact) {
             while (end < nrow) {
-                lease_record_t next;
-                if (!parse_lease_record(rows[end], &next) ||
-                    !same_lease_group(&first, &next) ||
-                    !is_object_identity(next.object_id)) break;
+                if (!info[end].valid || !info[end].object_identity ||
+                    !same_row_group(rows[i], &info[i], rows[end],
+                                    &info[end])) break;
                 ++end;
             }
         }
         if (compact && end - i >= COMPACT_GROUP_MIN) {
             char record[ROW_TEXT_MAX];
+            if (copy_row_field(first.type, sizeof(first.type), rows[i],
+                               &info[i], 0) != 0 ||
+                copy_row_field(first.token, sizeof(first.token), rows[i],
+                               &info[i], 1) != 0 ||
+                copy_row_field(first.owner, sizeof(first.owner), rows[i],
+                               &info[i], 2) != 0 ||
+                copy_row_field(first.start, sizeof(first.start), rows[i],
+                               &info[i], 3) != 0 ||
+                copy_row_field(first.reason, sizeof(first.reason), rows[i],
+                               &info[i], 4) != 0 ||
+                copy_row_field(first.kind, sizeof(first.kind), rows[i],
+                               &info[i], 5) != 0) goto done;
             n = snprintf(record, sizeof(record), "G|%s|%s|%s|%s|%s|%s\n",
                          first.type, first.token, first.owner, first.start,
                          first.reason, first.kind);
             if (n < 0 || (size_t)n >= sizeof(record) ||
                 write_snapshot_record(&writer, fd, record, &total) != 0) goto done;
             for (size_t j = i; j < end; ++j) {
-                lease_record_t item;
-                if (!parse_lease_record(rows[j], &item)) goto done;
-                n = snprintf(record, sizeof(record), "O|%s\n", item.object_id);
+                char object_id[65];
+                if (copy_row_field(object_id, sizeof(object_id), rows[j],
+                                   &info[j], 6) != 0) goto done;
+                n = snprintf(record, sizeof(record), "O|%s\n", object_id);
                 if (n < 0 || (size_t)n >= sizeof(record) ||
                     write_snapshot_record(&writer, fd, record, &total) != 0) goto done;
             }
@@ -295,7 +373,7 @@ failed:
 }
 
 static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
-                         size_t *nrow)
+                         lease_row_info_t **info, size_t *nrow)
 {
     char path[PATH_MAX], *data = NULL, *line, *save;
     lease_record_t group;
@@ -307,7 +385,7 @@ static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         if (errno != ENOENT) return -1;
-        *epoch = 0; *rows = NULL; *nrow = 0;
+        *epoch = 0; *rows = NULL; *info = NULL; *nrow = 0;
         return 0;
     }
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
@@ -343,6 +421,8 @@ static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
     *epoch = (uint64_t)parsed;
     *rows = calloc(ROW_LIMIT, sizeof(char *));
     if (!*rows) { free(data); return -1; }
+    *info = calloc(ROW_LIMIT, sizeof(lease_row_info_t));
+    if (!*info) { free(*rows); *rows = NULL; free(data); return -1; }
     *nrow = 0;
     while ((line = strtok_r(NULL, "\n", &save)) != NULL) {
         size_t line_len = strlen(line);
@@ -362,8 +442,8 @@ static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
                 "%s|%s|%s|%s|%s|%s|%s", group.type, group.token,
                 group.owner, group.start, group.reason, group.kind, object_id);
             if (expanded_len < 0 || (size_t)expanded_len >= sizeof(expanded) ||
-                append_snapshot_row(rows, nrow, expanded,
-                                    (size_t)expanded_len) != 0) goto invalid;
+                append_snapshot_row(rows, *info, nrow, expanded,
+                                    (size_t)expanded_len, 1) != 0) goto invalid;
             ++group_count;
             continue;
         }
@@ -371,24 +451,38 @@ static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
             if (group_count < COMPACT_GROUP_MIN) goto invalid;
             group_active = 0;
         }
-        if (append_snapshot_row(rows, nrow, line, line_len) != 0) goto invalid;
+        if (append_snapshot_row(rows, *info, nrow, line, line_len, 0) != 0)
+            goto invalid;
     }
     if (group_active && group_count < COMPACT_GROUP_MIN) goto invalid;
     free(data);
     return 0;
 invalid:
     for (size_t i = 0; i < *nrow; ++i) free((*rows)[i]);
-    free(*rows); free(data); *rows = NULL; *nrow = 0;
+    free(*rows); free(*info); free(data);
+    *rows = NULL; *info = NULL; *nrow = 0;
     return -1;
 }
 
-static int same_root(char *row, const char *owner, const char *start,
-                     const char *reason)
+static int same_root(const char *row, const lease_row_info_t *info,
+                     const char *owner, const char *start, const char *reason)
 {
-    char *f[7];
-    if (fields(row, f, 7) != 7) return 0;
-    return strcmp(f[0], "R") == 0 && strcmp(f[2], owner) == 0 &&
-           strcmp(f[3], start) == 0 && strcmp(f[4], reason) == 0;
+    return row_field_equal(row, info, 0, "R") &&
+           row_field_equal(row, info, 2, owner) &&
+           row_field_equal(row, info, 3, start) &&
+           row_field_equal(row, info, 4, reason);
+}
+
+static int append_next_row(char **rows, lease_row_info_t *info, size_t *count,
+                           const char *line, const lease_row_info_t *source_info)
+{
+    if (*count >= ROW_LIMIT) return -1;
+    rows[*count] = strdup(line);
+    if (!rows[*count]) return -1;
+    if (source_info) info[*count] = *source_info;
+    else index_lease_row(rows[*count], &info[*count]);
+    ++*count;
+    return 0;
 }
 
 /* op: 1=set roots, 2=release reason, 3=read lease, 4=release lease,
@@ -406,6 +500,7 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     int root_changed = 1;
     uint64_t epoch = 0;
     char **rows = NULL, **next = NULL;
+    lease_row_info_t *row_info = NULL, *next_info = NULL;
     size_t nrow = 0, nnext = 0;
     if (!root || !safe_field(owner) || !safe_field(start) ||
         (reason && *reason && !safe_field(reason))) return -1;
@@ -420,9 +515,10 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     if (n < 0 || (size_t)n >= sizeof(lock_path)) return -1;
     lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock < 0 || flock(lock, LOCK_EX) != 0) goto done;
-    if (read_snapshot(dir, &epoch, &rows, &nrow) != 0) goto done;
+    if (read_snapshot(dir, &epoch, &rows, &row_info, &nrow) != 0) goto done;
     next = calloc(ROW_LIMIT, sizeof(char *));
-    if (!next) goto done;
+    next_info = calloc(ROW_LIMIT, sizeof(lease_row_info_t));
+    if (!next || !next_info) goto done;
     if (op == 7) {
         if (epoch >= (uint64_t)INT64_MAX) goto done;
         n = snprintf(out_token, out_cap, "L%llu",
@@ -431,51 +527,50 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     }
     for (size_t i = 0; i < nrow; ++i) {
         int remove = 0, root_remove = 0;
+        if ((op == 1 || op == 2 || op == 4 || op == 6 || op == 7) &&
+            row_info[i].text_length >= ROW_TEXT_MAX) goto done;
         if (op == 1 || op == 2 || op == 6) {
-            char copy[1100];
-            if (strlen(rows[i]) >= sizeof(copy)) goto done;
-            strcpy(copy, rows[i]);
-            remove = same_root(copy, owner, start, reason);
+            remove = same_root(rows[i], &row_info[i], owner, start, reason);
             root_remove = remove;
         }
         if (op == 2 || op == 6) {
-            char copy[1100], *f[7];
-            if (strlen(rows[i]) >= sizeof(copy)) goto done;
-            strcpy(copy, rows[i]);
-            if (fields(copy, f, 7) == 7 && strcmp(f[0], "P") == 0 &&
-                strcmp(f[1], token) == 0 && strcmp(f[2], owner) == 0 &&
-                strcmp(f[3], start) == 0) {
+            if (row_field_equal(rows[i], &row_info[i], 0, "P") &&
+                row_field_equal(rows[i], &row_info[i], 1, token) &&
+                row_field_equal(rows[i], &row_info[i], 2, owner) &&
+                row_field_equal(rows[i], &row_info[i], 3, start)) {
                 remove = 1;
                 publication_found = 1;
             }
         }
         if (op == 4) {
-            char copy[1100], *f[7];
-            if (strlen(rows[i]) >= sizeof(copy)) goto done;
-            strcpy(copy, rows[i]);
-            if (fields(copy, f, 7) == 7 && (strcmp(f[0], "L") == 0 ||
-                strcmp(f[0], "P") == 0) && strcmp(f[1], token) == 0 &&
-                strcmp(f[2], owner) == 0 && strcmp(f[3], start) == 0)
+            if ((row_field_equal(rows[i], &row_info[i], 0, "L") ||
+                 row_field_equal(rows[i], &row_info[i], 0, "P")) &&
+                row_field_equal(rows[i], &row_info[i], 1, token) &&
+                row_field_equal(rows[i], &row_info[i], 2, owner) &&
+                row_field_equal(rows[i], &row_info[i], 3, start))
                 remove = 1;
         }
         if (op == 7) {
-            char copy[1100], line[1100], *f[7];
-            if (strlen(rows[i]) >= sizeof(copy)) goto done;
-            strcpy(copy, rows[i]);
-            if (fields(copy, f, 7) == 7 &&
-                (strcmp(f[0], "R") == 0 || strcmp(f[0], "P") == 0) &&
-                strcmp(f[2], owner) == 0 && strcmp(f[3], start) == 0) {
+            char line[1100], kind_field[ROW_TEXT_MAX], object_id[ROW_TEXT_MAX];
+            if ((row_field_equal(rows[i], &row_info[i], 0, "R") ||
+                 row_field_equal(rows[i], &row_info[i], 0, "P")) &&
+                row_field_equal(rows[i], &row_info[i], 2, owner) &&
+                row_field_equal(rows[i], &row_info[i], 3, start)) {
                 graph_found = 1;
+                if (copy_row_field(kind_field, sizeof(kind_field), rows[i],
+                                   &row_info[i], 5) != 0 ||
+                    copy_row_field(object_id, sizeof(object_id), rows[i],
+                                   &row_info[i], 6) != 0) goto done;
                 n = snprintf(line, sizeof(line), "L|%s|%s|%s|%s|%s|%s\n",
-                             out_token, owner, start, reason, f[5], f[6]);
+                             out_token, owner, start, reason, kind_field,
+                             object_id);
                 if (n < 0 || (size_t)n >= sizeof(line)) goto done;
                 int duplicate = 0;
                 for (size_t j = 0; j < nnext; ++j)
                     if (strcmp(next[j], line) == 0) duplicate = 1;
                 if (!duplicate) {
-                    if (nnext >= ROW_LIMIT) goto done;
-                    next[nnext] = strdup(line);
-                    if (!next[nnext++]) goto done;
+                    if (append_next_row(next, next_info, &nnext, line, NULL) != 0)
+                        goto done;
                     changed = 1;
                 }
             }
@@ -487,8 +582,8 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
             }
             else changed = 1;
         } else {
-            next[nnext] = strdup(rows[i]);
-            if (!next[nnext++]) goto done;
+            if (append_next_row(next, next_info, &nnext, rows[i],
+                                &row_info[i]) != 0) goto done;
         }
     }
     if (op == 7 && !graph_found) { result = 1; goto done; }
@@ -511,8 +606,8 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
             for (size_t j = 0; j < nnext; ++j)
                 if (strcmp(next[j], line) == 0) duplicate = 1;
             if (!duplicate) {
-                next[nnext] = strdup(line);
-                if (!next[nnext++]) goto done;
+                if (append_next_row(next, next_info, &nnext, line, NULL) != 0)
+                    goto done;
                 ++new_root_count;
             }
             p += used;
@@ -532,8 +627,8 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
                          kind, id);
             if (n < 0 || (size_t)n >= sizeof(line) || nnext >= ROW_LIMIT)
                 goto done;
-            next[nnext] = strdup(line);
-            if (!next[nnext++]) goto done;
+            if (append_next_row(next, next_info, &nnext, line, NULL) != 0)
+                goto done;
         } else {
             if (!reason || !*reason || !root_rows) goto done;
             const char *p = root_rows;
@@ -549,8 +644,8 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
                              out_token, owner, start, reason, rkind, rid);
                 if (n < 0 || (size_t)n >= sizeof(line) || nnext >= ROW_LIMIT)
                     goto done;
-                next[nnext] = strdup(line);
-                if (!next[nnext++]) goto done;
+                if (append_next_row(next, next_info, &nnext, line, NULL) != 0)
+                    goto done;
                 p += used;
                 if (*p == '\n') ++p;
                 else if (*p != '\0') goto done;
@@ -565,10 +660,8 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
         root_changed = old_root_count != new_root_count;
         if (!root_changed) {
             for (size_t i = 0; i < nrow && !root_changed; ++i) {
-                char copy[1100];
-                if (strlen(rows[i]) >= sizeof(copy)) goto done;
-                strcpy(copy, rows[i]);
-                if (!same_root(copy, owner, start, reason)) continue;
+                if (!same_root(rows[i], &row_info[i], owner, start, reason))
+                    continue;
                 for (size_t j = 0; j < nnext; ++j) {
                     if (strcmp(rows[i], next[j]) == 0) break;
                     if (j + 1 == nnext) root_changed = 1;
@@ -581,13 +674,15 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     if (changed) {
         if (epoch >= (uint64_t)INT64_MAX) goto done;
         ++epoch;
-        if (write_snapshot(dir, epoch, next, nnext) != 0) goto done;
+        if (write_snapshot(dir, epoch, next, next_info, nnext) != 0) goto done;
     }
     if (out_epoch) *out_epoch = (long long)epoch;
     result = 0;
 done:
     if (rows) { for (size_t i = 0; i < nrow; ++i) free(rows[i]); free(rows); }
     if (next) { for (size_t i = 0; i < nnext; ++i) free(next[i]); free(next); }
+    free(row_info);
+    free(next_info);
     if (lock >= 0) { (void)flock(lock, LOCK_UN); close(lock); }
     return result;
 }
