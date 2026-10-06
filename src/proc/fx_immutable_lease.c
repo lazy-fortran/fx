@@ -22,6 +22,12 @@
 #define ROW_LIMIT 262144
 #define ROW_TEXT_MAX 1100
 #define COMPACT_GROUP_MIN 8
+#define SNAPSHOT_WRITE_BUFFER (64 * 1024)
+
+typedef struct {
+    char bytes[SNAPSHOT_WRITE_BUFFER];
+    size_t used;
+} snapshot_writer_t;
 
 static int safe_field(const char *s)
 {
@@ -137,12 +143,25 @@ static int same_lease_group(const lease_record_t *left,
            strcmp(left->kind, right->kind) == 0;
 }
 
-static int write_snapshot_record(int fd, const char *record, size_t *total)
+static int flush_snapshot(snapshot_writer_t *writer, int fd)
+{
+    if (writer->used == 0) return 0;
+    if (write_all(fd, writer->bytes, writer->used) != 0) return -1;
+    writer->used = 0;
+    return 0;
+}
+
+static int write_snapshot_record(snapshot_writer_t *writer, int fd,
+                                 const char *record, size_t *total)
 {
     size_t length = strlen(record);
     if (*total > SNAPSHOT_LIMIT || length > (size_t)SNAPSHOT_LIMIT - *total)
         return -1;
-    if (write_all(fd, record, length) != 0) return -1;
+    if (length > sizeof(writer->bytes)) return -1;
+    if (length > sizeof(writer->bytes) - writer->used &&
+        flush_snapshot(writer, fd) != 0) return -1;
+    memcpy(writer->bytes + writer->used, record, length);
+    writer->used += length;
     *total += length;
     return 0;
 }
@@ -211,6 +230,7 @@ static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t n
     static unsigned long serial;
     int fd = -1, n, rc = -1;
     size_t total = 0;
+    snapshot_writer_t writer = { .used = 0 };
     n = snprintf(path, sizeof(path), "%s/leases", dir);
     if (n < 0 || (size_t)n >= sizeof(path)) return -1;
     for (int attempt = 0; attempt < 32; ++attempt) {
@@ -225,8 +245,8 @@ static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t n
     if (fd < 0) return -1;
     n = snprintf(header, sizeof(header), "fxleases2|%llu\n",
                  (unsigned long long)epoch);
-    if (n <= 0 || write_all(fd, header, (size_t)n) != 0) goto done;
-    total = (size_t)n;
+    if (n <= 0 || (size_t)n >= sizeof(header) ||
+        write_snapshot_record(&writer, fd, header, &total) != 0) goto done;
     for (size_t i = 0; i < nrow;) {
         lease_record_t first;
         size_t end = i + 1;
@@ -247,21 +267,22 @@ static int write_snapshot(const char *dir, uint64_t epoch, char **rows, size_t n
                          first.type, first.token, first.owner, first.start,
                          first.reason, first.kind);
             if (n < 0 || (size_t)n >= sizeof(record) ||
-                write_snapshot_record(fd, record, &total) != 0) goto done;
+                write_snapshot_record(&writer, fd, record, &total) != 0) goto done;
             for (size_t j = i; j < end; ++j) {
                 lease_record_t item;
                 if (!parse_lease_record(rows[j], &item)) goto done;
                 n = snprintf(record, sizeof(record), "O|%s\n", item.object_id);
                 if (n < 0 || (size_t)n >= sizeof(record) ||
-                    write_snapshot_record(fd, record, &total) != 0) goto done;
+                    write_snapshot_record(&writer, fd, record, &total) != 0) goto done;
             }
             i = end;
         } else {
-            if (write_snapshot_record(fd, rows[i], &total) != 0) goto done;
+            if (write_snapshot_record(&writer, fd, rows[i], &total) != 0)
+                goto done;
             ++i;
         }
     }
-    if (fsync(fd) != 0) goto done;
+    if (flush_snapshot(&writer, fd) != 0 || fsync(fd) != 0) goto done;
     if (close(fd) != 0) { fd = -1; goto failed; }
     fd = -1;
     if (rename(temp, path) != 0 || sync_dir(dir) != 0) goto failed;
