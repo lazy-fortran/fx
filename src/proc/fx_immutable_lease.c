@@ -106,6 +106,204 @@ typedef struct {
     uint8_t object_identity;
 } lease_row_info_t;
 
+typedef struct {
+    int valid;
+    int fd;
+    unsigned int borrowers;
+    char dir[PATH_MAX];
+    struct stat validated_stat;
+    uint64_t epoch;
+    char **rows;
+    lease_row_info_t *info;
+    size_t nrow;
+} lease_snapshot_cache_t;
+
+static lease_snapshot_cache_t snapshot_cache = { .fd = -1 };
+static volatile int snapshot_cache_guard;
+static pid_t snapshot_cache_pid;
+
+static void cache_guard_lock(void)
+{
+    while (__sync_lock_test_and_set(&snapshot_cache_guard, 1)) { }
+}
+
+static void cache_guard_unlock(void)
+{
+    __sync_lock_release(&snapshot_cache_guard);
+}
+
+static void dispose_snapshot_cache(lease_snapshot_cache_t *cache)
+{
+    if (cache->rows) {
+        for (size_t i = 0; i < cache->nrow; ++i) free(cache->rows[i]);
+        free(cache->rows);
+    }
+    free(cache->info);
+    if (cache->fd >= 0) close(cache->fd);
+}
+
+static void reset_snapshot_cache(lease_snapshot_cache_t *cache)
+{
+    memset(cache, 0, sizeof(*cache));
+    cache->fd = -1;
+}
+
+static void ensure_snapshot_cache_process(void)
+{
+    pid_t current_pid = getpid();
+    pid_t cache_pid = __atomic_load_n(&snapshot_cache_pid, __ATOMIC_ACQUIRE);
+    if (cache_pid == current_pid) return;
+    if (cache_pid != 0) {
+        snapshot_cache_guard = 0;
+        dispose_snapshot_cache(&snapshot_cache);
+        reset_snapshot_cache(&snapshot_cache);
+        __atomic_store_n(&snapshot_cache_pid, current_pid, __ATOMIC_RELEASE);
+        return;
+    }
+    cache_guard_lock();
+    cache_pid = __atomic_load_n(&snapshot_cache_pid, __ATOMIC_RELAXED);
+    if (cache_pid == 0)
+        __atomic_store_n(&snapshot_cache_pid, current_pid, __ATOMIC_RELEASE);
+    cache_guard_unlock();
+}
+
+static int same_snapshot_stat(const struct stat *left, const struct stat *right)
+{
+    return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
+           left->st_size == right->st_size && left->st_mtime == right->st_mtime &&
+           left->st_ctime == right->st_ctime;
+}
+
+static int borrow_snapshot_cache(const char *dir, int opened_fd,
+                                 const struct stat *opened_stat,
+                                 uint64_t *epoch, char ***rows,
+                                 lease_row_info_t **info, size_t *nrow)
+{
+    struct stat retained_stat;
+    int retained_fd;
+
+    cache_guard_lock();
+    if (!snapshot_cache.valid || strcmp(snapshot_cache.dir, dir) != 0) {
+        cache_guard_unlock();
+        return 0;
+    }
+    ++snapshot_cache.borrowers;
+    retained_fd = snapshot_cache.fd;
+    cache_guard_unlock();
+
+    if (retained_fd < 0 || fstat(retained_fd, &retained_stat) != 0 ||
+        !same_snapshot_stat(opened_stat, &retained_stat) ||
+        !same_snapshot_stat(opened_stat, &snapshot_cache.validated_stat)) {
+        lease_snapshot_cache_t retired = { .fd = -1 };
+        cache_guard_lock();
+        snapshot_cache.valid = 0;
+        if (snapshot_cache.borrowers > 0) --snapshot_cache.borrowers;
+        if (snapshot_cache.borrowers == 0 && !snapshot_cache.valid) {
+            retired = snapshot_cache;
+            reset_snapshot_cache(&snapshot_cache);
+        }
+        cache_guard_unlock();
+        dispose_snapshot_cache(&retired);
+        return 0;
+    }
+
+    cache_guard_lock();
+    if (!snapshot_cache.valid || strcmp(snapshot_cache.dir, dir) != 0) {
+        if (snapshot_cache.borrowers > 0) --snapshot_cache.borrowers;
+        lease_snapshot_cache_t retired = { .fd = -1 };
+        if (snapshot_cache.borrowers == 0 && !snapshot_cache.valid) {
+            retired = snapshot_cache;
+            reset_snapshot_cache(&snapshot_cache);
+        }
+        cache_guard_unlock();
+        dispose_snapshot_cache(&retired);
+        return 0;
+    }
+    *epoch = snapshot_cache.epoch;
+    *rows = snapshot_cache.rows;
+    *info = snapshot_cache.info;
+    *nrow = snapshot_cache.nrow;
+    cache_guard_unlock();
+    (void)opened_fd;
+    return 1;
+}
+
+static void release_snapshot_cache(void)
+{
+    lease_snapshot_cache_t retired = { .fd = -1 };
+    cache_guard_lock();
+    if (snapshot_cache.borrowers > 0) --snapshot_cache.borrowers;
+    if (snapshot_cache.borrowers == 0 && !snapshot_cache.valid) {
+        retired = snapshot_cache;
+        reset_snapshot_cache(&snapshot_cache);
+    }
+    cache_guard_unlock();
+    dispose_snapshot_cache(&retired);
+}
+
+static void invalidate_snapshot_cache(const char *dir)
+{
+    lease_snapshot_cache_t retired = { .fd = -1 };
+    cache_guard_lock();
+    if (snapshot_cache.fd >= 0 && strcmp(snapshot_cache.dir, dir) == 0) {
+        snapshot_cache.valid = 0;
+        if (snapshot_cache.borrowers == 0) {
+            retired = snapshot_cache;
+            reset_snapshot_cache(&snapshot_cache);
+        }
+    }
+    cache_guard_unlock();
+    dispose_snapshot_cache(&retired);
+}
+
+static int store_snapshot_cache(const char *dir, int fd,
+                                const struct stat *status, uint64_t epoch,
+                                char **rows, lease_row_info_t *info,
+                                size_t nrow, int borrow)
+{
+    lease_snapshot_cache_t retired = { .fd = -1 };
+    cache_guard_lock();
+    if (snapshot_cache.borrowers != 0) {
+        cache_guard_unlock();
+        return 0;
+    }
+    retired = snapshot_cache;
+    reset_snapshot_cache(&snapshot_cache);
+    snapshot_cache.valid = 1;
+    snapshot_cache.fd = fd;
+    snapshot_cache.borrowers = borrow ? 1 : 0;
+    strcpy(snapshot_cache.dir, dir);
+    snapshot_cache.validated_stat = *status;
+    snapshot_cache.epoch = epoch;
+    snapshot_cache.rows = rows;
+    snapshot_cache.info = info;
+    snapshot_cache.nrow = nrow;
+    cache_guard_unlock();
+    dispose_snapshot_cache(&retired);
+    return 1;
+}
+
+static int cache_published_snapshot(const char *dir, uint64_t epoch,
+                                    char **rows, lease_row_info_t *info,
+                                    size_t nrow)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    int n = snprintf(path, sizeof(path), "%s/leases", dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size < 0 || st.st_size > SNAPSHOT_LIMIT) {
+        if (fd >= 0) close(fd);
+        invalidate_snapshot_cache(dir);
+        return 0;
+    }
+    if (store_snapshot_cache(dir, fd, &st, epoch, rows, info, nrow, 0))
+        return 1;
+    close(fd);
+    return 0;
+}
+
 static int safe_field_slice(const char *s, size_t length)
 {
     if (!s || length == 0 || length > 255) return 0;
@@ -373,23 +571,40 @@ failed:
 }
 
 static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
-                         lease_row_info_t **info, size_t *nrow)
+                         lease_row_info_t **info, size_t *nrow,
+                         int *cache_borrowed, int *rows_owned)
 {
     char path[PATH_MAX], *data = NULL, *line, *save;
     lease_record_t group;
     size_t group_count = 0;
     int compact_format = 0, group_active = 0;
     struct stat st;
+    ensure_snapshot_cache_process();
+    *cache_borrowed = 0;
+    *rows_owned = 0;
     int n = snprintf(path, sizeof(path), "%s/leases", dir);
     if (n < 0 || (size_t)n >= sizeof(path)) return -1;
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
-        if (errno != ENOENT) return -1;
+        if (errno != ENOENT) {
+            invalidate_snapshot_cache(dir);
+            return -1;
+        }
+        invalidate_snapshot_cache(dir);
         *epoch = 0; *rows = NULL; *info = NULL; *nrow = 0;
         return 0;
     }
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
-        st.st_size > SNAPSHOT_LIMIT) { close(fd); return -1; }
+        st.st_size > SNAPSHOT_LIMIT) {
+        close(fd);
+        invalidate_snapshot_cache(dir);
+        return -1;
+    }
+    if (borrow_snapshot_cache(dir, fd, &st, epoch, rows, info, nrow)) {
+        close(fd);
+        *cache_borrowed = 1;
+        return 0;
+    }
     size_t size = (size_t)st.st_size;
     data = malloc(size + 1);
     if (!data) { close(fd); return -1; }
@@ -400,7 +615,7 @@ static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
         if (r <= 0) { free(data); close(fd); return -1; }
         got += (size_t)r;
     }
-    close(fd); data[size] = '\0';
+    data[size] = '\0';
     line = strtok_r(data, "\n", &save);
     unsigned long long parsed;
     char *epoch_text = NULL, *epoch_end = NULL;
@@ -411,18 +626,20 @@ static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
         epoch_text = line + 10;
     }
     if (!epoch_text || !*epoch_text) {
-        free(data); return -1;
+        free(data); close(fd); invalidate_snapshot_cache(dir); return -1;
     }
     errno = 0;
     parsed = strtoull(epoch_text, &epoch_end, 10);
     if (errno != 0 || !epoch_end || *epoch_end != '\0') {
-        free(data); return -1;
+        free(data); close(fd); invalidate_snapshot_cache(dir); return -1;
     }
     *epoch = (uint64_t)parsed;
     *rows = calloc(ROW_LIMIT, sizeof(char *));
-    if (!*rows) { free(data); return -1; }
+    if (!*rows) { free(data); close(fd); return -1; }
     *info = calloc(ROW_LIMIT, sizeof(lease_row_info_t));
-    if (!*info) { free(*rows); *rows = NULL; free(data); return -1; }
+    if (!*info) {
+        free(*rows); *rows = NULL; free(data); close(fd); return -1;
+    }
     *nrow = 0;
     while ((line = strtok_r(NULL, "\n", &save)) != NULL) {
         size_t line_len = strlen(line);
@@ -456,11 +673,19 @@ static int read_snapshot(const char *dir, uint64_t *epoch, char ***rows,
     }
     if (group_active && group_count < COMPACT_GROUP_MIN) goto invalid;
     free(data);
+    if (store_snapshot_cache(dir, fd, &st, *epoch, *rows, *info, *nrow, 1)) {
+        *cache_borrowed = 1;
+    } else {
+        close(fd);
+        *rows_owned = 1;
+    }
     return 0;
 invalid:
     for (size_t i = 0; i < *nrow; ++i) free((*rows)[i]);
     free(*rows); free(*info); free(data);
     *rows = NULL; *info = NULL; *nrow = 0;
+    close(fd);
+    invalidate_snapshot_cache(dir);
     return -1;
 }
 
@@ -502,6 +727,7 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     char **rows = NULL, **next = NULL;
     lease_row_info_t *row_info = NULL, *next_info = NULL;
     size_t nrow = 0, nnext = 0;
+    int cache_borrowed = 0, rows_owned = 0;
     if (!root || !safe_field(owner) || !safe_field(start) ||
         (reason && *reason && !safe_field(reason))) return -1;
     if (op < 1 || op > 7) return -1;
@@ -515,7 +741,8 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     if (n < 0 || (size_t)n >= sizeof(lock_path)) return -1;
     lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock < 0 || flock(lock, LOCK_EX) != 0) goto done;
-    if (read_snapshot(dir, &epoch, &rows, &row_info, &nrow) != 0) goto done;
+    if (read_snapshot(dir, &epoch, &rows, &row_info, &nrow,
+                      &cache_borrowed, &rows_owned) != 0) goto done;
     next = calloc(ROW_LIMIT, sizeof(char *));
     next_info = calloc(ROW_LIMIT, sizeof(lease_row_info_t));
     if (!next || !next_info) goto done;
@@ -674,14 +901,30 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     if (changed) {
         if (epoch >= (uint64_t)INT64_MAX) goto done;
         ++epoch;
-        if (write_snapshot(dir, epoch, next, next_info, nnext) != 0) goto done;
+        if (write_snapshot(dir, epoch, next, next_info, nnext) != 0) {
+            invalidate_snapshot_cache(dir);
+            goto done;
+        }
+        if (cache_borrowed) {
+            release_snapshot_cache();
+            cache_borrowed = 0;
+        }
+        invalidate_snapshot_cache(dir);
+        if (cache_published_snapshot(dir, epoch, next, next_info, nnext)) {
+            next = NULL;
+            next_info = NULL;
+        }
     }
     if (out_epoch) *out_epoch = (long long)epoch;
     result = 0;
 done:
-    if (rows) { for (size_t i = 0; i < nrow; ++i) free(rows[i]); free(rows); }
+    if (cache_borrowed) release_snapshot_cache();
+    if (rows_owned && rows) {
+        for (size_t i = 0; i < nrow; ++i) free(rows[i]);
+        free(rows);
+    }
+    if (rows_owned) free(row_info);
     if (next) { for (size_t i = 0; i < nnext; ++i) free(next[i]); free(next); }
-    free(row_info);
     free(next_info);
     if (lock >= 0) { (void)flock(lock, LOCK_UN); close(lock); }
     return result;

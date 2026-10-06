@@ -4,7 +4,8 @@ program test_immutable_leases
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
-        IMMUTABLE_OK, IMMUTABLE_INVALID, IMMUTABLE_MISSING, immutable_store_init, &
+        IMMUTABLE_OK, IMMUTABLE_INVALID, IMMUTABLE_IO_ERROR, &
+        IMMUTABLE_MISSING, immutable_store_init, &
         immutable_store_put_blob, &
         immutable_store_blob_path, immutable_store_root_set, &
         immutable_store_reason_release, &
@@ -15,10 +16,12 @@ program test_immutable_leases
     use fx_proc, only: proc_pid
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_clock_ms, test_process_sleep_ms
+    use fx_test_fs, only: fx_test_rename
     implicit none
 
     type(test_suite_t) :: suite
     type(immutable_store_t) :: store
+    type(immutable_store_t) :: cold_stores(8)
     type(immutable_lease_t) :: publication, reader
     character(len=512) :: root, source, executable, marker, argument
     character(len=512) :: child_args(5)
@@ -26,7 +29,10 @@ program test_immutable_leases
     character(len=8) :: kinds(1) = ['blob    ']
     character(len=1) :: bytes(8) = ['l', 'e', 'a', 's', 'e', 's', '!', char(10)]
     integer(kind=8) :: epoch1, epoch2, epoch3
-    integer :: ierr, status, child_pid
+    integer(kind=8) :: concurrent_epochs(8)
+    integer :: ierr, status, child_pid, thread_errors(8), thread_id
+    character(len=32) :: thread_owner, thread_start
+    character(len=512) :: cold_root
     logical :: exists, completed, child_exited
 
     call get_command_argument(1, argument)
@@ -54,6 +60,27 @@ program test_immutable_leases
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'lease fixture blob publishes')
     ids(1) = object_id
 
+    do thread_id = 1, 8
+        write(cold_root, '(A,I0,A,I0)') '/var/tmp/fx_leases_cold_', &
+            proc_pid(), '_', thread_id
+        call immutable_store_init(cold_stores(thread_id), trim(cold_root), ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'concurrent cache root initializes')
+    end do
+    !$omp parallel do num_threads(8) private(thread_owner, thread_start, ierr, epoch1)
+    do thread_id = 1, 8
+        write(thread_owner, '(A,I0)') 'cold_owner_', thread_id
+        write(thread_start, '(A,I0)') 'cold_start_', thread_id
+        call immutable_store_root_set(cold_stores(thread_id), trim(thread_owner), &
+            trim(thread_start), 'result', kinds, ids, ierr, epoch1)
+        thread_errors(thread_id) = ierr
+        concurrent_epochs(thread_id) = epoch1
+    end do
+    !$omp end parallel do
+    do thread_id = 1, 8
+        call test_assert_equal_int(suite, IMMUTABLE_OK, thread_errors(thread_id), &
+            'concurrent cold-cache root registers')
+    end do
     call immutable_store_root_set(store, 'owner_a', 'start_1', 'result', &
         kinds, ids, ierr, epoch1)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'root owner A registers')
@@ -90,12 +117,31 @@ program test_immutable_leases
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'read lease releases')
 
     call test_concurrent_publication_barrier(suite, trim(root), trim(object_id))
+    call immutable_store_root_set(store, 'owner_f', 'start_6', 'parallel', &
+        kinds, ids, ierr, epoch1)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+        'a warm parent cache refreshes after child-process publication')
+    call assert_metadata_has(suite, trim(root)//'/.fx-metadata/leases', &
+        'R||owner_d|start_4|parallel|blob|'//trim(object_id), &
+        'parent refresh preserves child publisher A root')
+    call assert_metadata_has(suite, trim(root)//'/.fx-metadata/leases', &
+        'R||owner_e|start_5|parallel|blob|'//trim(object_id), &
+        'parent refresh preserves child publisher B root')
+    call assert_metadata_has(suite, trim(root)//'/.fx-metadata/leases', &
+        'R||owner_f|start_6|parallel|blob|'//trim(object_id), &
+        'parent refresh adds its own root')
     if (suite%n_fail > 0) then
         call test_suite_summary(suite)
         call test_suite_exit(suite)
         stop
     end if
     call test_large_publication_capacity(suite, trim(root))
+    if (suite%n_fail > 0) then
+        call test_suite_summary(suite)
+        call test_suite_exit(suite)
+        stop
+    end if
+    call test_snapshot_cache_replacement(suite, trim(root), kinds, ids)
     if (suite%n_fail > 0) then
         call test_suite_summary(suite)
         call test_suite_exit(suite)
@@ -138,6 +184,70 @@ program test_immutable_leases
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_snapshot_cache_replacement(s, base, root_kinds, root_ids)
+        type(test_suite_t), intent(inout) :: s
+        character(len=*), intent(in) :: base
+        character(len=*), intent(in) :: root_kinds(:), root_ids(:)
+        type(immutable_store_t) :: cache_store
+        type(immutable_lease_t) :: graph_lease
+        character(len=512) :: cache_root, metadata_path, saved_path, bad_path
+        integer :: local_err, unit
+
+        cache_root = trim(base)//'/cache-replacement'
+        metadata_path = trim(cache_root)//'/.fx-metadata/leases'
+        saved_path = trim(metadata_path)//'.saved'
+        bad_path = trim(metadata_path)//'.bad'
+        call immutable_store_init(cache_store, trim(cache_root), local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'snapshot cache fixture initializes')
+        if (local_err /= IMMUTABLE_OK) return
+        call immutable_store_root_set(cache_store, 'cache_owner', 'cache_start', &
+            'cache_reason', root_kinds, root_ids, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'snapshot cache fixture warms a validated snapshot')
+        if (local_err /= IMMUTABLE_OK) return
+
+        local_err = fx_test_rename(trim(metadata_path), trim(saved_path))
+        call test_assert_equal_int(s, 0, local_err, &
+            'snapshot collection removes the cached path')
+        if (local_err /= 0) return
+        call immutable_store_graph_read_lease_acquire(cache_store, 'cache_owner', &
+            'cache_start', 'collected', graph_lease, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_MISSING, local_err, &
+            'collection invalidates the process-local snapshot cache')
+        local_err = fx_test_rename(trim(saved_path), trim(metadata_path))
+        call test_assert_equal_int(s, 0, local_err, &
+            'collected snapshot is restored for replacement check')
+        if (local_err /= 0) return
+        call immutable_store_root_set(cache_store, 'cache_owner', 'cache_start', &
+            'cache_reason', root_kinds, root_ids, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'restored snapshot is parsed and cached again')
+        if (local_err /= IMMUTABLE_OK) return
+
+        open(newunit=unit, file=trim(bad_path), status='replace', &
+            action='write', iostat=local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'corrupt replacement fixture opens')
+        if (local_err /= 0) return
+        write(unit, '(A)', iostat=local_err) 'fxleases2|12'
+        if (local_err == 0) write(unit, '(A)', iostat=local_err) &
+            'G|R||cache_owner|cache_start|cache_reason|blob'
+        if (local_err == 0) write(unit, '(A)', iostat=local_err) 'O|not-an-id'
+        close(unit)
+        call test_assert_equal_int(s, 0, local_err, &
+            'corrupt replacement fixture is written')
+        if (local_err /= 0) return
+        local_err = fx_test_rename(trim(bad_path), trim(metadata_path))
+        call test_assert_equal_int(s, 0, local_err, &
+            'corrupt snapshot replaces the cached inode atomically')
+        if (local_err /= 0) return
+        call immutable_store_graph_read_lease_acquire(cache_store, 'cache_owner', &
+            'cache_start', 'corrupt replacement', graph_lease, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_IO_ERROR, local_err, &
+            'corrupt replacement is rejected instead of served from cache')
+    end subroutine test_snapshot_cache_replacement
 
     subroutine test_large_publication_capacity(s, base)
         type(test_suite_t), intent(inout) :: s
