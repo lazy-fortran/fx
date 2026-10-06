@@ -4,12 +4,13 @@ program test_immutable_leases
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
-        IMMUTABLE_OK, immutable_store_init, immutable_store_put_blob, &
+        IMMUTABLE_OK, IMMUTABLE_INVALID, immutable_store_init, &
+        immutable_store_put_blob, &
         immutable_store_blob_path, immutable_store_root_set, &
         immutable_store_reason_release, &
         immutable_store_publication_lease_acquire, &
         immutable_store_publication_commit, immutable_store_read_lease_acquire, &
-        immutable_store_lease_release
+        immutable_store_lease_release, immutable_store_hash_file
     use fx_proc, only: proc_pid
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_clock_ms, test_process_sleep_ms
@@ -142,14 +143,21 @@ contains
         character(len=*), intent(in) :: base
         type(immutable_store_t) :: capacity_store
         type(immutable_lease_t) :: capacity_lease
-        character(len=512) :: capacity_root, metadata_path
+        character(len=512) :: capacity_root, metadata_path, payload_path, blob_path
+        character(len=512) :: uncovered_payload_path
         character(len=256) :: row
-        character(len=64) :: identity
+        character(len=64) :: identity, expected_id, actual_id, uncovered_id
         character(len=64) :: bootstrap_ids(1)
         character(len=8) :: bootstrap_kinds(1) = ['blob    ']
         character(len=8), allocatable :: kinds(:)
         character(len=64), allocatable :: ids(:)
+        character(len=1) :: payload(8) = &
+            ['n', 'e', 'w', 'b', 'l', 'o', 'b', char(10)]
+        character(len=1) :: uncovered_payload(8) = &
+            ['u', 'n', 'c', 'o', 'v', 'e', 'r', char(10)]
+        integer(int64) :: acquired_epoch, after_put_epoch, released_epoch
         integer :: local_err, unit, i
+        logical :: blob_exists
 
         capacity_root = trim(base)//'/capacity'
         metadata_path = trim(capacity_root)//'/.fx-metadata/leases'
@@ -188,17 +196,72 @@ contains
         do i = 1, size(ids)
             ids(i) = lease_test_id(100000 + i)
         end do
+        payload_path = trim(capacity_root)//'/generation-payload'
+        call write_bytes(trim(payload_path), payload, local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'bulk-publication payload fixture is written')
+        if (local_err /= 0) return
+        call immutable_store_hash_file(trim(payload_path), expected_id, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'bulk-publication payload identity is computed')
+        if (local_err /= IMMUTABLE_OK) return
+        ids(1) = expected_id
         call immutable_store_publication_lease_acquire(capacity_store, &
             'fo-generation-capture', 'capture-start', 'generation-capture', &
-            kinds, ids, capacity_lease, local_err)
+            kinds, ids, capacity_lease, local_err, acquired_epoch)
         call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
             'large publication fits a bounded lease snapshot near the old row cap')
         if (local_err /= IMMUTABLE_OK) return
 
-        call immutable_store_lease_release(capacity_store, capacity_lease, &
+        call immutable_store_put_blob(capacity_store, trim(payload_path), &
+            actual_id, local_err, capacity_lease)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'a bulk publication lease protects a missing blob while it is written')
+        call test_assert(s, actual_id == expected_id, &
+            'the protected blob keeps its content-addressed identity')
+        if (local_err == IMMUTABLE_OK) then
+            blob_path = immutable_store_blob_path(capacity_store, actual_id)
+            call test_assert(s, file_matches_bytes(trim(blob_path), payload), &
+                'the protected publication contains the exact source bytes')
+        end if
+        call read_metadata_epoch(trim(metadata_path), after_put_epoch, local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'metadata epoch can be read after protected blob publication')
+        call test_assert(s, after_put_epoch == acquired_epoch, &
+            'publishing under the bulk lease performs no nested lease writes')
+
+        uncovered_payload_path = trim(capacity_root)//'/uncovered-payload'
+        call write_bytes(trim(uncovered_payload_path), uncovered_payload, local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'uncovered publication payload fixture is written')
+        if (local_err /= 0) return
+        call immutable_store_hash_file(trim(uncovered_payload_path), uncovered_id, &
             local_err)
         call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'uncovered publication identity is computed')
+        if (local_err /= IMMUTABLE_OK) return
+        call immutable_store_put_blob(capacity_store, &
+            trim(uncovered_payload_path), actual_id, local_err, capacity_lease)
+        call test_assert_equal_int(s, IMMUTABLE_INVALID, local_err, &
+            'a bulk lease cannot publish a blob outside its protection scope')
+        call test_assert(s, actual_id == uncovered_id, &
+            'the rejected blob still reports its content identity')
+        blob_path = immutable_store_blob_path(capacity_store, uncovered_id)
+        inquire(file=trim(blob_path), exist=blob_exists)
+        call test_assert(s, .not. blob_exists, &
+            'an uncovered blob is not materialized')
+        call read_metadata_epoch(trim(metadata_path), after_put_epoch, local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'metadata epoch can be read after rejected publication')
+        call test_assert(s, after_put_epoch == acquired_epoch, &
+            'an uncovered publication does not mutate lease metadata')
+
+        call immutable_store_lease_release(capacity_store, capacity_lease, &
+            local_err, released_epoch)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
             'large publication lease releases after the expanded snapshot')
+        call test_assert(s, released_epoch == acquired_epoch + 1_int64, &
+            'the bulk lease release is the only later metadata update')
     end subroutine test_large_publication_capacity
 
     function lease_test_id(value) result(identity)
@@ -363,6 +426,33 @@ contains
         end do
         close(unit)
     end subroutine write_bytes
+
+    logical function file_matches_bytes(path, expected)
+        character(len=*), intent(in) :: path
+        character(len=1), intent(in) :: expected(:)
+        character(len=1) :: actual
+        integer :: file_size, i, ios, unit
+
+        file_matches_bytes = .false.
+        inquire(file=trim(path), size=file_size, iostat=ios)
+        if (ios /= 0) return
+        if (file_size /= size(expected)) return
+        open(newunit=unit, file=trim(path), status='old', access='stream', &
+            form='unformatted', action='read', iostat=ios)
+        if (ios /= 0) return
+        file_matches_bytes = .true.
+        do i = 1, size(expected)
+            read(unit, iostat=ios) actual
+            if (ios /= 0) then
+                file_matches_bytes = .false.
+                exit
+            end if
+            if (actual == expected(i)) cycle
+            file_matches_bytes = .false.
+            exit
+        end do
+        close(unit)
+    end function file_matches_bytes
 
     subroutine create_marker(path)
         character(len=*), intent(in) :: path

@@ -71,6 +71,33 @@ log SHA256 is `be55e3342a0503932555145d20b6190b73436e5b18160a9336e9f752b3dd13d8`
 The Fo candidate containing this provider fix subsequently captured and began
 building the current FFC generation, rechecking the original consumer path.
 
+### 2026-10-06 Fo bulk-lease publication path
+
+The FFC resident start then wrote about 25.7 GB in 6m42s while repeatedly
+reading Fo's 16 MiB `.fx-metadata/leases` snapshot before any generation was
+captured. Fo already held one publication lease for the input closure, but Fx
+`immutable_store_put_blob` acquired and released another lease for each missing
+blob, rewriting the whole snapshot twice per object.
+
+On base `8df747d7794cf2e6222b6808f25130308b93cf8f`, implementation and oracle
+patch SHA256
+`23b46b77b75c95860bc5082498022f973a176159a68b728ff0c78ac47050ea67` adds an
+optional covering-lease path. Fx validates that the active lease belongs to
+this store and names the blob before publishing under it; an uncovered blob is
+rejected. The independent test checks exact bytes and no metadata epoch change
+for a covered blob, plus rejection without blob or metadata changes outside the
+lease scope.
+
+Fo Gremlin `test_immutable_leases` passed 1/1 in session
+`3948852-1791265049-118683619`, generation
+`f0a721ee55b2ec019bc3381ba6dd56a713882e971d8ede0e9edf9f4f74b97374`, using
+driver SHA256
+`f4eea47357a42e472178c399836184720315cf9f18dbf5f16aaa7db34f8c03c0`. The case
+log SHA256 is
+`a99880657651cbaac8637dc810ddc5169d3d74ae23980c7c8864c40c3f97b849`. Next,
+rebuild Fo with the new provider and recheck generation capture on the FFC
+consumer before closing this #57 increment.
+
 Earlier detailed evidence remains at
 [the pre-revision roadmap](https://github.com/lazy-fortran/fx/blob/c8fb7efeb9b9d98cb9bbb06563b5f20c46d80483/ROADMAP.md).
 Fo's [PLAN](https://github.com/lazy-fortran/fo/blob/main/PLAN.md) orders the consumer

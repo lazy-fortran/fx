@@ -34,6 +34,9 @@ module fx_immutable_store
         character(len=:), allocatable :: owner
         character(len=:), allocatable :: owner_start
         character(len=:), allocatable :: token
+        character(len=:), allocatable :: store_root
+        character(len=:), allocatable :: protected_kinds(:)
+        character(len=:), allocatable :: protected_ids(:)
         logical :: active = .false.
     end type immutable_lease_t
 
@@ -140,11 +143,15 @@ contains
         path = object_path(store, 'trees', object_id)
     end function immutable_store_tree_path
 
-    subroutine immutable_store_put_blob(store, source_path, object_id, ierr)
+    !! The optional publication lease must cover this blob and remain active
+    !! until the caller commits or releases that lease.
+    subroutine immutable_store_put_blob(store, source_path, object_id, ierr, &
+            protected_by)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: source_path
         character(len=HASH_LEN), intent(out) :: object_id
         integer, intent(out) :: ierr
+        type(immutable_lease_t), intent(in), optional :: protected_by
         integer :: status
         type(immutable_lease_t) :: publication
         character(len=4) :: kinds(1) = ['blob']
@@ -161,6 +168,15 @@ contains
             return
         else if (status /= IMMUTABLE_MISSING) then
             ierr = status
+            return
+        end if
+
+        if (present(protected_by)) then
+            if (.not. lease_covers_blob(store, protected_by, object_id)) then
+                ierr = IMMUTABLE_INVALID
+                return
+            end if
+            call publish_blob_capture(store, source_path, object_id, ierr)
             return
         end if
 
@@ -354,6 +370,9 @@ contains
             lease%owner = trim(owner)
             lease%owner_start = trim(owner_start)
             lease%token = from_c_text(ignored)
+            lease%store_root = store%root_dir
+            lease%protected_kinds = kinds
+            lease%protected_ids = ids
             lease%active = .true.
         end if
         if (present(epoch)) epoch = int(current_epoch, int64)
@@ -377,7 +396,10 @@ contains
         if (ierr /= IMMUTABLE_OK) return
         call lease_update(store, 6, lease%owner, lease%owner_start, reason, &
             lease%token, '', '', roots, ignored, current_epoch, ierr)
-        if (ierr == IMMUTABLE_OK) lease%active = .false.
+        if (ierr == IMMUTABLE_OK) then
+            lease%active = .false.
+            call clear_lease_scope(lease)
+        end if
         if (present(epoch)) epoch = int(current_epoch, int64)
     end subroutine immutable_store_publication_commit
 
@@ -393,9 +415,41 @@ contains
         if (.not. lease%active) return
         call lease_update(store, 4, lease%owner, lease%owner_start, '', &
             lease%token, '', '', '', ignored, current_epoch, ierr)
-        if (ierr == IMMUTABLE_OK) lease%active = .false.
+        if (ierr == IMMUTABLE_OK) then
+            lease%active = .false.
+            call clear_lease_scope(lease)
+        end if
         if (present(epoch)) epoch = int(current_epoch, int64)
     end subroutine immutable_store_lease_release
+
+    logical function lease_covers_blob(store, lease, object_id) result(covers)
+        type(immutable_store_t), intent(in) :: store
+        type(immutable_lease_t), intent(in) :: lease
+        character(len=*), intent(in) :: object_id
+        integer :: i
+
+        covers = .false.
+        if (.not. lease%active) return
+        if (.not. allocated(lease%store_root)) return
+        if (trim(lease%store_root) /= trim(store%root_dir)) return
+        if (.not. allocated(lease%protected_kinds)) return
+        if (.not. allocated(lease%protected_ids)) return
+        if (size(lease%protected_kinds) /= size(lease%protected_ids)) return
+        do i = 1, size(lease%protected_ids)
+            if (trim(lease%protected_kinds(i)) /= 'blob') cycle
+            if (trim(lease%protected_ids(i)) /= trim(object_id)) cycle
+            covers = .true.
+            return
+        end do
+    end function lease_covers_blob
+
+    subroutine clear_lease_scope(lease)
+        type(immutable_lease_t), intent(inout) :: lease
+
+        if (allocated(lease%store_root)) deallocate(lease%store_root)
+        if (allocated(lease%protected_kinds)) deallocate(lease%protected_kinds)
+        if (allocated(lease%protected_ids)) deallocate(lease%protected_ids)
+    end subroutine clear_lease_scope
 
     subroutine acquire_lease(store, operation, owner, owner_start, reason, &
             kind, object_id, lease, ierr, epoch)
