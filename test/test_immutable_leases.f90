@@ -4,13 +4,14 @@ program test_immutable_leases
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
-        IMMUTABLE_OK, IMMUTABLE_INVALID, immutable_store_init, &
+        IMMUTABLE_OK, IMMUTABLE_INVALID, IMMUTABLE_MISSING, immutable_store_init, &
         immutable_store_put_blob, &
         immutable_store_blob_path, immutable_store_root_set, &
         immutable_store_reason_release, &
         immutable_store_publication_lease_acquire, &
         immutable_store_publication_commit, immutable_store_read_lease_acquire, &
-        immutable_store_lease_release, immutable_store_hash_file
+        immutable_store_lease_release, immutable_store_hash_file, &
+        immutable_store_graph_read_lease_acquire
     use fx_proc, only: proc_pid
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_clock_ms, test_process_sleep_ms
@@ -142,12 +143,14 @@ contains
         type(test_suite_t), intent(inout) :: s
         character(len=*), intent(in) :: base
         type(immutable_store_t) :: capacity_store
-        type(immutable_lease_t) :: capacity_lease
+        type(immutable_lease_t) :: capacity_lease, graph_lease
         character(len=512) :: capacity_root, metadata_path, payload_path, blob_path
         character(len=512) :: uncovered_payload_path
-        character(len=256) :: row
+        character(len=1100) :: row
         character(len=64) :: identity, expected_id, actual_id, uncovered_id
         character(len=64) :: bootstrap_ids(1)
+        character(len=238) :: owner_field, start_field, reason_field, kind_field
+        character(len=4) :: group_suffix
         character(len=8) :: bootstrap_kinds(1) = ['blob    ']
         character(len=8), allocatable :: kinds(:)
         character(len=64), allocatable :: ids(:)
@@ -155,8 +158,13 @@ contains
             ['n', 'e', 'w', 'b', 'l', 'o', 'b', char(10)]
         character(len=1) :: uncovered_payload(8) = &
             ['u', 'n', 'c', 'o', 'v', 'e', 'r', char(10)]
+        integer(int64), parameter :: snapshot_limit = &
+            16_int64 * 1024_int64 * 1024_int64
         integer(int64) :: acquired_epoch, after_put_epoch, released_epoch
-        integer :: local_err, unit, i
+        integer(int64) :: before_uncovered_epoch
+        integer(int64) :: graph_epoch, graph_released_epoch, roots_released_epoch
+        integer(int64) :: fixture_size, publication_bytes
+        integer :: local_err, unit, i, g
         logical :: blob_exists
 
         capacity_root = trim(base)//'/capacity'
@@ -179,17 +187,46 @@ contains
             'large lease snapshot opens')
         if (local_err /= 0) return
         write(unit, '(a)', iostat=local_err) 'fxleases1|0'
-        do i = 1, 65000
+        start_field = repeat('s', len(start_field))
+        reason_field = repeat('r', len(reason_field))
+        kind_field = repeat('k', len(kind_field))
+        do g = 1, 16
+            write(group_suffix, '(I4.4)') g
+            owner_field = repeat('o', 231)//'grp'//group_suffix
+            do i = 1, 1017
+                if (local_err /= 0) exit
+                identity = lease_test_id((g - 1) * 1017 + i)
+                row = 'R||'//owner_field//'|'//start_field//'|'//reason_field// &
+                    '|'//kind_field//'|'//identity
+                if (g == 1 .and. i == 1) call test_assert(s, &
+                    len_trim(row) == 1023, &
+                    'legacy lease rows fit the previous 1024-byte reader limit')
+                write(unit, '(a)', iostat=local_err) trim(row)
+            end do
             if (local_err /= 0) exit
-            identity = lease_test_id(i)
-            row = 'R||fo-generation|'//identity//'|generation-'//identity// &
-                '|blob|'//identity
+        end do
+        do i = 1, 8
+            if (local_err /= 0) exit
+            identity = lease_test_id(200000 + i)
+            row = 'R||sentinel-owner|sentinel-start|sentinel-reason|blob|'//identity
             write(unit, '(a)', iostat=local_err) trim(row)
         end do
         close(unit)
         call test_assert_equal_int(s, 0, local_err, &
             'large lease snapshot fixture is written')
         if (local_err /= 0) return
+        identity = lease_test_id(300001)
+        row = 'P|P1|fo-generation-capture|capture-start|'// &
+            'generation-capture|blob|'//identity
+        publication_bytes = 1000_int64 * int(len_trim(row) + 1, int64)
+        inquire(file=trim(metadata_path), size=fixture_size, iostat=local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'large lease snapshot size is available')
+        if (local_err /= 0) return
+        call test_assert(s, fixture_size < snapshot_limit, &
+            'legacy-valid lease fixture starts below the snapshot byte limit')
+        call test_assert(s, fixture_size + publication_bytes > snapshot_limit, &
+            'the publication exceeds the old snapshot byte limit')
 
         allocate(kinds(1000), ids(1000))
         kinds = 'blob'
@@ -230,6 +267,50 @@ contains
         call test_assert(s, after_put_epoch == acquired_epoch, &
             'publishing under the bulk lease performs no nested lease writes')
 
+        do g = 1, 16
+            write(group_suffix, '(I4.4)') g
+            owner_field = repeat('o', 231)//'grp'//group_suffix
+            call immutable_store_graph_read_lease_acquire(capacity_store, &
+                trim(owner_field), trim(start_field), 'roundtrip', graph_lease, &
+                local_err, graph_epoch)
+            call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+                'compacted generation roots can be read as a graph')
+            if (local_err /= IMMUTABLE_OK) return
+            call immutable_store_lease_release(capacity_store, graph_lease, &
+                local_err, graph_released_epoch)
+            call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+                'graph lease from compacted roots releases')
+            call test_assert(s, graph_released_epoch == graph_epoch + 1_int64, &
+                'graph lease release advances the compacted snapshot once')
+            call immutable_store_reason_release(capacity_store, trim(owner_field), &
+                trim(start_field), trim(reason_field), local_err, &
+                roots_released_epoch)
+            call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+                'compacted generation roots can be released by their identity')
+            call test_assert(s, &
+                roots_released_epoch == graph_released_epoch + 1_int64, &
+                'root release advances the compacted snapshot once')
+            call immutable_store_graph_read_lease_acquire(capacity_store, &
+                trim(owner_field), trim(start_field), 'after-release', graph_lease, &
+                local_err)
+            call test_assert_equal_int(s, IMMUTABLE_MISSING, local_err, &
+                'released generation roots no longer produce a graph lease')
+            if (local_err /= IMMUTABLE_MISSING) return
+        end do
+
+        call immutable_store_graph_read_lease_acquire(capacity_store, &
+            'sentinel-owner', 'sentinel-start', 'sentinel-read', graph_lease, &
+            local_err, graph_epoch)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'unrelated sentinel roots survive compacted generation updates')
+        if (local_err /= IMMUTABLE_OK) return
+        call immutable_store_lease_release(capacity_store, graph_lease, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'sentinel graph lease releases after compacted updates')
+        call read_metadata_epoch(trim(metadata_path), after_put_epoch, local_err)
+        call test_assert_equal_int(s, 0, local_err, &
+            'metadata epoch can be read after compacted round-trip checks')
+
         uncovered_payload_path = trim(capacity_root)//'/uncovered-payload'
         call write_bytes(trim(uncovered_payload_path), uncovered_payload, local_err)
         call test_assert_equal_int(s, 0, local_err, &
@@ -250,18 +331,19 @@ contains
         inquire(file=trim(blob_path), exist=blob_exists)
         call test_assert(s, .not. blob_exists, &
             'an uncovered blob is not materialized')
-        call read_metadata_epoch(trim(metadata_path), after_put_epoch, local_err)
+        call read_metadata_epoch(trim(metadata_path), before_uncovered_epoch, &
+            local_err)
         call test_assert_equal_int(s, 0, local_err, &
             'metadata epoch can be read after rejected publication')
-        call test_assert(s, after_put_epoch == acquired_epoch, &
+        call test_assert(s, before_uncovered_epoch == after_put_epoch, &
             'an uncovered publication does not mutate lease metadata')
 
         call immutable_store_lease_release(capacity_store, capacity_lease, &
             local_err, released_epoch)
         call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
             'large publication lease releases after the expanded snapshot')
-        call test_assert(s, released_epoch == acquired_epoch + 1_int64, &
-            'the bulk lease release is the only later metadata update')
+        call test_assert(s, released_epoch == after_put_epoch + 1_int64, &
+            'bulk lease release is the only metadata update after the round trips')
     end subroutine test_large_publication_capacity
 
     function lease_test_id(value) result(identity)

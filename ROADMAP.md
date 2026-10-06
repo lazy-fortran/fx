@@ -98,6 +98,42 @@ log SHA256 is
 rebuild Fo with the new provider and recheck generation capture on the FFC
 consumer before closing this #57 increment.
 
+### 2026-10-06 compact lease snapshot for Fo capture
+
+The original-cache FFC recheck reached 76,287 lease rows and a 16,753,072-byte
+snapshot, just below the 16 MiB byte limit. 65,596 retained `fo-generation`
+roots accounted for 14,955,888 bytes, with repeated owner/start/reason fields.
+Generation capture then failed before any FFC test ran with `cannot protect
+generation objects during publication` (Fo Gremlin session
+`4038897-1791266815-690662295`, generation
+`3c9a6a5cce7230934433a0699a9b50f980f91e02b5b453f1f28d41201c462ded`). The row
+count was below 262,144; the byte limit was saturated by retained roots.
+
+On base `b5b553b7dbbd30bd6630cae8f50a0891cb2ed057`, source/test patch SHA256
+`a541abf28afd14ed0e4de4b094389f14f0f33ce5ed64ec3d4b2d762367e1525d` writes
+long consecutive groups in `fxleases2` form: one shared lease scope followed
+by the object IDs. Reads accept both v1 and v2, expanding groups into the same
+logical rows before lease operations. The logical row ceiling remains 262,144
+and the on-disk snapshot stays bounded at 16 MiB. The independent fixture
+starts with a valid v1 snapshot of 16,663,492 bytes. Its 16,272 long roots each
+have 1,023-byte row text, within the previous 1,024-byte reader limit. Adding
+the 1,000 publication rows would produce 16,793,492 bytes and exceed the cap.
+The API oracle acquires and releases graph leases for all 16 root groups,
+releases each exact root identity, checks absence afterward, and confirms an
+unrelated sentinel graph remains readable.
+
+Fo Gremlin `test_immutable_leases` passed 1/1 in session
+`4098610-1791268859-117803425`, generation
+`70ce0b3ef51375bb95c5b1ba13f7a56e061da949d892504cf67c04cfd25b78fb`, with
+driver SHA256
+`1b31346c237ad759c3d5cf459435dc0f29a9b71b1de6ab9b54f95daca883a25f`. The case
+log SHA256 is
+`486a0c69a4eafc058585c63e30793dcac70f6449f6a9501ac0f87393bcc79079`.
+Older Fx binaries reject the v2 header and fail closed, so all active consumers
+sharing this lease store must use the updated provider before it writes a v2
+snapshot. Next, rebuild Fo with this provider and recheck the original FFC
+capture plus its four required compiler targets and 32-sample pilot.
+
 Earlier detailed evidence remains at
 [the pre-revision roadmap](https://github.com/lazy-fortran/fx/blob/c8fb7efeb9b9d98cb9bbb06563b5f20c46d80483/ROADMAP.md).
 Fo's [PLAN](https://github.com/lazy-fortran/fo/blob/main/PLAN.md) orders the consumer
