@@ -9,10 +9,13 @@ module fx_immutable_owned
     use fx_immutable_manifest, only: immutable_id_valid
     implicit none
     private
-    public :: owned_open_store, owned_begin_path, owned_begin_at, owned_fd
-    public :: owned_finish, owned_dispose, owned_close, owned_sync
+    public :: owned_open_store, owned_begin_path, owned_begin_path_ephemeral
+    public :: owned_begin_at, owned_fd
+    public :: owned_finish, owned_finish_ephemeral, owned_dispose, owned_close
+    public :: owned_sync
     public :: owned_open_verified, owned_hash_fd, owned_read_manifest
-    public :: owned_materialize_blob, owned_file_info
+    public :: owned_materialize_blob, owned_materialize_blob_ephemeral
+    public :: owned_file_info
     public :: owned_copy_source, owned_write, owned_publish, owned_reject
     integer, parameter :: HASH_BLOCK = 65536
     interface
@@ -49,6 +52,13 @@ module fx_immutable_owned
             integer(c_int), value :: tree
             type(c_ptr) :: handle
         end function owned_begin_path
+        function owned_begin_path_ephemeral(path, tree) &
+                bind(C, name='fx_owned_begin_path_ephemeral') result(handle)
+            import :: c_char, c_int, c_ptr
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: tree
+            type(c_ptr) :: handle
+        end function owned_begin_path_ephemeral
         function owned_begin_at(parent, name, tree) &
                 bind(C, name='fx_owned_begin_at') result(handle)
             import :: c_char, c_int, c_ptr
@@ -66,6 +76,12 @@ module fx_immutable_owned
             type(c_ptr), value :: handle
             integer(c_int), value :: mode
         end function owned_finish
+        integer(c_int) function owned_finish_ephemeral(handle, mode) &
+                bind(C, name='fx_owned_finish_ephemeral')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: handle
+            integer(c_int), value :: mode
+        end function owned_finish_ephemeral
         subroutine owned_dispose(handle) bind(C, name='fx_owned_dispose')
             import :: c_ptr
             type(c_ptr), value :: handle
@@ -207,6 +223,33 @@ contains
         integer, intent(in) :: mode, strategy
         logical, intent(out) :: used_clone
         integer, intent(out) :: ierr
+
+        call materialize_blob(handle, root, id, mode, strategy, .false., &
+            used_clone, ierr)
+    end subroutine owned_materialize_blob
+
+    subroutine owned_materialize_blob_ephemeral(handle, root, id, mode, strategy, &
+            used_clone, ierr)
+        type(c_ptr), intent(in) :: handle
+        integer(c_int), intent(in) :: root
+        character(len=*), intent(in) :: id
+        integer, intent(in) :: mode, strategy
+        logical, intent(out) :: used_clone
+        integer, intent(out) :: ierr
+
+        call materialize_blob(handle, root, id, mode, strategy, .true., &
+            used_clone, ierr)
+    end subroutine owned_materialize_blob_ephemeral
+
+    subroutine materialize_blob(handle, root, id, mode, strategy, ephemeral, &
+            used_clone, ierr)
+        type(c_ptr), intent(in) :: handle
+        integer(c_int), intent(in) :: root
+        character(len=*), intent(in) :: id
+        integer, intent(in) :: mode, strategy
+        logical, intent(in) :: ephemeral
+        logical, intent(out) :: used_clone
+        integer, intent(out) :: ierr
         integer(c_int) :: fd, cloned, status, cleanup
         character(len=64) :: actual
 
@@ -224,10 +267,14 @@ contains
             ierr = IMMUTABLE_CORRUPT
             return
         end if
-        status = owned_finish(handle, int(mode, c_int))
+        if (ephemeral) then
+            status = owned_finish_ephemeral(handle, int(mode, c_int))
+        else
+            status = owned_finish(handle, int(mode, c_int))
+        end if
         ierr = IMMUTABLE_IO_ERROR
         if (status /= 0_c_int) return
         used_clone = cloned /= 0_c_int
         ierr = IMMUTABLE_OK
-    end subroutine owned_materialize_blob
+    end subroutine materialize_blob
 end module fx_immutable_owned

@@ -148,7 +148,7 @@ static int open_matching_parent(const char *src, const char *dst,
     return fd;
 }
 
-int fx_immutable_mkdirs_sync(const char *path)
+static int immutable_mkdirs(const char *path, int sync)
 {
     char clean[PATH_MAX], component[PATH_MAX], walked[PATH_MAX];
     const char *cursor, *start;
@@ -194,10 +194,11 @@ int fx_immutable_mkdirs_sync(const char *path)
         memcpy(walked + used, component, length);
         used += length;
         walked[used] = '\0';
-        if (fsync(next) != 0) { close(next); goto fail; }
-        /* Also sync when another creator's mkdir is observed: it may still
-           be waiting to persist this parent entry. */
-        if (fsync(fd) != 0) { close(next); goto fail; }
+        if (sync) {
+            if (fsync(next) != 0) { close(next); goto fail; }
+            /* Another creator's mkdir may still await parent persistence. */
+            if (fsync(fd) != 0) { close(next); goto fail; }
+        }
         close(fd);
         fd = next;
     }
@@ -206,6 +207,16 @@ int fx_immutable_mkdirs_sync(const char *path)
 fail:
     close(fd);
     return -1;
+}
+
+int fx_immutable_mkdirs_sync(const char *path)
+{
+    return immutable_mkdirs(path, 1);
+}
+
+int fx_immutable_mkdirs_ephemeral(const char *path)
+{
+    return immutable_mkdirs(path, 0);
 }
 
 int fx_immutable_resolve_root(const char *path, char *resolved, size_t capacity)

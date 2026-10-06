@@ -6,6 +6,7 @@ module fx_immutable_store
     use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_close, owned_begin_path, owned_dispose, owned_materialize_blob, &
+        owned_begin_path_ephemeral, owned_materialize_blob_ephemeral, &
         owned_file_info, owned_fd, owned_hash_fd, &
         owned_copy_source, owned_publish, owned_reject
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_IO_ERROR, &
@@ -76,6 +77,7 @@ module fx_immutable_store
     public :: immutable_store_tree_path, immutable_store_put_blob
     public :: immutable_store_verify_blob
     public :: immutable_store_materialize_blob
+    public :: immutable_store_materialize_blob_ephemeral
     public :: immutable_store_root_set
     public :: immutable_store_reason_release
     public :: immutable_store_read_lease_acquire
@@ -258,6 +260,31 @@ contains
         integer, intent(in) :: mode, strategy
         logical, intent(out) :: used_clone
         integer, intent(out) :: ierr
+        call materialize_blob(store, object_id, dest_path, mode, strategy, &
+            .false., used_clone, ierr)
+    end subroutine immutable_store_materialize_blob
+
+    subroutine immutable_store_materialize_blob_ephemeral(store, object_id, &
+            dest_path, mode, strategy, used_clone, ierr)
+        !! Materialize verified CAS bytes for rebuildable outputs without fsync.
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: object_id, dest_path
+        integer, intent(in) :: mode, strategy
+        logical, intent(out) :: used_clone
+        integer, intent(out) :: ierr
+
+        call materialize_blob(store, object_id, dest_path, mode, strategy, &
+            .true., used_clone, ierr)
+    end subroutine immutable_store_materialize_blob_ephemeral
+
+    subroutine materialize_blob(store, object_id, dest_path, mode, strategy, &
+            ephemeral, used_clone, ierr)
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: object_id, dest_path
+        integer, intent(in) :: mode, strategy
+        logical, intent(in) :: ephemeral
+        logical, intent(out) :: used_clone
+        integer, intent(out) :: ierr
         integer(c_int) :: root, cleanup
         type(c_ptr) :: transaction
 
@@ -268,22 +295,28 @@ contains
         if (mode < 0 .or. mode > 511 .or. strategy < &
             IMMUTABLE_MATERIALIZE_AUTO .or. strategy > &
             IMMUTABLE_MATERIALIZE_CLONE) return
-        ! The owned path opens and verifies the source before copying from its
-        ! held descriptor, then verifies and atomically publishes the output.
-        ! A pre-open unlink is a cache miss; an opened FD survives unlink. Keep
-        ! tree/action graph leases across multi-file consumers independently.
         root = owned_open_store(store%root_dir//c_null_char)
         ierr = IMMUTABLE_CORRUPT
         if (root < 0) return
-        transaction = owned_begin_path(trim(dest_path)//c_null_char, 0_c_int)
+        if (ephemeral) then
+            transaction = owned_begin_path_ephemeral( &
+                trim(dest_path)//c_null_char, 0_c_int)
+        else
+            transaction = owned_begin_path(trim(dest_path)//c_null_char, 0_c_int)
+        end if
         ierr = IMMUTABLE_IO_ERROR
         if (c_associated(transaction)) then
-            call owned_materialize_blob(transaction, root, object_id, mode, &
-                strategy, used_clone, ierr)
+            if (ephemeral) then
+                call owned_materialize_blob_ephemeral(transaction, root, &
+                    object_id, mode, strategy, used_clone, ierr)
+            else
+                call owned_materialize_blob(transaction, root, object_id, &
+                    mode, strategy, used_clone, ierr)
+            end if
             call owned_dispose(transaction)
         end if
         cleanup = owned_close(root)
-    end subroutine immutable_store_materialize_blob
+    end subroutine materialize_blob
 
     subroutine immutable_store_root_set(store, owner, owner_start, reason, &
             kinds, ids, ierr, epoch)

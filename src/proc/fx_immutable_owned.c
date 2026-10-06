@@ -25,6 +25,7 @@
 #endif
 int fx_immutable_open_directory(const char *path);
 int fx_immutable_mkdirs_sync(const char *path);
+int fx_immutable_mkdirs_ephemeral(const char *path);
 int fx_immutable_resolve_root(const char *path, char *resolved, size_t capacity);
 int fx_immutable_tempfile(int directory, const char *name);
 
@@ -122,7 +123,7 @@ void *fx_owned_begin_at(int parent, const char *name, int tree)
     }
     return t;
 }
-void *fx_owned_begin_path(const char *path, int tree)
+static void *owned_begin_path(const char *path, int tree, int sync)
 {
     char parent[PATH_MAX], resolved_parent[PATH_MAX];
     const char *slash = strrchr(path, '/');
@@ -135,13 +136,23 @@ void *fx_owned_begin_path(const char *path, int tree)
     if (slash) { memcpy(parent, path, length); parent[length] = '\0'; }
     else strcpy(parent, ".");
     if (fx_immutable_resolve_root(parent, resolved_parent,
-                                  sizeof(resolved_parent)) != 0 ||
-        fx_immutable_mkdirs_sync(resolved_parent) != 0) return NULL;
+                                  sizeof(resolved_parent)) != 0) return NULL;
+    if (sync) {
+        if (fx_immutable_mkdirs_sync(resolved_parent) != 0) return NULL;
+    } else if (fx_immutable_mkdirs_ephemeral(resolved_parent) != 0) return NULL;
     fd = fx_immutable_open_directory(resolved_parent);
     if (fd < 0) return NULL;
     t = fx_owned_begin_at(fd, name, tree);
     close(fd);
     return t;
+}
+void *fx_owned_begin_path(const char *path, int tree)
+{
+    return owned_begin_path(path, tree, 1);
+}
+void *fx_owned_begin_path_ephemeral(const char *path, int tree)
+{
+    return owned_begin_path(path, tree, 0);
 }
 int fx_owned_fd(void *handle) { return ((owned_t *)handle)->fd; }
 static int copy_fd(int input, int output)
@@ -236,7 +247,7 @@ static int lock_parent(owned_t *t)
     do { rc = flock(t->parent, LOCK_EX); } while (rc != 0 && errno == EINTR);
     return rc;
 }
-static int publish_boundary(owned_t *t, int cas)
+static int publish_boundary(owned_t *t, int cas, int sync)
 {
     int rc;
     if (cas && lock_parent(t) != 0) return -1;
@@ -253,23 +264,24 @@ static int publish_boundary(owned_t *t, int cas)
         rc = publish_owned_file(t, cas);
     }
     if (rc != 0) {
-        if (cas && errno == EEXIST && fsync(t->parent) == 0) {
+        if (cas && errno == EEXIST && (!sync || fsync(t->parent) == 0)) {
             rc = 1;
             goto done;
         }
         rc = (errno == ENOTSUP || errno == EOPNOTSUPP) ? 2 : -1;
         goto done;
     }
-    if (retain_publication(t, cas) != 0 || fsync(t->published_fd) != 0) {
+    if (retain_publication(t, cas) != 0 ||
+        (sync && fsync(t->published_fd) != 0)) {
         rc = -1;
         goto done;
     }
-    rc = fsync(t->parent);
+    rc = sync ? fsync(t->parent) : 0;
 done:
     if (cas && flock(t->parent, LOCK_UN) != 0) return -1;
     return rc;
 }
-static int finish_owned(owned_t *t, int mode, int cas)
+static int finish_owned(owned_t *t, int mode, int cas, int sync)
 {
     int rc;
     if (!fx_owned_same_entry(t->parent, t->temp, t->staging)) return -1;
@@ -279,12 +291,20 @@ static int finish_owned(owned_t *t, int mode, int cas)
         if (!fx_owned_same_entry(t->parent, t->temp, t->staging) ||
             !fx_owned_same_entry(t->staging, "payload", t->fd)) return -1;
     }
-    if (fchmod(t->fd, (mode_t)mode) != 0 || fsync(t->fd) != 0) return -1;
-    rc = publish_boundary(t, cas);
+    if (fchmod(t->fd, (mode_t)mode) != 0 || (sync && fsync(t->fd) != 0))
+        return -1;
+    rc = publish_boundary(t, cas, sync);
     return rc;
 }
-int fx_owned_finish(void *handle, int mode) { return finish_owned(handle, mode, 0); }
-int fx_owned_publish(void *handle) { return finish_owned(handle, 0444, 1); }
+int fx_owned_finish(void *handle, int mode)
+{
+    return finish_owned(handle, mode, 0, 1);
+}
+int fx_owned_finish_ephemeral(void *handle, int mode)
+{
+    return finish_owned(handle, mode, 0, 0);
+}
+int fx_owned_publish(void *handle) { return finish_owned(handle, 0444, 1, 1); }
 int fx_owned_reject(void *handle)
 {
     owned_t *t = handle;

@@ -12,6 +12,7 @@ program test_immutable_materialization
     use fx_immutable_store, only: immutable_store_t, immutable_tree_entry_t, &
         immutable_store_init, immutable_store_put_blob, immutable_store_blob_path, &
         immutable_store_materialize_blob, &
+        immutable_store_materialize_blob_ephemeral, &
         IMMUTABLE_OK, IMMUTABLE_INVALID, IMMUTABLE_BLOB, &
         IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, &
         IMMUTABLE_MATERIALIZE_COPY, IMMUTABLE_MATERIALIZE_CLONE
@@ -23,6 +24,11 @@ program test_immutable_materialization
     use fx_immutable_manifest, only: immutable_entries_canonical, immutable_manifest_serialize
     implicit none
     interface
+        integer(c_int) function c_access(path, mode) bind(C, name='access')
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+        end function c_access
         integer(c_int) function probe_alias(dir, a, b) bind(C, name='fx_immutable_probe_alias')
             import :: c_int, c_char
             character(kind=c_char), intent(in) :: dir(*), a(*), b(*)
@@ -207,6 +213,7 @@ contains
 
     subroutine test_materialization_contract()
         character(len=512) :: blob_destination, tree_destination, outside
+        character(len=512) :: ephemeral_destination
         character(len=:), allocatable :: observed
         logical :: cloned
         integer :: result, ios, local_err
@@ -218,6 +225,8 @@ contains
         call write_text(trim(outside), 'OUTSIDE MATERIALIZATION SENTINEL')
         blob_destination = trim(root)//'/materialization-contract/blob'
         tree_destination = trim(root)//'/materialization-contract/tree'
+        ephemeral_destination = &
+            trim(root)//'/materialization-contract/ephemeral/blob'
 
         call immutable_store_materialize_blob(store, blob, &
             trim(blob_destination), 420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
@@ -226,6 +235,18 @@ contains
         call read_text(trim(blob_destination), observed, ios)
         call test_assert(suite, ios == 0 .and. observed == PAYLOAD, &
             'returned blob materialization contains every expected byte')
+
+        call immutable_store_materialize_blob_ephemeral(store, blob, &
+            trim(ephemeral_destination), 493, IMMUTABLE_MATERIALIZE_COPY, &
+            cloned, result)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, result, &
+            'ephemeral blob materialization completes')
+        call read_text(trim(ephemeral_destination), observed, ios)
+        call test_assert(suite, ios == 0 .and. observed == PAYLOAD, &
+            'ephemeral materialization preserves blob bytes')
+        call test_assert_equal_int(suite, 0, int(c_access( &
+            trim(ephemeral_destination)//c_null_char, 1_c_int)), &
+            'ephemeral materialization preserves executable mode')
 
         call immutable_store_materialize_tree(store, tree, &
             trim(tree_destination), IMMUTABLE_MATERIALIZE_COPY, cloned, result)
@@ -328,6 +349,10 @@ contains
             420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
         call test_assert_equal_int(suite, IMMUTABLE_CORRUPT, result, &
             'materialization rejects bytes that do not match the blob ID')
+        call immutable_store_materialize_blob_ephemeral(store, blob, &
+            trim(destination), 420, IMMUTABLE_MATERIALIZE_COPY, cloned, result)
+        call test_assert_equal_int(suite, IMMUTABLE_CORRUPT, result, &
+            'ephemeral materialization rejects corrupted immutable bytes')
         call read_text(trim(destination), observed, ios)
         call test_assert(suite, ios == 0 .and. &
             observed == 'existing destination sentinel', &
