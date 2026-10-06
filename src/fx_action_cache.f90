@@ -303,8 +303,8 @@ contains
         local_result_entry_matches = mode == entry%mode
     end function local_result_entry_matches
 
-    subroutine cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
-            output_id, required_smod_name)
+    recursive subroutine cache_restore_action(c, action_id, obj_path, mod_dir, &
+            restored, output_id, required_smod_name)
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: action_id, obj_path, mod_dir
         logical, intent(out) :: restored
