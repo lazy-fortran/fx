@@ -3,8 +3,6 @@ program test_action_result_read_lease
         test_assert_equal_int, test_suite_summary, test_suite_exit
     use fx_proc, only: proc_pid
     use fx_hash, only: sha256_string
-    use fx_cache, only: cache_t, cache_init
-    use fx_action_cache, only: cache_store_action, cache_restore_action
     use action_publication_oracle, only: publication_probe_t, &
         publication_probe_lock, publication_probe_observe, publication_probe_resume, &
         publication_probe_unlock
@@ -63,13 +61,12 @@ program test_action_result_read_lease
     end if
     call test_assert_equal_int(suite, 0, ierr, 'action result store initializes')
     call get_command_argument(0, executable)
-    call test_pending_publication(.false.)
+    call test_pending_publication()
     if (suite%n_fail > 0) then
         call test_suite_summary(suite)
         call test_suite_exit(suite)
         stop
     end if
-    call test_pending_publication(.true.)
     store_root = trim(root)//'/store/v2'
     call action_result_store_init(store, trim(store_root), ierr)
 
@@ -296,43 +293,27 @@ contains
 
     subroutine run_pending_publisher()
         type(action_result_store_t) :: child_store
-        type(cache_t) :: legacy
         type(immutable_tree_entry_t) :: outputs(2)
-        character(len=512) :: base, mode, paths(2)
+        character(len=512) :: base, paths(2)
         character(len=64) :: result_id
         integer :: local_err
-        logical :: restored
 
         call get_command_argument(2, base)
-        call get_command_argument(3, mode)
-        if (trim(mode) == 'legacy') then
-            call cache_init(legacy, trim(base)//'/cache')
-            call cache_restore_action(legacy, 'pending-action', &
-                trim(base)//'/imported.o', trim(base)//'/imported', restored)
-            if (.not. restored) stop 72
-        else
-            call action_result_store_init(child_store, &
-                trim(base)//'/cache/store/v2', local_err)
-            if (local_err /= 0) then
-                write (*, '(A,I0,2A)') 'action store init error=', local_err, &
-                    ' root=', trim(base)//'/cache/store/v2'
-                stop 73
-            end if
-            paths = [character(len=512) :: trim(base)//'/source.o', &
-                trim(base)//'/widget.mod']
-            outputs(1) = result_entry('object', 'object', 420)
-            outputs(2) = result_entry('module-widget', 'module', 420)
-            call action_result_publish_files(child_store, 'pending-action', &
-                paths, outputs, result_id, local_err)
-            if (local_err /= ACTION_RESULT_OK) stop 74
-        end if
+        call action_result_store_init(child_store, &
+            trim(base)//'/cache/store/v2', local_err)
+        if (local_err /= 0) stop 73
+        paths = [character(len=512) :: trim(base)//'/source.o', &
+            trim(base)//'/widget.mod']
+        outputs(1) = result_entry('object', 'object', 420)
+        outputs(2) = result_entry('module-widget', 'module', 420)
+        call action_result_publish_files(child_store, 'pending-action', &
+            paths, outputs, result_id, local_err)
+        if (local_err /= ACTION_RESULT_OK) stop 74
     end subroutine run_pending_publisher
 
-    subroutine test_pending_publication(import_legacy)
-        logical, intent(in) :: import_legacy
-        type(cache_t) :: legacy
+    subroutine test_pending_publication()
         type(publication_probe_t) :: probe
-        character(len=512) :: base, mode
+        character(len=512) :: base
         character(len=512) :: acquired, restore_ready, restore_release
         character(len=512) :: restore_done, restore_finish, restore_released
         character(len=512) :: destination
@@ -340,11 +321,9 @@ contains
         integer :: publisher, reader_pid, exit_status, local_err
         logical :: reaped, found
 
-        mode = 'ordinary'
-        if (import_legacy) mode = 'legacy'
-        base = trim(root)//'/'//trim(mode)
-        call prepare_pending_fixture(base, import_legacy, legacy)
-        call start_pending_publisher(base, mode, publisher, probe, pending_id)
+        base = trim(root)//'/pending'
+        call prepare_pending_fixture(base)
+        call start_pending_publisher(base, publisher, probe, pending_id)
         if (publisher <= 0) return
         call start_pending_reader(base, reader_pid, destination, acquired, &
             restore_ready, restore_release, restore_done, restore_finish, &
@@ -367,47 +346,34 @@ contains
         call wait_for_child(publisher, 15000, exit_status, reaped)
         call test_assert(suite, reaped, 'pending publisher is reaped')
         call test_assert_equal_int(suite, 0, exit_status, &
-            'publication or legacy import retry restores successfully')
+            'publication completes successfully')
         call assert_metadata_record('P', pending_id, 'publication', .false.)
         call assert_metadata_record('R', pending_id, 'bound', .true.)
         call write_text(trim(acquired)//'-lookup', 'lookup-published-binding')
         call finish_pending_reader(reader_pid, destination, pending_id, &
             restore_ready, restore_release, restore_done, restore_finish, &
             restore_released)
-        if (import_legacy) call assert_legacy_conflict(legacy, base)
     end subroutine test_pending_publication
 
-    subroutine prepare_pending_fixture(base, import_legacy, legacy)
+    subroutine prepare_pending_fixture(base)
         character(len=*), intent(in) :: base
-        logical, intent(in) :: import_legacy
-        type(cache_t), intent(out) :: legacy
-        character(len=64) :: output_id
         integer :: local_err
 
-        local_err = fx_test_mkdir_p(trim(base)//'/imported')
+        local_err = fx_test_mkdir_p(trim(base))
         call test_assert_equal_int(suite, 0, local_err, 'pending fixture created')
         call write_text(trim(base)//'/source.o', 'pending object bytes')
         call write_text(trim(base)//'/widget.mod', 'pending module bytes')
-        call cache_init(legacy, trim(base)//'/cache')
         store_root = trim(base)//'/cache/store/v2'
-        if (import_legacy) then
-            call cache_store_action(legacy, 'pending-action', &
-                trim(base)//'/source.o', trim(base), 'widget', output_id, local_err)
-            call test_assert_equal_int(suite, 0, local_err, 'legacy record seeded')
-            local_err = fx_test_remove_tree(trim(store_root))
-            call test_assert_equal_int(suite, 0, local_err, &
-                'isolated v2 fixture removed to force public legacy import')
-        end if
         call action_result_store_init(store, trim(store_root), local_err)
         call test_assert_equal_int(suite, 0, local_err, 'pending store initializes')
     end subroutine prepare_pending_fixture
 
-    subroutine start_pending_publisher(base, mode, pid, probe, pending_id)
-        character(len=*), intent(in) :: base, mode
+    subroutine start_pending_publisher(base, pid, probe, pending_id)
+        character(len=*), intent(in) :: base
         integer, intent(out) :: pid
         type(publication_probe_t), intent(out) :: probe
         character(len=*), intent(out) :: pending_id
-        character(len=512) :: child_args(4)
+        character(len=512) :: child_args(3)
         character(len=64) :: key
         integer :: local_err, exit_status
         logical :: found
@@ -418,7 +384,7 @@ contains
         call test_assert_equal_int(suite, 0, local_err, 'external action lock acquired')
         if (local_err /= 0) return
         child_args = [character(len=512) :: trim(executable), &
-            '--pending-publisher', trim(base), trim(mode)]
+            '--pending-publisher', trim(base)]
         call test_process_spawn(child_args, pid, local_err)
         call test_assert_equal_int(suite, 0, local_err, 'pending publisher starts')
         if (local_err /= 0) then
@@ -440,10 +406,8 @@ contains
             'exact publisher identity waits after durable P observation')
         call test_assert(suite, len_trim(pending_id) == 64, &
             'anticipated graph has a durable P lease before binding')
-        if (trim(mode) == 'ordinary') then
-            call assert_output_lease(sha256_string('pending object bytes'))
-            call assert_output_lease(sha256_string('pending module bytes'))
-        end if
+        call assert_output_lease(sha256_string('pending object bytes'))
+        call assert_output_lease(sha256_string('pending module bytes'))
         key = action_result_action_key('pending-action')
         inquire(file=trim(store_root)//'/actions/sha256/'//key(1:2)//'/'//key, &
             exist=found)
@@ -510,37 +474,6 @@ contains
             'pending reader lease is absent after release')
         call assert_metadata_record('R', pending_id, 'bound', .true.)
     end subroutine finish_pending_reader
-
-    subroutine assert_legacy_conflict(legacy, base)
-        type(cache_t), intent(in) :: legacy
-        character(len=*), intent(in) :: base
-        type(immutable_tree_entry_t) :: output(1)
-        character(len=512) :: path(1)
-        character(len=64) :: result_id
-        integer :: local_err
-        logical :: restored
-
-        call test_assert(suite, file_has_bytes(trim(base)//'/imported.o', &
-            'pending object bytes'), 'public importer restores object after retry')
-        call test_assert(suite, file_has_bytes(trim(base)//'/imported/widget.mod', &
-            'pending module bytes'), 'public importer restores module after retry')
-        path(1) = trim(base)//'/conflicting.o'
-        call write_text(trim(path(1)), 'conflicting imported object')
-        output(1) = result_entry('object', 'object', 420)
-        call action_result_publish_files(store, 'pending-action', path, output, &
-            result_id, local_err)
-        call test_assert_equal_int(suite, ACTION_RESULT_CONFLICT, local_err, &
-            'legacy imported action becomes durably conflicted')
-        call write_text(trim(base)//'/imported.o', 'keep existing object')
-        call write_text(trim(base)//'/imported/widget.mod', 'keep existing module')
-        call cache_restore_action(legacy, 'pending-action', &
-            trim(base)//'/imported.o', trim(base)//'/imported', restored)
-        call test_assert(suite, .not. restored, 'conflict blocks legacy fallback')
-        call test_assert(suite, file_has_bytes(trim(base)//'/imported.o', &
-            'keep existing object'), 'conflict preserves caller object bytes')
-        call test_assert(suite, file_has_bytes(trim(base)//'/imported/widget.mod', &
-            'keep existing module'), 'conflict preserves caller companion bytes')
-    end subroutine assert_legacy_conflict
 
     subroutine assert_metadata_record(kind, id, reason, expected)
         character(len=*), intent(in) :: kind, id, reason

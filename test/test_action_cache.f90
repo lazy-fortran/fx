@@ -4,12 +4,10 @@ program test_action_cache
         cache_action_mod_key, cache_store_binary, cache_binary_matches, &
         cache_restore_binary, &
         cache_source_tree_hash, cache_set_file_hash_hook, &
-        cache_clear_file_hash_hook, cache_debug_write_action_record, &
-        cache_debug_corrupt_object_payload
-    use fx_cache, only: cache_init, cache_store_bytes
-    use fx_cache_key, only: cache_file_content_key
-    use fx_cache_fs, only: cache_entry_path, CACHE_PATH_LEN
-    use fx_action_result_store, only: action_result_store_t, &
+        cache_clear_file_hash_hook
+    use fx_cache, only: cache_init
+    use fx_cache_key, only: cache_file_content_key, cache_digest
+        use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_preview, ACTION_RESULT_OK
     use fx_immutable_manifest, only: immutable_tree_entry_t
     use fx_immutable_store, only: immutable_store_blob_path
@@ -27,11 +25,10 @@ program test_action_cache
     call test_action_round_trip(suite)
     call test_smod_round_trip(suite)
     call test_action_result_warm_validation(suite)
-    call test_smod_payload_rejection(suite)
+    call test_smod_requirement(suite)
     call test_smod_metadata_rejection(suite)
     call test_binary_fingerprint(suite)
-    call test_legacy_nopayload_rejection(suite)
-    call test_validated_legacy_import(suite)
+    call test_v2_only(suite)
     call test_file_hash_hook(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
@@ -54,8 +51,9 @@ contains
         character(len=:), allocatable :: root, src_dir, dst_dir
         character(len=:), allocatable :: obj_path, mod_path, obj2, mod2
         character(len=HASH_LEN) :: out_id, out_id2, mkey, mkey_after
-        character(len=CACHE_PATH_LEN) :: mod_payload_path
-        integer :: ierr
+        character(len=HASH_LEN) :: object_key, expected_id
+        character(len=512) :: identity_parts(6)
+        integer :: ierr, content_size
         logical :: restored, hit, found
 
         root = temp_root('action')
@@ -76,6 +74,17 @@ contains
         call test_assert(suite, ierr == 0, 'action store succeeds')
         call test_assert(suite, len_trim(out_id) == HASH_LEN, &
             'store returns full-length output id')
+        call cache_file_content_key(obj_path, 'object', object_key, &
+            content_size, ierr)
+        call cache_file_content_key(mod_path, 'mod', mkey, content_size, ierr)
+        identity_parts = ''
+        identity_parts(1) = 'fx-output-schema-2'
+        identity_parts(2) = object_key
+        identity_parts(3) = mkey
+        identity_parts(4) = 'widget'
+        expected_id = cache_digest(identity_parts, 6)
+        call test_assert_equal_str(suite, trim(expected_id), trim(out_id), &
+            'stored output id keeps the schema-2 dependency identity')
 
         call cache_init(restore_c, root//'/cache')
         hit = cache_lookup(restore_c, 'act-widget')
@@ -83,9 +92,7 @@ contains
 
         call cache_action_mod_key(restore_c, 'act-widget', mkey, found)
         call test_assert(suite, found .and. len_trim(mkey) == HASH_LEN, &
-            'mod key recovered from action record')
-        call cache_entry_path(restore_c, trim(mkey)//'-d', mod_payload_path)
-        call delete_file(mod_payload_path)
+            'mod key recovered from v2 result')
         call cache_action_mod_key(restore_c, 'act-widget', mkey_after, found)
         call test_assert(suite, found .and. mkey_after == mkey, &
             'module dependency key comes from the immutable result')
@@ -109,7 +116,7 @@ contains
         type(test_suite_t), intent(inout) :: suite
         type(cache_t) :: c
         character(len=:), allocatable :: root, stem, obj_path, mod_path, smod_path
-        character(len=HASH_LEN) :: first_id, second_id
+        character(len=HASH_LEN) :: first_id, second_id, restored_id
         integer :: ierr
         logical :: restored
 
@@ -132,8 +139,10 @@ contains
         call delete_file(mod_path)
         call delete_file(smod_path)
         call cache_restore_action(c, 'smod-first', obj_path, root, restored, &
-            required_smod_name=stem)
+            restored_id, required_smod_name=stem)
         call test_assert(suite, restored, 'restore all deleted compiler outputs')
+        call test_assert_equal_str(suite, trim(first_id), trim(restored_id), &
+            'submodule output identity survives v2 restoration')
         call test_assert(suite, file_has_bytes(obj_path, 'OBJECT-BYTES'), &
             'restored object bytes match the independent payload')
         call test_assert(suite, file_has_bytes(mod_path, 'MODULE-BYTES'), &
@@ -230,13 +239,12 @@ contains
         call cleanup_tree(root)
     end subroutine test_action_result_warm_validation
 
-    subroutine test_smod_payload_rejection(suite)
+    subroutine test_smod_requirement(suite)
         type(test_suite_t), intent(inout) :: suite
         type(cache_t) :: c
         character(len=:), allocatable :: root, obj_path, smod_path
-        character(len=CACHE_PATH_LEN) :: payload_path
-        character(len=HASH_LEN) :: out_id, smod_key
-        integer :: ierr, smod_size
+        character(len=HASH_LEN) :: out_id
+        integer :: ierr
         logical :: restored
 
         root = temp_root('smod-payload')
@@ -255,35 +263,17 @@ contains
         call test_assert(suite, restored, 'required submodule name is case insensitive')
         call cache_restore_action(c, 'smod-child', obj_path, root, restored, &
             required_smod_name='other@child')
-        call test_assert(suite, .not. restored, 'required submodule must match the record')
-        call cache_file_content_key(smod_path, 'smod', smod_key, smod_size, ierr)
-        call cache_entry_path(c, trim(smod_key)//'-d', payload_path)
-        call delete_file(payload_path)
-        call test_assert(suite, cache_lookup(c, 'smod-child'), &
-            'versioned result survives removal of the legacy copy')
-        call cache_restore_action(c, 'smod-child', obj_path, root, restored, &
-            required_smod_name='root@child')
-        call test_assert(suite, restored, &
-            'complete result does not depend on the legacy payload')
-        call cache_store_action(c, 'smod-child', obj_path, root, '', &
-            out_id, ierr, 'root@child')
-        call write_file(payload_path, 'CORRUPT-INTERFACE')
-        call delete_file(smod_path)
-        call cache_restore_action(c, 'smod-child', obj_path, root, restored, &
-            required_smod_name='root@child')
-        call test_assert(suite, restored, 'result restores despite corrupt legacy copy')
-        call test_assert(suite, file_has_bytes(smod_path, 'CHILD-INTERFACE'), &
-            'restored submodule bytes come from the immutable result')
+        call test_assert(suite, .not. restored, &
+            'required submodule must match the published result')
         call cleanup_tree(root)
-    end subroutine test_smod_payload_rejection
+    end subroutine test_smod_requirement
 
     subroutine test_smod_metadata_rejection(suite)
         type(test_suite_t), intent(inout) :: suite
         type(cache_t) :: c
-        character(len=:), allocatable :: root, obj_path, record
-        character(len=HASH_LEN) :: out_id, object_key
-        character(len=32) :: size_text
-        integer :: ierr, obj_size
+        character(len=:), allocatable :: root, obj_path
+        character(len=HASH_LEN) :: out_id
+        integer :: ierr
         logical :: restored
 
         root = temp_root('smod-metadata')
@@ -299,22 +289,6 @@ contains
             required_smod_name='root')
         call test_assert(suite, .not. restored, &
             'stale local submodule cannot supply missing record metadata')
-        call cache_file_content_key(obj_path, 'object', object_key, obj_size, ierr)
-        write (size_text, '(i0)') obj_size
-        record = 'schema 1'//achar(10)//'output '//out_id//achar(10)// &
-            'object '//object_key//' '//trim(size_text)//achar(10)
-        call cache_debug_write_action_record(c, 'legacy', record, ierr)
-        call cache_restore_action(c, 'legacy', obj_path, root, restored)
-        call test_assert(suite, .not. restored, &
-            'legacy records with valid payloads and matching local files are invalidated')
-        call cache_store_action(c, 'with-smod', obj_path, root, '', &
-            out_id, ierr, 'root')
-        record = 'schema 2'//achar(10)//'output '//out_id//achar(10)// &
-            'object '//object_key//' '//trim(size_text)//achar(10)
-        call cache_debug_write_action_record(c, 'stripped-smod', record, ierr)
-        call cache_restore_action(c, 'stripped-smod', obj_path, root, restored)
-        call test_assert(suite, .not. restored, &
-            'removed submodule metadata cannot reuse the original output marker')
         call make_dir(root//'/input')
         call write_file(root//'/escaped.smod', 'ESCAPED-INTERFACE')
         call cache_store_action(c, 'escaped-smod', obj_path, root//'/input', '', &
@@ -325,7 +299,7 @@ contains
             out_id, ierr, 'missing')
         call test_assert(suite, ierr /= 0, 'missing required store artifact fails')
         call test_assert(suite, .not. cache_lookup(c, 'missing-smod'), &
-            'failed submodule store never publishes an action record')
+            'failed submodule store never publishes an action result')
         call cleanup_tree(root)
     end subroutine test_smod_metadata_rejection
 
@@ -362,69 +336,39 @@ contains
         call cleanup_tree(root)
     end subroutine test_binary_fingerprint
 
-    subroutine test_legacy_nopayload_rejection(suite)
+    subroutine test_v2_only(suite)
         type(test_suite_t), intent(inout) :: suite
         type(cache_t) :: c
-        character(len=:), allocatable :: root, binary, staged
-        character(len=17) :: record
-        character(len=1) :: old_record(17)
-        integer :: i, ierr
-        logical :: matches, restored
-
-        root = temp_root('legacy-nopayload')
-        call cleanup_tree(root)
-        call make_dir(root)
-        binary = root//'/program'
-        staged = root//'/restored-program'
-        call write_file(binary, 'OLD-LINK-OUTPUT')
-        record = 'nopayload 1 10'
-        do i = 1, size(old_record)
-            old_record(i) = record(i:i)
-        end do
-        call cache_init(c, root//'/cache')
-        call cache_store_bytes(c, 'legacy-link-l', old_record, &
-            size(old_record), ierr)
-        call test_assert(suite, ierr == 0, 'fixture stores the legacy nopayload record')
-        call cache_binary_matches(c, 'legacy-link', binary, matches)
-        call test_assert(suite, .not. matches, &
-            'legacy nopayload record cannot produce a binary hit')
-        call cache_restore_binary(c, 'legacy-link', staged, restored)
-        call test_assert(suite, .not. restored, &
-            'legacy nopayload record cannot restore absent executable bytes')
-        call cleanup_tree(root)
-    end subroutine test_legacy_nopayload_rejection
-
-    subroutine test_validated_legacy_import(suite)
-        type(test_suite_t), intent(inout) :: suite
-        type(cache_t) :: c
-        character(len=:), allocatable :: root, object_file
-        character(len=HASH_LEN) :: result_id
+        character(len=:), allocatable :: root, object_file, destination
+        character(len=HASH_LEN) :: output_id, restored_id
         integer :: ierr
+        logical :: restored, v1_exists
 
-        root = temp_root('legacy-import')
+        root = temp_root('v2-only')
         call cleanup_tree(root)
         call make_dir(root)
-        object_file = root//'/legacy.o'
-        call write_file(object_file, 'VALID LEGACY OBJECT')
+        object_file = root//'/source.o'
+        destination = root//'/restored.o'
+        call write_file(object_file, 'PERSISTENT V2 OBJECT')
         call cache_init(c, root//'/cache')
-        call cache_store_action(c, 'legacy-valid-action', object_file, root, '', &
-            result_id, ierr)
-        call test_assert(suite, ierr == 0, 'seed complete legacy compile record')
-        call remove_tree(trim(c%root_dir)//'/store/v2')
-        call test_assert(suite, cache_lookup(c, 'legacy-valid-action'), &
-            'validated legacy payloads lazily import into v2 result store')
-
-        call write_file(object_file, 'CORRUPT LEGACY OBJECT')
-        call cache_store_action(c, 'legacy-corrupt-action', object_file, root, '', &
-            result_id, ierr)
-        call test_assert(suite, ierr == 0, 'seed second legacy compile record')
-        call cache_debug_corrupt_object_payload(c, 'legacy-corrupt-action', ierr)
-        call test_assert(suite, ierr == 0, 'corrupt only its old payload copy')
-        call remove_tree(trim(c%root_dir)//'/store/v2')
-        call test_assert(suite, .not. cache_lookup(c, 'legacy-corrupt-action'), &
-            'invalid legacy payload is rejected during lazy import')
+        call cache_store_action(c, 'v2-action', object_file, root, '', &
+            output_id, ierr)
+        call test_assert(suite, ierr == 0, 'v2 action publication succeeds')
+        inquire (file=root//'/cache/store/v1', exist=v1_exists)
+        call test_assert(suite, .not. v1_exists, &
+            'compile publication creates no v1 store')
+        call cache_init(c, root//'/cache')
+        call test_assert(suite, cache_lookup(c, 'v2-action'), &
+            'reopened v2 action remains available without v1')
+        call cache_restore_action(c, 'v2-action', destination, root, restored, &
+            restored_id)
+        call test_assert(suite, restored, 'v2 object restores')
+        call test_assert_equal_str(suite, trim(output_id), trim(restored_id), &
+            'v2 manifest preserves schema-2 output identity')
+        call test_assert(suite, file_has_bytes(destination, 'PERSISTENT V2 OBJECT'), &
+            'v2 restore yields original object bytes')
         call cleanup_tree(root)
-    end subroutine test_validated_legacy_import
+    end subroutine test_v2_only
 
     function temp_root(tag) result(path)
         character(len=*), intent(in) :: tag

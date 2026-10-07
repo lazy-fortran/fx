@@ -1,14 +1,10 @@
 module fx_action_cache
-    use fx_cache, only: cache_t, cache_init, cache_store, &
-        cache_store_bytes
-    use fx_cache_fs, only: cache_entry_path
+    use fx_cache, only: cache_t, cache_init
     use fx_cache_key, only: HASH_LEN, cache_key_for, cache_source_tree_hash, &
         cache_digest, cache_file_digest, hash_mod_file, &
         cache_file_content_key, cache_set_file_hash_hook, &
         cache_clear_file_hash_hook
     use fx_string, only: to_lower
-    use fx_action_cache_record, only: MAX_MOD_NAME, store_action_record, &
-        restore_action_record, valid_smod_name
     use fx_immutable_manifest, only: immutable_tree_entry_t
     use fx_immutable_store, only: immutable_store_hash_file, &
         immutable_store_blob_path
@@ -20,7 +16,7 @@ module fx_action_cache
         action_result_publish_files, action_result_lookup, &
         action_result_materialize_blob, action_result_file_mode, &
         action_result_compile_action_key, &
-        ACTION_RESULT_OK, ACTION_RESULT_MISSING, ACTION_RESULT_IO_ERROR
+        ACTION_RESULT_OK
     implicit none
     private
 
@@ -33,8 +29,9 @@ module fx_action_cache
     public :: cache_store_binary, cache_restore_binary, &
         cache_binary_matches
     public :: action_result_compile_action_key
-    public :: cache_debug_write_action_record, cache_debug_corrupt_object_payload
     public :: cache_set_file_hash_hook, cache_clear_file_hash_hook
+
+    integer, parameter :: MAX_MOD_NAME = 257
 
 contains
 
@@ -82,7 +79,7 @@ contains
 
         ierr = 0
         call action_cache_root(env_var, subdir, base)
-        call cache_init(c, trim(base)//'/store/v1')
+        call cache_init(c, trim(base))
         if (.not. c%initialized) ierr = 1
     end subroutine action_cache_init
 
@@ -99,7 +96,7 @@ contains
         hit = .false.
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import(c, store, key, entries, result_id, ierr)
+        call action_result_lookup(store, key, entries, result_id, ierr)
         hit = ierr == ACTION_RESULT_OK
     end function cache_lookup
 
@@ -108,41 +105,14 @@ contains
         type(action_result_store_t), intent(out) :: store
         integer, intent(out) :: ierr
         character(len=512) :: root
-        integer :: n
-
         ierr = 1
         if (.not. c%initialized) return
-        n = len_trim(c%root_dir)
-        if (n >= 9) then
-            if (c%root_dir(n - 8:n) == '/store/v1') then
-                root = c%root_dir(:n - 9)//'/store/v2'
-            else
-                root = trim(c%root_dir)//'/store/v2'
-            end if
-        else
-            root = trim(c%root_dir)//'/store/v2'
-        end if
+        root = trim(c%root_dir)//'/store/v2'
         call action_result_store_init(store, trim(root), ierr)
     end subroutine init_result_store
 
-    subroutine lookup_or_import(c, store, action_id, entries, result_id, ierr)
-        type(cache_t), intent(in) :: c
-        type(action_result_store_t), intent(in) :: store
-        character(len=*), intent(in) :: action_id
-        type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
-        character(len=HASH_LEN), intent(out) :: result_id
-        integer, intent(out) :: ierr
-
-        call action_result_lookup(store, action_id, entries, result_id, ierr)
-        if (ierr /= ACTION_RESULT_MISSING) return
-        call import_legacy_compile_result(c, store, action_id, ierr)
-        if (ierr /= ACTION_RESULT_OK) return
-        call action_result_lookup(store, action_id, entries, result_id, ierr)
-    end subroutine lookup_or_import
-
-    subroutine lookup_or_import_read(c, store, action_id, read, entries, &
+    subroutine lookup_result_read(store, action_id, read, entries, &
             result_id, ierr)
-        type(cache_t), intent(in) :: c
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: action_id
         type(action_result_read_t), intent(out) :: read
@@ -152,85 +122,12 @@ contains
         integer :: release_status
 
         call action_result_read_acquire(store, action_id, read, ierr)
-        if (ierr == ACTION_RESULT_MISSING) then
-            call import_legacy_compile_result(c, store, action_id, ierr)
-            if (ierr /= ACTION_RESULT_OK) return
-            call action_result_read_acquire(store, action_id, read, ierr)
-        end if
         if (ierr /= ACTION_RESULT_OK) return
         call action_result_read_lookup(store, read, entries, result_id, ierr)
-        if (ierr == ACTION_RESULT_MISSING) then
-            call action_result_read_release(store, read, release_status)
-            if (release_status /= ACTION_RESULT_OK) then
-                ierr = ACTION_RESULT_IO_ERROR
-                return
-            end if
-            call import_legacy_compile_result(c, store, action_id, ierr)
-            if (ierr /= ACTION_RESULT_OK) return
-            call action_result_read_acquire(store, action_id, read, ierr)
-            if (ierr /= ACTION_RESULT_OK) return
-            call action_result_read_lookup(store, read, entries, result_id, ierr)
-        end if
         if (ierr /= ACTION_RESULT_OK) then
             call action_result_read_release(store, read, release_status)
         end if
-    end subroutine lookup_or_import_read
-
-    subroutine import_legacy_compile_result(c, store, action_id, ierr)
-        type(cache_t), intent(in) :: c
-        type(action_result_store_t), intent(in) :: store
-        character(len=*), intent(in) :: action_id
-        integer, intent(out) :: ierr
-        character(len=HASH_LEN) :: old_output, object_key, mod_key, smod_key
-        character(len=MAX_MOD_NAME) :: mod_name, smod_name
-        character(len=512) :: paths(3)
-        type(immutable_tree_entry_t) :: entries(3)
-        character(len=HASH_LEN) :: actual
-        character(len=HASH_LEN) :: result_id
-        integer :: obj_size, mod_size, smod_size, n, size_bytes, status
-        logical :: has_mod, has_smod
-
-        call restore_action_record(c, action_id, old_output, object_key, &
-            obj_size, mod_name, mod_key, mod_size, has_mod, smod_name, &
-            smod_key, smod_size, has_smod, ierr)
-        if (ierr /= 0) then
-            ierr = ACTION_RESULT_MISSING
-            return
-        end if
-        n = 1
-        call cache_entry_path(c, trim(object_key)//'-d', paths(1))
-        call cache_file_content_key(trim(paths(1)), 'object', actual, &
-            size_bytes, status)
-        if (status /= 0 .or. actual /= object_key .or. size_bytes /= obj_size) then
-            ierr = ACTION_RESULT_MISSING
-            return
-        end if
-        entries(1) = result_entry('object', 'object', 420)
-        if (has_mod) then
-            n = n + 1
-            call cache_entry_path(c, trim(mod_key)//'-d', paths(n))
-            call cache_file_content_key(trim(paths(n)), 'mod', actual, &
-                size_bytes, status)
-            if (status /= 0 .or. actual /= mod_key .or. size_bytes /= mod_size) then
-                ierr = ACTION_RESULT_MISSING
-                return
-            end if
-            entries(n) = result_entry('module-'//trim(mod_name), 'module', 420)
-        end if
-        if (has_smod) then
-            n = n + 1
-            call cache_entry_path(c, trim(smod_key)//'-d', paths(n))
-            call cache_file_content_key(trim(paths(n)), 'smod', actual, &
-                size_bytes, status)
-            if (status /= 0 .or. actual /= smod_key .or. size_bytes /= smod_size) then
-                ierr = ACTION_RESULT_MISSING
-                return
-            end if
-            entries(n) = result_entry('smod-'//trim(smod_name), 'smod', 420)
-        end if
-        call action_result_publish_files(store, action_id, paths(1:n), &
-            entries(1:n), result_id, ierr)
-    end subroutine import_legacy_compile_result
+    end subroutine lookup_result_read
 
     function result_entry(path, role, mode) result(entry)
         character(len=*), intent(in) :: path, role
@@ -241,6 +138,73 @@ contains
         entry%role = role
         entry%mode = mode
     end function result_entry
+
+    function compile_output_id(entries) result(output_id)
+        !! Preserve the schema-2 dependency identity from the v2 manifest.
+        type(immutable_tree_entry_t), intent(in) :: entries(:)
+        character(len=HASH_LEN) :: output_id
+        character(len=512) :: parts(6), payload(3)
+        integer :: i, slot
+
+        output_id = ''
+        parts = ''
+        parts(1) = 'fx-output-schema-2'
+        do i = 1, size(entries)
+            select case (entries(i)%role)
+            case ('object')
+                slot = 2
+                if (entries(i)%path /= 'object') return
+                payload(2) = 'object'
+            case ('module')
+                slot = 3
+                if (index(entries(i)%path, 'module-') /= 1) return
+                parts(4) = entries(i)%path(8:)
+                payload(2) = 'mod'
+            case ('smod')
+                slot = 5
+                if (index(entries(i)%path, 'smod-') /= 1) return
+                parts(6) = entries(i)%path(6:)
+                payload(2) = 'smod'
+            case default
+                return
+            end select
+            if (len_trim(parts(slot)) /= 0) return
+            payload(1) = 'fx-payload-schema-1'
+            payload(3) = entries(i)%object_id
+            parts(slot) = cache_digest(payload, 3)
+        end do
+        if (len_trim(parts(2)) == 0) return
+        output_id = cache_digest(parts, 6)
+    end function compile_output_id
+
+    pure logical function valid_smod_name(name) result(valid)
+        character(len=*), intent(in) :: name
+        integer :: i, code, separators
+        logical :: initial, letter
+
+        valid = .false.
+        if (len_trim(name) == 0 .or. len_trim(name) > MAX_MOD_NAME) return
+        initial = .true.
+        separators = 0
+        do i = 1, len_trim(name)
+            code = iachar(name(i:i))
+            letter = (code >= iachar('a') .and. code <= iachar('z')) .or. &
+                (code >= iachar('A') .and. code <= iachar('Z'))
+            if (initial) then
+                if (.not. letter) return
+                initial = .false.
+            else if (name(i:i) == '@') then
+                separators = separators + 1
+                if (separators > 1) return
+                initial = .true.
+            else if (.not. letter) then
+                if (name(i:i) /= '_') then
+                    if (code < iachar('0') .or. code > iachar('9')) return
+                end if
+            end if
+        end do
+        valid = .not. initial
+    end function valid_smod_name
 
     logical function result_has_smod(entries, required_name)
         type(immutable_tree_entry_t), intent(in) :: entries(:)
@@ -303,7 +267,7 @@ contains
         local_result_entry_matches = mode == entry%mode
     end function local_result_entry_matches
 
-    recursive subroutine cache_restore_action(c, action_id, obj_path, mod_dir, &
+    subroutine cache_restore_action(c, action_id, obj_path, mod_dir, &
             restored, output_id, required_smod_name)
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: action_id, obj_path, mod_dir
@@ -315,13 +279,9 @@ contains
         type(action_result_read_t) :: read
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=HASH_LEN) :: result_id
-        character(len=HASH_LEN) :: old_output, old_object, old_mod, old_smod
-        character(len=MAX_MOD_NAME) :: old_mod_name, old_smod_name
         integer :: ierr, i, init_status, release_status
-        integer :: old_obj_size, old_mod_size, old_smod_size
         integer :: preview_status
         logical :: local_ok, preview_ok
-        logical :: old_has_mod, old_has_smod
 
         restored = .false.
         if (present(output_id)) output_id = ''
@@ -346,20 +306,13 @@ contains
             call action_result_preview_confirm(store, action_id, result_id, &
                 preview_status)
             if (preview_status == ACTION_RESULT_OK) then
-                if (present(output_id)) then
-                    output_id = result_id
-                    call restore_action_record(c, action_id, old_output, &
-                        old_object, old_obj_size, old_mod_name, old_mod, &
-                        old_mod_size, old_has_mod, old_smod_name, old_smod, &
-                        old_smod_size, old_has_smod, ierr)
-                    if (ierr == 0) output_id = old_output
-                end if
+                if (present(output_id)) output_id = compile_output_id(entries)
                 restored = .true.
                 return
             end if
         end if
 
-        call lookup_or_import_read(c, store, action_id, read, entries, &
+        call lookup_result_read(store, action_id, read, entries, &
             result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         if (present(required_smod_name)) then
@@ -370,13 +323,7 @@ contains
                 end if
             end if
         end if
-        if (present(output_id)) then
-            output_id = result_id
-            call restore_action_record(c, action_id, old_output, old_object, &
-                old_obj_size, old_mod_name, old_mod, old_mod_size, old_has_mod, &
-                old_smod_name, old_smod, old_smod_size, old_has_smod, ierr)
-            if (ierr == 0) output_id = old_output
-        end if
+        if (present(output_id)) output_id = compile_output_id(entries)
         local_ok = local_result_matches(entries, obj_path, mod_dir)
         if (local_ok) then
             call action_result_read_release(store, read, release_status)
@@ -401,20 +348,18 @@ contains
 
     subroutine cache_store_action(c, action_id, obj_path, mod_dir, mod_name, &
             output_id, ierr, smod_name)
-        type(cache_t), intent(inout) :: c
+        type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: action_id, obj_path, mod_dir, mod_name
         character(len=HASH_LEN), intent(out) :: output_id
         integer, intent(out) :: ierr
         character(len=*), intent(in), optional :: smod_name
 
-        character(len=HASH_LEN) :: object_key, mod_key, smod_key
-        character(len=512) :: parts(6), sources(3)
+        character(len=512) :: sources(3)
         type(action_result_store_t) :: result_store
         type(immutable_tree_entry_t) :: entries(3)
         character(len=HASH_LEN) :: result_id
         character(len=:), allocatable :: lower_name, mod_path, smod_label, smod_path
-        character(len=1) :: marker(1)
-        integer :: obj_size, mod_size, smod_size, store_ierr, n_entries
+        integer :: store_ierr, n_entries
         logical :: has_mod, has_smod
 
         output_id = ''
@@ -424,9 +369,6 @@ contains
             return
         end if
 
-        call cache_file_content_key(obj_path, 'object', object_key, obj_size, ierr)
-        if (ierr /= 0) return
-
         lower_name = to_lower(trim(mod_name))
         if (len(lower_name) > MAX_MOD_NAME) then
             ierr = 1
@@ -434,64 +376,16 @@ contains
         end if
         mod_path = trim(mod_dir)//'/'//lower_name//'.mod'
         inquire (file=mod_path, exist=has_mod)
-        mod_key = ''
-        mod_size = 0
-        if (has_mod) then
-            call cache_file_content_key(mod_path, 'mod', mod_key, mod_size, ierr)
-            if (ierr /= 0) return
-        end if
         smod_label = ''
         if (present(smod_name)) smod_label = to_lower(trim(smod_name))
         has_smod = len(smod_label) > 0
-        smod_key = ''
-        smod_size = 0
         if (has_smod) then
             if (.not. valid_smod_name(smod_label)) then
                 ierr = 1
                 return
             end if
             smod_path = trim(mod_dir)//'/'//smod_label//'.smod'
-            call cache_file_content_key(smod_path, 'smod', smod_key, smod_size, ierr)
-            if (ierr /= 0) return
         end if
-
-        parts(1) = 'fx-output-schema-2'
-        parts(2) = object_key
-        parts(3) = mod_key
-        parts(4) = ''
-        if (has_mod) parts(4) = lower_name
-        parts(5) = smod_key
-        parts(6) = smod_label
-        output_id = cache_digest(parts, 6)
-
-        call cache_store(c, trim(object_key)//'-d', obj_path, store_ierr)
-        if (store_ierr /= 0) then
-            ierr = store_ierr
-            return
-        end if
-        if (has_mod) then
-            call cache_store(c, trim(mod_key)//'-d', mod_path, store_ierr)
-            if (store_ierr /= 0) then
-                ierr = store_ierr
-                return
-            end if
-        end if
-        if (has_smod) then
-            call cache_store(c, trim(smod_key)//'-d', smod_path, store_ierr)
-            if (store_ierr /= 0) then
-                ierr = store_ierr
-                return
-            end if
-        end if
-
-        marker(1) = '1'
-        call cache_store_bytes(c, trim(output_id)//'-d', marker, 1, ierr)
-        if (ierr /= 0) return
-
-        call store_action_record(c, action_id, output_id, object_key, obj_size, &
-            lower_name, mod_key, mod_size, has_mod, smod_label, smod_key, &
-            smod_size, has_smod, ierr)
-        if (ierr /= 0) return
 
         n_entries = 1
         sources(1) = trim(obj_path)
@@ -516,7 +410,10 @@ contains
         call action_result_publish_files(result_store, action_id, &
             sources(1:n_entries), entries(1:n_entries), result_id, store_ierr)
         ierr = 1
-        if (store_ierr == ACTION_RESULT_OK) ierr = 0
+        if (store_ierr == ACTION_RESULT_OK) then
+            output_id = compile_output_id(entries(1:n_entries))
+            if (len_trim(output_id) == HASH_LEN) ierr = 0
+        end if
     end subroutine cache_store_action
 
     subroutine cache_action_mod_key(c, action_id, mod_key, found)
@@ -538,7 +435,7 @@ contains
 
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import_read(c, store, action_id, read, entries, &
+        call lookup_result_read(store, action_id, read, entries, &
             result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         do i = 1, size(entries)
@@ -603,7 +500,7 @@ contains
         matches = .false.
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import_read(c, store, action_id, read, entries, &
+        call lookup_result_read(store, action_id, read, entries, &
             result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         if (size(entries) == 1) then
@@ -638,7 +535,7 @@ contains
         restored = .false.
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
-        call lookup_or_import_read(c, store, action_id, read, entries, &
+        call lookup_result_read(store, action_id, read, entries, &
             result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         if (size(entries) == 1) then
@@ -651,43 +548,5 @@ contains
         call action_result_read_release(store, read, release_status)
         if (release_status /= ACTION_RESULT_OK) restored = .false.
     end subroutine cache_restore_binary
-
-    subroutine cache_debug_write_action_record(c, action_id, record_text, ierr)
-        type(cache_t), intent(inout) :: c
-        character(len=*), intent(in) :: action_id, record_text
-        integer, intent(out) :: ierr
-
-        character(len=1), allocatable :: bytes(:)
-        integer :: i, n
-
-        ierr = 0
-        n = len_trim(record_text)
-        allocate (bytes(max(n, 0)))
-        do i = 1, n
-            bytes(i) = record_text(i:i)
-        end do
-        call cache_store_bytes(c, trim(action_id)//'-a', bytes, n, ierr)
-    end subroutine cache_debug_write_action_record
-
-    subroutine cache_debug_corrupt_object_payload(c, action_id, ierr)
-        type(cache_t), intent(inout) :: c
-        character(len=*), intent(in) :: action_id
-        integer, intent(out) :: ierr
-
-        character(len=HASH_LEN) :: out_id, object_key, mod_key, smod_key
-        character(len=MAX_MOD_NAME) :: mod_label, smod_label
-        character(len=1) :: bad(7)
-        integer :: obj_size, mod_size, smod_size, i
-        logical :: has_mod, has_smod
-
-        call restore_action_record(c, action_id, out_id, object_key, obj_size, &
-            mod_label, mod_key, mod_size, has_mod, smod_label, smod_key, &
-            smod_size, has_smod, ierr)
-        if (ierr /= 0) return
-        do i = 1, size(bad)
-            bad(i) = achar(iachar('0') + modulo(i, 10))
-        end do
-        call cache_store_bytes(c, trim(object_key)//'-d', bad, size(bad), ierr)
-    end subroutine cache_debug_corrupt_object_payload
 
 end module fx_action_cache
