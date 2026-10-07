@@ -71,7 +71,9 @@ APIs; its focused gate passed 2/2, and Fo `17893dc` removed the consumers. Fx
 Fx `e236bd0` adds bounded exact-group compaction of old Fo generation roots.
 The focused lease, GC and compaction gate passed 3/3. Two 12-child groups
 shrunk an isolated snapshot from 1,951 to 469 bytes; active and changed groups
-were skipped. The real global snapshot still needs a resident owner pass.
+were skipped. Public Fo resident session `533484-1791356967-930118364`
+migrated a real group: compacted old Fo groups fell from 178 to 177 before the
+owner stopped. Further bounded idle passes remain.
 
 ### 2026-10-07 immutable publication protection
 
