@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
@@ -71,6 +72,56 @@ static int ensure_metadata(const char *root, char *dir, size_t cap)
         return -1;
     if (created && sync_dir(root) != 0) return -1;
     return 0;
+}
+
+static int is_snapshot_temp(const char *name)
+{
+    static const char prefix[] = ".leases.";
+    const char *p;
+    int fields = 0;
+    if (strncmp(name, prefix, sizeof(prefix) - 1) != 0) return 0;
+    p = name + sizeof(prefix) - 1;
+    while (*p) {
+        const char *start = p;
+        while (*p >= '0' && *p <= '9') ++p;
+        if (p == start) return 0;
+        ++fields;
+        if (!*p) break;
+        if (*p++ != '.' || fields == 3) return 0;
+    }
+    return fields == 3;
+}
+
+/* The caller holds the metadata lock, so no writer can own a temp snapshot. */
+static int remove_orphan_snapshot_temps(const char *dir)
+{
+    DIR *entries = opendir(dir);
+    struct dirent *entry;
+    int rc = 0;
+    if (!entries) return -1;
+    int metadata_fd = dirfd(entries);
+    if (metadata_fd < 0) {
+        closedir(entries);
+        return -1;
+    }
+    while ((entry = readdir(entries)) != NULL) {
+        struct stat st;
+        if (!is_snapshot_temp(entry->d_name)) continue;
+        if (fstatat(metadata_fd, entry->d_name, &st,
+                    AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno == ENOENT) continue;
+            rc = -1;
+            break;
+        }
+        if (!S_ISREG(st.st_mode)) continue;
+        if (unlinkat(metadata_fd, entry->d_name, 0) != 0) {
+            if (errno == ENOENT) continue;
+            rc = -1;
+            break;
+        }
+    }
+    if (closedir(entries) != 0) rc = -1;
+    return rc;
 }
 
 static int fields(char *row, char **out, int count)
@@ -741,6 +792,7 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     if (n < 0 || (size_t)n >= sizeof(lock_path)) return -1;
     lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock < 0 || flock(lock, LOCK_EX) != 0) goto done;
+    if (remove_orphan_snapshot_temps(dir) != 0) goto done;
     if (read_snapshot(dir, &epoch, &rows, &row_info, &nrow,
                       &cache_borrowed, &rows_owned) != 0) goto done;
     next = calloc(ROW_LIMIT, sizeof(char *));

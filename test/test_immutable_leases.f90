@@ -33,7 +33,9 @@ program test_immutable_leases
     integer :: ierr, status, child_pid, thread_errors(8), thread_id
     character(len=32) :: thread_owner, thread_start
     character(len=512) :: cold_root
+    character(len=512) :: orphan_snapshot, retained_metadata_file
     logical :: exists, completed, child_exited
+    integer :: fixture_unit
 
     call get_command_argument(1, argument)
     if (trim(argument) == '--barrier-worker') then
@@ -84,10 +86,36 @@ program test_immutable_leases
     call immutable_store_root_set(store, 'owner_a', 'start_1', 'result', &
         kinds, ids, ierr, epoch1)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'root owner A registers')
+    orphan_snapshot = trim(root)//'/.fx-metadata/.leases.999999.999999.1'
+    retained_metadata_file = trim(root)//'/.fx-metadata/.leases.keep'
+    open(newunit=fixture_unit, file=trim(orphan_snapshot), status='replace', &
+        action='write', iostat=ierr)
+    call test_assert_equal_int(suite, 0, ierr, 'orphan snapshot fixture opens')
+    if (ierr == 0) then
+        write(fixture_unit, '(A)', iostat=ierr) 'orphan snapshot bytes'
+        close(fixture_unit)
+    end if
+    call test_assert_equal_int(suite, 0, ierr, 'orphan snapshot fixture is written')
+    open(newunit=fixture_unit, file=trim(retained_metadata_file), &
+        status='replace', action='write', iostat=ierr)
+    call test_assert_equal_int(suite, 0, ierr, 'nonmatching metadata fixture opens')
+    if (ierr == 0) then
+        write(fixture_unit, '(A)', iostat=ierr) 'retain these bytes'
+        close(fixture_unit)
+    end if
+    call test_assert_equal_int(suite, 0, ierr, &
+        'nonmatching metadata fixture is written')
     call immutable_store_root_set(store, 'owner_a', 'start_1', 'result', &
         kinds, ids, ierr, epoch2)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'equal root publication succeeds')
     call test_assert(suite, epoch1 == epoch2, 'equal root publication is idempotent')
+    inquire(file=trim(orphan_snapshot), exist=exists)
+    call test_assert(suite, .not. exists, 'orphan snapshot temp is collected')
+    inquire(file=trim(retained_metadata_file), exist=exists)
+    call test_assert(suite, exists, 'nonmatching metadata file is retained')
+    call assert_metadata_has(suite, trim(root)//'/.fx-metadata/leases', &
+        'R||owner_a|start_1|result|blob|'//trim(object_id), &
+        'orphan cleanup preserves the current lease snapshot')
     call immutable_store_root_set(store, 'owner_b', 'start_2', 'result', &
         kinds, ids, ierr, epoch2)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'root owner B registers')
