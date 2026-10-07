@@ -8,7 +8,7 @@ module fx_action_result_store
         immutable_id_valid, immutable_manifest_parse, &
         immutable_entries_canonical, immutable_manifest_serialize
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
-        immutable_store_put_blob, &
+        immutable_store_put_blob, immutable_store_hash_file, &
         immutable_lease_t, immutable_store_publication_lease_acquire, &
         immutable_store_publication_commit, immutable_store_lease_release, &
         immutable_store_reason_release, &
@@ -129,16 +129,18 @@ contains
         store%initialized = .true.
     end subroutine action_result_store_init
 
-    subroutine action_result_put_blob(store, source_path, blob_id, ierr)
+    subroutine action_result_put_blob(store, source_path, blob_id, ierr, protected_by)
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: source_path
         character(len=HASH_LEN), intent(out) :: blob_id
         integer, intent(out) :: ierr
+        type(immutable_lease_t), intent(in), optional :: protected_by
 
         blob_id = ''
         ierr = ACTION_RESULT_INVALID
         if (.not. store%initialized) return
-        call immutable_store_put_blob(store%objects, trim(source_path), blob_id, ierr)
+        call immutable_store_put_blob(store%objects, trim(source_path), blob_id, &
+            ierr, protected_by)
         if (ierr /= IMMUTABLE_OK) then
             if (ierr == IMMUTABLE_CORRUPT) then
                 ierr = ACTION_RESULT_CORRUPT
@@ -313,17 +315,46 @@ contains
         type(immutable_tree_entry_t), intent(inout) :: entries(:)
         character(len=HASH_LEN), intent(out) :: result_id
         integer, intent(out) :: ierr
-        integer :: i
+        type(immutable_lease_t) :: outputs_lease
+        character(len=4), allocatable :: kinds(:)
+        character(len=HASH_LEN), allocatable :: ids(:)
+        integer :: i, lease_status
 
         result_id = ''
         ierr = ACTION_RESULT_INVALID
         if (size(source_paths) /= size(entries)) return
+        if (size(entries) == 0) then
+            call action_result_publish(store, action_id, entries, result_id, ierr)
+            return
+        end if
+        allocate(kinds(size(entries)), ids(size(entries)))
+        kinds = 'blob'
+        ! Keep every output protected until the action graph is committed.
+        do i = 1, size(entries)
+            call immutable_store_hash_file(trim(source_paths(i)), ids(i), ierr)
+            if (ierr /= IMMUTABLE_OK) then
+                ierr = ACTION_RESULT_IO_ERROR
+                return
+            end if
+        end do
+        call immutable_store_publication_lease_acquire(store%objects, &
+            'fx-action-files', store%objects%writer_start, 'outputs', kinds, &
+            ids, outputs_lease, lease_status)
+        if (lease_status /= IMMUTABLE_OK) then
+            ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
         do i = 1, size(entries)
             call action_result_put_blob(store, trim(source_paths(i)), &
-                entries(i)%object_id, ierr)
-            if (ierr /= ACTION_RESULT_OK) return
+                entries(i)%object_id, ierr, outputs_lease)
+            if (ierr /= ACTION_RESULT_OK) exit
         end do
-        call action_result_publish(store, action_id, entries, result_id, ierr)
+        if (ierr == ACTION_RESULT_OK) &
+            call action_result_publish(store, action_id, entries, result_id, ierr)
+        call immutable_store_lease_release(store%objects, outputs_lease, &
+            lease_status)
+        if (ierr == ACTION_RESULT_OK .and. lease_status /= IMMUTABLE_OK) &
+            ierr = ACTION_RESULT_IO_ERROR
     end subroutine action_result_publish_files
 
     subroutine action_result_read_acquire(store, action_id, read, ierr)

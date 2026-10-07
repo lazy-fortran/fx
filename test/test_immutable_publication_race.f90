@@ -173,6 +173,7 @@ contains
             call wait_worker(pid, child_status)
             return
         end if
+        if (kind == 2) call assert_tree_child_lease(store)
         changed = rename_path(temp//c_null_char, (temp//'.held')//c_null_char)
         call test_assert_equal_int(suite, 0, int(changed), 'entry moves after final ownership check')
         if (attack == 1) then
@@ -190,6 +191,30 @@ contains
         call retry(store, base, kind, id)
         call check_bytes(final, expected, 'retry keeps the correct canonical object')
     end subroutine test_after_check
+
+    subroutine assert_tree_child_lease(store)
+        type(immutable_store_t), intent(in) :: store
+        character(len=2048) :: line
+        character(len=:), allocatable :: needle
+        integer :: unit, ios
+        logical :: found
+
+        needle = '|tree|blob|'//sha256_string(PAYLOAD)
+        found = .false.
+        open(newunit=unit, file=store%root_dir//'/.fx-metadata/leases', &
+            status='old', action='read', iostat=ios)
+        if (ios == 0) then
+            do
+                read(unit, '(A)', iostat=ios) line
+                if (ios /= 0) exit
+                if (line(1:2) /= 'P|') cycle
+                if (index(line, needle) > 0) found = .true.
+            end do
+            close(unit)
+        end if
+        call test_assert(suite, found, &
+            'tree child remains leased until parent publication completes')
+    end subroutine assert_tree_child_lease
 
     subroutine test_cleanup_winner(kind, trial)
         integer, intent(in) :: kind, trial

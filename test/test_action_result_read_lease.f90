@@ -2,6 +2,7 @@ program test_action_result_read_lease
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_suite_summary, test_suite_exit
     use fx_proc, only: proc_pid
+    use fx_hash, only: sha256_string
     use fx_cache, only: cache_t, cache_init
     use fx_action_cache, only: cache_store_action, cache_restore_action
     use action_publication_oracle, only: publication_probe_t, &
@@ -439,6 +440,10 @@ contains
             'exact publisher identity waits after durable P observation')
         call test_assert(suite, len_trim(pending_id) == 64, &
             'anticipated graph has a durable P lease before binding')
+        if (trim(mode) == 'ordinary') then
+            call assert_output_lease(sha256_string('pending object bytes'))
+            call assert_output_lease(sha256_string('pending module bytes'))
+        end if
         key = action_result_action_key('pending-action')
         inquire(file=trim(store_root)//'/actions/sha256/'//key(1:2)//'/'//key, &
             exist=found)
@@ -562,6 +567,31 @@ contains
         call test_assert(suite, found .eqv. expected, &
             kind//' graph record presence for '//reason)
     end subroutine assert_metadata_record
+
+    subroutine assert_output_lease(id)
+        character(len=*), intent(in) :: id
+        character(len=2048) :: line
+        character(len=:), allocatable :: needle
+        integer :: unit, local_err
+        logical :: found
+
+        needle = '|fx-action-files|'
+        found = .false.
+        open(newunit=unit, file=trim(store_root)//'/.fx-metadata/leases', &
+            status='old', action='read', iostat=local_err)
+        if (local_err == 0) then
+            do
+                read(unit, '(A)', iostat=local_err) line
+                if (local_err /= 0) exit
+                if (line(1:2) /= 'P|') cycle
+                if (index(line, needle) == 0) cycle
+                if (index(line, '|outputs|blob|'//trim(id)) > 0) found = .true.
+            end do
+            close(unit)
+        end if
+        call test_assert(suite, found, &
+            'output blob remains leased until action publication completes')
+    end subroutine assert_output_lease
 
     function result_entry(path, role, mode) result(entry)
         character(len=*), intent(in) :: path, role

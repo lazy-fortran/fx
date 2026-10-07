@@ -164,18 +164,18 @@ contains
         if (.not. store%initialized) return
         call immutable_store_hash_file(source_path, object_id, ierr)
         if (ierr /= IMMUTABLE_OK) return
-        call immutable_store_verify_blob(store, object_id, status)
-        if (status == IMMUTABLE_OK) then
-            ierr = IMMUTABLE_OK
-            return
-        else if (status /= IMMUTABLE_MISSING) then
-            ierr = status
-            return
-        end if
-
         if (present(protected_by)) then
             if (.not. lease_covers_blob(store, protected_by, object_id)) then
                 ierr = IMMUTABLE_INVALID
+                return
+            end if
+            call immutable_store_verify_blob(store, object_id, status)
+            if (status == IMMUTABLE_OK) then
+                ierr = IMMUTABLE_OK
+                return
+            end if
+            if (status /= IMMUTABLE_MISSING) then
+                ierr = status
                 return
             end if
             call publish_blob_capture(store, source_path, object_id, ierr)

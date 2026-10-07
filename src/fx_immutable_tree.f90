@@ -38,8 +38,9 @@ contains
         integer, intent(out) :: ierr
         type(immutable_tree_entry_t), allocatable :: sorted(:)
         type(immutable_lease_t) :: publication
-        character(len=4) :: kinds(1) = ['tree']
-        character(len=HASH_LEN) :: ids(1)
+        character(len=4), allocatable :: kinds(:)
+        character(len=HASH_LEN), allocatable :: ids(:)
+        character(len=HASH_LEN) :: anticipated_id
         character(len=:), allocatable :: manifest
         integer :: i, status, lease_status
 
@@ -48,31 +49,38 @@ contains
         if (.not. store%initialized) return
         call immutable_entries_canonical(entries, sorted, ierr)
         if (ierr /= IMMUTABLE_OK) return
+        manifest = immutable_manifest_serialize(sorted)
+        anticipated_id = sha256_string(manifest)
+        ! Protect children even while the new parent tree is still absent.
+        allocate(kinds(size(sorted) + 1), ids(size(sorted) + 1))
+        kinds(1) = 'tree'
+        ids(1) = anticipated_id
         do i = 1, size(sorted)
             if (sorted(i)%kind == IMMUTABLE_BLOB) then
-                call immutable_store_verify_blob(store, sorted(i)%object_id, ierr)
+                kinds(i + 1) = 'blob'
             else
-                call verify_tree_depth(store, sorted(i)%object_id, 0, ierr)
+                kinds(i + 1) = 'tree'
             end if
-            if (ierr /= IMMUTABLE_OK) return
+            ids(i + 1) = sorted(i)%object_id
         end do
-        manifest = immutable_manifest_serialize(sorted)
-        tree_id = sha256_string(manifest)
-        call immutable_store_verify_tree(store, tree_id, status)
-        if (status == IMMUTABLE_OK) then
-            ierr = IMMUTABLE_OK
-            return
-        else if (status /= IMMUTABLE_MISSING) then
-            ierr = status
-            return
-        end if
-        ids(1) = tree_id
         call immutable_store_publication_lease_acquire(store, 'fx-publisher', &
             store%writer_start, 'tree', kinds, ids, publication, lease_status)
         if (lease_status /= IMMUTABLE_OK) then
             ierr = IMMUTABLE_IO_ERROR
             return
         end if
+        do i = 1, size(sorted)
+            if (sorted(i)%kind == IMMUTABLE_BLOB) then
+                call immutable_store_verify_blob(store, sorted(i)%object_id, ierr)
+            else
+                call verify_tree_depth(store, sorted(i)%object_id, 0, ierr)
+            end if
+            if (ierr /= IMMUTABLE_OK) then
+                call immutable_store_lease_release(store, publication, lease_status)
+                return
+            end if
+        end do
+        tree_id = anticipated_id
         call immutable_store_verify_tree(store, tree_id, status)
         if (status == IMMUTABLE_OK) then
             call immutable_store_lease_release(store, publication, ierr)
