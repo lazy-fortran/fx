@@ -5,7 +5,7 @@ program test_hash
         test_assert, test_assert_equal_str, &
         test_assert_equal_int
     use fx_hash, only: fnv1a_string, fnv1a_file, xxhash64, &
-        sha256, sha256_bytes, sha256_string, sha256_file, &
+        sha256_bytes, sha256_string, sha256_file, &
         sha256_init, sha256_update, sha256_final, &
         sha256_hardware_available, sha256_hardware_digest, &
         sha256_state_t, &
@@ -136,8 +136,6 @@ contains
         call test_assert(suite, h_foo /= h_empty, &
             'sha256: distinct input differs')
         chunk(1) = 'f'; chunk(2) = 'o'; chunk(3) = 'o'
-        call test_assert_equal_str(suite, h_foo, sha256(chunk, 3), &
-            'sha256: compatibility wrapper')
         call test_assert_equal_str(suite, &
             '2c26b46b68ffc68ff99b453c1d304134'// &
             '13422d706483bfa0f98a5e886266e7ae', &

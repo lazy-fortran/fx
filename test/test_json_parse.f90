@@ -314,7 +314,7 @@ contains
         call json_extract_string('{"x":1}', 'y', result, found)
         call test_assert(suite, .not. found, 'extract_str: not found')
 
-        ! second key in object (checks that expect_key resets for non-string vals)
+        ! second key in object after a non-string value
         call json_extract_string('{"count":5,"label":"ok"}', 'label', result, found)
         call test_assert(suite, found, 'extract_str: after int key found')
         call test_assert_equal_str(suite, 'ok', result, 'extract_str: after int key val')

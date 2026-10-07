@@ -48,9 +48,6 @@ module fx_json_parse
         character(len=:), allocatable :: input
         integer :: pos = 1
         integer :: depth = 0
-        ! Retained for source compatibility with prior public parser state.
-        logical :: in_object(MAX_DEPTH) = .false.
-        logical :: expect_key(MAX_DEPTH) = .false.
         logical :: strict_int64 = .false.
         logical :: strict_is_object(MAX_DEPTH) = .false.
         integer :: strict_phase(MAX_DEPTH) = 0
@@ -65,8 +62,8 @@ module fx_json_parse
 
     contains
 
-    ! Keeps the original API and default-integer event value while validating
-    ! complete JSON. Use strict initialization for raw and int64 number access.
+    ! Uses default-integer event values while validating complete JSON.
+    ! Use strict initialization for raw and int64 number access.
     subroutine json_parser_init(p, input)
         type(json_parser_t), intent(out) :: p
         character(len=*), intent(in) :: input
@@ -74,8 +71,6 @@ module fx_json_parse
         p%input = input
         p%pos = 1
         p%depth = 0
-        p%in_object = .false.
-        p%expect_key = .false.
         p%strict_int64 = .false.
         p%strict_is_object = .false.
         p%strict_phase = 0
@@ -102,8 +97,6 @@ module fx_json_parse
         type(json_parser_t), intent(inout) :: p
         p%pos = 1
         p%depth = 0
-        p%in_object = .false.
-        p%expect_key = .false.
         p%strict_is_object = .false.
         p%strict_phase = 0
         p%root_phase = 0

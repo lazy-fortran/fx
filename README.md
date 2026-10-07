@@ -4,7 +4,7 @@ Shared Fortran infrastructure for the lazy-fortran toolchain. `fx` has no
 dependencies of its own, which is deliberate: it sits at the bottom of the
 stack so the tools above it stay cheap to build.
 
-`fo`, the build driver, consumes eight of these modules.
+`fo`, the build driver, uses `fx` as its shared infrastructure library.
 
 ## What it provides
 
@@ -14,7 +14,9 @@ stack so the tools above it stay cheap to build.
 | `fx_path` | Path normalization and manipulation |
 | `fx_hash` | FNV-1a and SHA-256 content hashing |
 | `fx_cache`, `fx_cache_fs`, `fx_cache_key` | Content-addressed artifact store |
-| `fx_action_cache` | Action-level caching keyed by inputs and tool identity |
+| `fx_action_cache`, `fx_action_cache_record` | Action-level caching keyed by inputs and tool identity |
+| `fx_action_result_record`, `fx_action_result_store` | Action result records and storage |
+| `fx_immutable_*` | Immutable artifact storage, manifests, leases, and collection |
 | `fx_dag` | Directed acyclic graph with topological sort and reverse-dependency closure |
 | `fx_json_build`, `fx_json_parse` | JSON emission and parsing |
 | `fx_lsp` | Language Server Protocol framing and message handling |

@@ -34,7 +34,7 @@ module fx_hash
 
     public :: fnv1a, fnv1a_string, fnv1a_file
     public :: xxhash64, xxhash64_file
-    public :: sha256, sha256_bytes, sha256_string, sha256_file
+    public :: sha256_bytes, sha256_string, sha256_file
     public :: sha256_init, sha256_update, sha256_final
     public :: sha256_hardware_available, sha256_hardware_digest
     public :: hash_to_hex, hash_combine
@@ -174,14 +174,6 @@ contains
 
         hash = xxhash64(bytes, n_bytes, 0_int64)
     end subroutine xxhash64_file
-
-    function sha256(data, n) result(hex)
-        integer, intent(in) :: n
-        character(len=1), intent(in) :: data(n)
-        character(len=64) :: hex
-
-        hex = sha256_bytes(data, n)
-    end function sha256
 
     function sha256_bytes(data, n) result(hex)
         integer, intent(in) :: n
