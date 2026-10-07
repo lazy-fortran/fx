@@ -193,6 +193,13 @@ program test_immutable_gc
         close(unit, iostat=ierr)
     end if
     call test_assert_equal_int(suite, 0, ierr, 'malformed record is written')
+    call collect(100, 10, 0_int64, huge(0_int64)/2, 100)
+    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+        'under-budget inventory need not inspect malformed action')
+    call test_assert_equal_int(suite, 0, deleted, &
+        'under-budget inventory deletes nothing')
+    call exists_blob(malformed_blob, .true., &
+        'under-budget orphan remains available')
     call collect(100, 10, 0_int64, 0_int64)
     call test_assert_equal_int(suite, IMMUTABLE_IO_ERROR, ierr, &
         'malformed record stops collection')

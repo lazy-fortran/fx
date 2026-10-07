@@ -13,13 +13,16 @@ program test_action_result_store
     use action_publication_oracle, only: publication_probe_t, &
         publication_probe_lock, publication_probe_observe, publication_probe_conflict, &
         publication_probe_unlock
-    use fx_immutable_store, only: immutable_tree_entry_t, &
-        immutable_store_blob_path
+    use fx_immutable_store, only: immutable_tree_entry_t, immutable_lease_t, &
+        immutable_store_blob_path, immutable_store_root_set, &
+        immutable_store_reason_release, &
+        immutable_store_publication_lease_acquire, immutable_store_lease_release
     use fx_immutable_tree, only: immutable_store_verify_tree
     use fx_immutable_constants, only: IMMUTABLE_OK
     use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_publish_files, &
         action_result_lookup, action_result_conflicts, &
+        action_result_maintenance_tick, &
         action_result_retire, action_result_retire_key, action_result_read_t, &
         action_result_read_acquire, action_result_read_release, &
         action_result_put_blob, action_result_publish, &
@@ -62,6 +65,23 @@ program test_action_result_store
         integer(c_long_long) function unix_time() bind(C, name='fx_c_unix_time')
             import c_long_long
         end function unix_time
+        integer(c_int) function maintenance_begin(root_dir) &
+                bind(C, name='fx_action_maintenance_begin')
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: root_dir(*)
+        end function maintenance_begin
+        integer(c_int) function maintenance_end(handle) &
+                bind(C, name='fx_action_maintenance_end')
+            import c_int
+            integer(c_int), value :: handle
+        end function maintenance_end
+        integer(c_int) function maintenance_save(root_dir, shard, offset, &
+                last_scan, last_gc) bind(C, name='fx_action_maintenance_save')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root_dir(*)
+            integer(c_int), value :: shard
+            integer(c_long_long), value :: offset, last_scan, last_gc
+        end function maintenance_save
     end interface
 
     type(test_suite_t) :: suite
@@ -102,6 +122,7 @@ program test_action_result_store
     call test_conflicting_concurrent_publishers()
     call test_crash_boundaries()
     call test_retirement_boundary()
+    call test_automatic_maintenance()
 
     ierr = fx_test_remove_tree(trim(root))
     call test_assert_equal_int(suite, 0, ierr, 'test root directory is removed')
@@ -109,6 +130,253 @@ program test_action_result_store
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_automatic_maintenance()
+        type(action_result_store_t) :: maintained, reopened
+        type(immutable_lease_t) :: pending_lease
+        type(publication_probe_t) :: publisher_probe
+        type(immutable_tree_entry_t) :: entry(1)
+        type(immutable_tree_entry_t), allocatable :: found_entries(:)
+        character(len=512) :: source(1), path
+        character(len=64) :: result_id, found_id, cold_key, hot_key, crash_key
+        character(len=64) :: rooted_blob, orphan_blob, pending_blob, ids(1)
+        character(len=64) :: observed_pending
+        character(len=4) :: kinds(1)
+        character(len=:), allocatable :: marker
+        integer :: status, scanned, retired, deleted, total_retired, i
+        integer :: hot_shard
+        integer(c_int) :: owner, child, child_status, waited
+        logical :: exists
+
+        call action_result_store_init(maintained, &
+            trim(root)//'/maintenance-store', status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'maintenance store initializes')
+        source(1) = trim(root)//'/maintenance-source'
+        call write_text(trim(source(1)), 'maintenance bytes')
+        entry(1) = output_entry('out.bin', 'runtime-companion', 420)
+        call action_result_publish_files(maintained, 'maintenance-cold', &
+            source, entry, result_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'cold binding publishes')
+        call action_result_publish_files(maintained, 'maintenance-hot', &
+            source, entry, result_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'hot binding publishes')
+        cold_key = action_result_action_key('maintenance-cold')
+        hot_key = action_result_action_key('maintenance-hot')
+        path = trim(maintained%root_dir)//'/actions/sha256/'// &
+            cold_key(1:2)//'/'//cold_key
+        status = set_mtime(trim(path)//c_null_char, &
+            unix_time() - 31_c_long_long * 86400_c_long_long)
+        call test_assert_equal_int(suite, 0, status, 'cold binding ages')
+        path = trim(maintained%root_dir)//'/actions/sha256/'// &
+            hot_key(1:2)//'/'//hot_key
+        status = set_mtime(trim(path)//c_null_char, &
+            unix_time() - 31_c_long_long * 86400_c_long_long)
+        call test_assert_equal_int(suite, 0, status, 'hot binding ages')
+        call action_result_lookup(maintained, 'maintenance-hot', found_entries, &
+            found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'hot lookup refreshes binding age')
+
+        owner = maintenance_begin(trim(maintained%root_dir)//c_null_char)
+        call test_assert(suite, owner >= 0_c_int, 'first owner admits')
+        call action_result_maintenance_tick(maintained, scanned, retired, &
+            deleted, status, max_scan=2, gc_interval_seconds=huge(0_c_long_long))
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'second owner skips busy maintenance')
+        call test_assert_equal_int(suite, 0, scanned, &
+            'busy owner does not scan')
+        if (owner >= 0_c_int) then
+            status = maintenance_end(owner)
+            call test_assert_equal_int(suite, 0, status, 'first owner releases')
+        end if
+        call action_result_maintenance_tick(maintained, scanned, retired, &
+            deleted, status, max_scan=2, gc_interval_seconds=huge(0_c_long_long))
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'first bounded scan succeeds')
+        call action_result_store_init(reopened, &
+            trim(root)//'/maintenance-store', status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'cursor store reopens')
+        total_retired = retired
+        do i = 1, 200
+            call action_result_maintenance_tick(reopened, scanned, retired, &
+                deleted, status, max_scan=8, &
+                gc_interval_seconds=huge(0_c_long_long))
+            if (status /= ACTION_RESULT_OK) exit
+            total_retired = total_retired + retired
+            if (total_retired > 0) exit
+        end do
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'reopened cursor scans across shards')
+        call test_assert_equal_int(suite, 1, total_retired, &
+            'only cold binding retires')
+        call action_result_lookup(reopened, 'maintenance-cold', found_entries, &
+            found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_MISSING, status, &
+            'cold binding misses after maintenance')
+        call action_result_lookup(reopened, 'maintenance-hot', found_entries, &
+            found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'recently used binding survives maintenance')
+
+        call action_result_publish_files(reopened, 'maintenance-crash', &
+            source, entry, result_id, status)
+        crash_key = action_result_action_key('maintenance-crash')
+        marker = 'FXACTION2'//achar(10)//trim(crash_key)//achar(10)// &
+            'RETIRED'//achar(10)
+        status = raw_action_write(trim(reopened%root_dir)//c_null_char, &
+            trim(crash_key)//c_null_char, marker//c_null_char, &
+            int(len(marker), c_int))
+        call test_assert_equal_int(suite, 0, status, &
+            'interrupted retirement marker is durable')
+        path = trim(reopened%root_dir)//'/actions/sha256/'// &
+            crash_key(1:2)//'/'//crash_key
+        do i = 1, 200
+            call action_result_maintenance_tick(reopened, scanned, retired, &
+                deleted, status, max_scan=8, &
+                gc_interval_seconds=huge(0_c_long_long))
+            inquire(file=trim(path), exist=exists)
+            if (.not. exists .or. status /= ACTION_RESULT_OK) exit
+        end do
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'scanner recovers interrupted retirement')
+        call test_assert(suite, .not. exists, 'retired marker is removed')
+        call action_result_publish_files(reopened, 'maintenance-crash', &
+            source, entry, found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'binding can republish after marker recovery')
+
+        call publication_probe_lock(trim(reopened%root_dir), &
+            'maintenance-hot', publisher_probe, status)
+        call test_assert_equal_int(suite, 0, status, &
+            'publisher action lock can be held')
+        child = fork_process()
+        call test_assert(suite, child >= 0_c_int, &
+            'concurrent publisher forks')
+        if (child == 0_c_int) then
+            call action_result_publish_files(reopened, 'maintenance-hot', &
+                source, entry, found_id, status)
+            if (status == ACTION_RESULT_OK) call exit_child(0_c_int)
+            call exit_child(1_c_int)
+        end if
+        if (child > 0_c_int) then
+            call publication_probe_observe(publisher_probe, int(child), &
+                observed_pending, status)
+            call test_assert_equal_int(suite, 0, status, &
+                'concurrent publisher has a pending result lease')
+        end if
+        read(hot_key(1:2), '(z2)', iostat=status) hot_shard
+        call test_assert_equal_int(suite, 0, status, &
+            'hot action shard decodes')
+        status = maintenance_save(trim(reopened%root_dir)//c_null_char, &
+            int(hot_shard, c_int), 0_c_long_long, 0_c_long_long, &
+            0_c_long_long)
+        call test_assert_equal_int(suite, 0, status, &
+            'scanner is positioned at busy publisher shard')
+        call action_result_maintenance_tick(reopened, scanned, retired, &
+            deleted, status, max_scan=8, min_age_seconds=0_c_long_long, &
+            gc_interval_seconds=huge(0_c_long_long))
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'maintenance skips locked action without blocking')
+        call test_assert(suite, scanned >= 1, &
+            'busy publisher action was inspected')
+        call publication_probe_unlock(publisher_probe)
+        if (child > 0_c_int) then
+            call bounded_child_wait(child, child_status, waited)
+            call test_assert_equal_int(suite, int(child), int(waited), &
+                'concurrent publisher is reaped')
+            call test_assert_equal_int(suite, 0, int(child_status), &
+                'concurrent publisher completes after maintenance')
+        end if
+        call action_result_lookup(reopened, 'maintenance-hot', found_entries, &
+            found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'locked action remains readable')
+
+        call write_text(trim(source(1)), 'rooted maintenance bytes')
+        call action_result_put_blob(reopened, trim(source(1)), rooted_blob, &
+            status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'worktree blob publishes')
+        kinds(1) = 'blob'
+        ids(1) = rooted_blob
+        call immutable_store_root_set(reopened%objects, 'worktree', 'v1', &
+            'build', kinds, ids, status)
+        call immutable_store_root_set(reopened%objects, 'worktree', 'v2', &
+            'build', kinds, ids, status)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, status, &
+            'two worktree versions retain blob')
+        call write_text(trim(source(1)), 'pending maintenance bytes')
+        call action_result_put_blob(reopened, trim(source(1)), pending_blob, &
+            status)
+        ids(1) = pending_blob
+        call immutable_store_publication_lease_acquire(reopened%objects, &
+            'publisher', 'v1', 'pending', kinds, ids, pending_lease, status)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, status, &
+            'pending publication leases blob')
+        call write_text(trim(source(1)), 'orphan maintenance bytes')
+        call action_result_put_blob(reopened, trim(source(1)), orphan_blob, &
+            status)
+        call action_result_maintenance_tick(reopened, scanned, retired, &
+            deleted, status, max_scan=1, max_delete=100, &
+            min_age_seconds=0_c_long_long, pressure_bytes=0_c_long_long, &
+            pressure_objects=0, gc_interval_seconds=0_c_long_long)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'pressure tick collects through lease-aware GC')
+        path = immutable_store_blob_path(reopened%objects, orphan_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, .not. exists, 'unrooted blob is reclaimed')
+        path = immutable_store_blob_path(reopened%objects, rooted_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, exists, 'worktree versions protect blob')
+        path = immutable_store_blob_path(reopened%objects, pending_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, exists, 'active publication protects blob')
+        call immutable_store_reason_release(reopened%objects, 'worktree', &
+            'v1', 'build', status)
+        call action_result_maintenance_tick(reopened, scanned, retired, &
+            deleted, status, max_scan=1, max_delete=100, &
+            min_age_seconds=0_c_long_long, pressure_bytes=0_c_long_long, &
+            pressure_objects=0, gc_interval_seconds=0_c_long_long)
+        path = immutable_store_blob_path(reopened%objects, rooted_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, exists, 'second worktree version protects blob')
+        call immutable_store_reason_release(reopened%objects, 'worktree', &
+            'v2', 'build', status)
+        call immutable_store_lease_release(reopened%objects, pending_lease, &
+            status)
+        call action_result_maintenance_tick(reopened, scanned, retired, &
+            deleted, status, max_scan=1, max_delete=100, &
+            min_age_seconds=0_c_long_long, pressure_bytes=0_c_long_long, &
+            pressure_objects=0, gc_interval_seconds=0_c_long_long)
+        path = immutable_store_blob_path(reopened%objects, rooted_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, .not. exists, &
+            'released worktree blob becomes reclaimable')
+        path = immutable_store_blob_path(reopened%objects, pending_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, .not. exists, &
+            'released publication blob becomes reclaimable')
+
+        path = trim(reopened%root_dir)// &
+            '/.fx-metadata/action-maintenance.cursor'
+        call write_text(trim(path), 'invalid maintenance cursor')
+        status = set_mtime(trim(path)//c_null_char, &
+            unix_time() - 120_c_long_long)
+        call test_assert_equal_int(suite, 0, status, &
+            'damaged cursor is due on next publish')
+        call action_result_publish_files(reopened, 'maintenance-error', &
+            source, entry, found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'maintenance error leaves successful publication successful')
+        call action_result_lookup(reopened, 'maintenance-error', &
+            found_entries, result_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'publication remains readable after maintenance error')
+    end subroutine test_automatic_maintenance
 
     subroutine test_retirement_boundary()
         type(action_result_read_t) :: active_read

@@ -35,7 +35,7 @@ typedef struct {
 typedef struct {
     const char *root;
     object_t *objects, **index, **queue;
-    size_t count, capacity, queued, entries_seen, tree_bytes;
+    size_t count, capacity, slots, queued, entries_seen, tree_bytes;
     long long total;
     size_t remaining;
     long long epoch;
@@ -135,6 +135,14 @@ static int scan_shard(gc_t *g, char kind, int parent, const char *shard)
             st.st_blocks > LLONG_MAX / 512 ||
             g->total > LLONG_MAX - st.st_blocks * 512) {
             rc = -1; break;
+        }
+        if (g->count == g->slots) {
+            size_t slots = g->slots ? g->slots * 2 : 1024;
+            if (slots > g->capacity) slots = g->capacity;
+            object_t *grown = realloc(g->objects, slots * sizeof(object_t));
+            if (!grown) { rc = -1; break; }
+            g->objects = grown;
+            g->slots = slots;
         }
         object_t *o = &g->objects[g->count++];
         memcpy(o->id, e->d_name, 65);
@@ -506,12 +514,13 @@ int fx_immutable_gc_collect(const char *root, int max_scan, int max_delete,
     g.root = root;
     g.capacity = (size_t)max_scan;
     g.lock = -1;
-    g.objects = calloc(g.capacity, sizeof(object_t));
-    if (!g.objects) return -1;
     if (scan_kind(&g, 'B') != 0 || scan_kind(&g, 'T') != 0) goto done;
     g.remaining = g.count;
     *scanned = (int)g.count;
     *allocated = g.total;
+    if ((g.total <= pressure_bytes &&
+         g.remaining <= (size_t)pressure_objects) ||
+        max_delete == 0) { rc = 0; goto done; }
     g.index = calloc(g.count ? g.count : 1, sizeof(object_t *));
     g.queue = calloc(g.count ? g.count : 1, sizeof(object_t *));
     if (!g.index || !g.queue) goto done;
@@ -519,9 +528,6 @@ int fx_immutable_gc_collect(const char *root, int max_scan, int max_delete,
     qsort(g.index, g.count, sizeof(object_t *), object_order);
     if (snapshot(&g, 1) != 0 || scan_actions(&g) != 0 ||
         mark_graph(&g) != 0) goto done;
-    if ((g.total <= pressure_bytes &&
-         g.remaining <= (size_t)pressure_objects) ||
-        max_delete == 0) { rc = 0; goto done; }
     candidates = calloc(g.count ? g.count : 1, sizeof(object_t *));
     if (!candidates) goto done;
     size_t ncandidates = 0;

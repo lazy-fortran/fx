@@ -1,6 +1,7 @@
 module fx_action_result_store
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
         c_null_char
+    use, intrinsic :: iso_fortran_env, only: int64
     use fx_hash, only: sha256_string
     use fx_cache_key, only: cache_digest
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_CORRUPT, &
@@ -19,6 +20,7 @@ module fx_action_result_store
         immutable_store_verify_tree
     use fx_immutable_owned, only: owned_open_store, owned_read_manifest, &
         owned_close
+    use fx_immutable_gc, only: immutable_store_collect, IMMUTABLE_GC_CHANGED
     use fx_action_result_record, only: ACTION_RECORD_BOUND, &
         ACTION_RECORD_CONFLICT, action_result_bound_record, &
         action_result_conflict_record, action_result_record_parse
@@ -62,6 +64,7 @@ module fx_action_result_store
         action_result_action_key_parts, action_result_compile_action_key
     public :: action_result_file_mode
     public :: action_result_retire, action_result_retire_key
+    public :: action_result_maintenance_tick
 
     interface
         integer(c_int) function c_action_lock(root, action_id) &
@@ -69,6 +72,11 @@ module fx_action_result_store
             import c_char, c_int
             character(kind=c_char), intent(in) :: root(*), action_id(*)
         end function c_action_lock
+        integer(c_int) function c_action_try_lock(root, action_id) &
+                bind(C, name='fx_action_result_try_lock')
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), action_id(*)
+        end function c_action_try_lock
         integer(c_int) function c_action_unlock(handle) &
                 bind(C, name='fx_action_result_unlock')
             import c_int
@@ -135,6 +143,48 @@ module fx_action_result_store
             import c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function c_unlink
+        integer(c_int) function c_maintenance_begin(root) &
+                bind(C, name='fx_action_maintenance_begin')
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: root(*)
+        end function c_maintenance_begin
+        integer(c_int) function c_maintenance_end(handle) &
+                bind(C, name='fx_action_maintenance_end')
+            import c_int
+            integer(c_int), value :: handle
+        end function c_maintenance_end
+        integer(c_int) function c_maintenance_due(root, interval) &
+                bind(C, name='fx_action_maintenance_due')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root(*)
+            integer(c_long_long), value :: interval
+        end function c_maintenance_due
+        integer(c_int) function c_maintenance_load(root, shard, offset, &
+                last_scan, last_gc) bind(C, name='fx_action_maintenance_load')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root(*)
+            integer(c_int), intent(out) :: shard
+            integer(c_long_long), intent(out) :: offset, last_scan, last_gc
+        end function c_maintenance_load
+        integer(c_int) function c_maintenance_save(root, shard, offset, &
+                last_scan, last_gc) bind(C, name='fx_action_maintenance_save')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root(*)
+            integer(c_int), value :: shard
+            integer(c_long_long), value :: offset, last_scan, last_gc
+        end function c_maintenance_save
+        integer(c_int) function c_maintenance_next(root, shard, offset, &
+                budget, key) bind(C, name='fx_action_maintenance_next')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root(*)
+            integer(c_int), intent(inout) :: shard, budget
+            integer(c_long_long), intent(inout) :: offset
+            character(kind=c_char), intent(out) :: key(*)
+        end function c_maintenance_next
+        integer(c_long_long) function c_maintenance_now() &
+                bind(C, name='fx_action_maintenance_now')
+            import c_long_long
+        end function c_maintenance_now
     end interface
 
 contains
@@ -260,6 +310,7 @@ contains
             end if
             unlock_rc = c_action_unlock(lock)
             if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
+            if (ierr == ACTION_RESULT_OK) call maybe_maintain_after_publish(store)
             return
         end if
         if (rc /= 0_c_int) then
@@ -302,6 +353,7 @@ contains
                     publication_lease, root_status)
             unlock_rc = c_action_unlock(lock)
             if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
+            if (ierr == ACTION_RESULT_OK) call maybe_maintain_after_publish(store)
             return
         end if
         if (parse_status /= ACTION_RECORD_BOUND) then
@@ -319,6 +371,7 @@ contains
             ierr = ACTION_RESULT_OK
             if (unlock_rc /= 0_c_int .or. root_status /= IMMUTABLE_OK) &
                 ierr = ACTION_RESULT_IO_ERROR
+            if (ierr == ACTION_RESULT_OK) call maybe_maintain_after_publish(store)
             return
         end if
 
@@ -351,6 +404,18 @@ contains
         if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
     end subroutine action_result_publish
 
+    subroutine maybe_maintain_after_publish(store)
+        type(action_result_store_t), intent(in) :: store
+        integer(c_int) :: due
+        integer :: scanned, retired, deleted, maintenance_status
+
+        due = c_maintenance_due(store%root_dir//c_null_char, 60_c_long_long)
+        if (due /= 1_c_int) return
+        call action_result_maintenance_tick(store, scanned, retired, deleted, &
+            maintenance_status)
+        ! Housekeeping status is independent of the durable publish result.
+    end subroutine maybe_maintain_after_publish
+
     subroutine action_result_retire(store, action_id, min_age_seconds, retired, ierr)
         !! Retire one action identified by its external action ID.
         type(action_result_store_t), intent(in) :: store
@@ -366,6 +431,17 @@ contains
     end subroutine action_result_retire
 
     subroutine action_result_retire_key(store, key, min_age_seconds, retired, ierr)
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: key
+        integer, intent(in) :: min_age_seconds
+        logical, intent(out) :: retired
+        integer, intent(out) :: ierr
+
+        call retire_key_impl(store, key, min_age_seconds, retired, ierr, .false.)
+    end subroutine action_result_retire_key
+
+    subroutine retire_key_impl(store, key, min_age_seconds, retired, &
+            ierr, nonblocking)
         !! Retire one old bound record. A durable marker closes the crash gap
         !! between hiding the binding and releasing its root. Retry this call
         !! on a marker to finish interrupted cleanup, regardless of its age.
@@ -375,6 +451,7 @@ contains
         integer, intent(in) :: min_age_seconds
         logical, intent(out) :: retired
         integer, intent(out) :: ierr
+        logical, intent(in) :: nonblocking
         character(len=HASH_LEN) :: bound, ids(2)
         character(len=:), allocatable :: marker
         character(kind=c_char), allocatable :: c_root(:), c_key(:)
@@ -388,7 +465,15 @@ contains
         if (.not. immutable_id_valid(key)) return
         call to_c_text(store%root_dir, c_root)
         call to_c_text(key, c_key)
-        lock = c_action_lock(c_root, c_key)
+        if (nonblocking) then
+            lock = c_action_try_lock(c_root, c_key)
+        else
+            lock = c_action_lock(c_root, c_key)
+        end if
+        if (lock == -2_c_int) then
+            ierr = ACTION_RESULT_OK
+            return
+        end if
         if (lock < 0_c_int) then
             ierr = ACTION_RESULT_IO_ERROR
             return
@@ -446,7 +531,104 @@ contains
         end if
         unlock_rc = c_action_unlock(lock)
         if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
-    end subroutine action_result_retire_key
+    end subroutine retire_key_impl
+
+    subroutine action_result_maintenance_tick(store, scanned, retired, deleted, &
+            ierr, max_scan, min_age_seconds, pressure_bytes, pressure_objects, &
+            max_delete, gc_interval_seconds)
+        !! Run a persistent sweep. max_scan caps action directory entries and
+        !! shard steps; GC separately inventories up to one million CAS objects.
+        !! A busy owner skips without waiting. Fo calls this at owner start/stop.
+        type(action_result_store_t), intent(in) :: store
+        integer, intent(out) :: scanned, retired, deleted, ierr
+        integer, intent(in), optional :: max_scan, pressure_objects, max_delete
+        integer(int64), intent(in), optional :: min_age_seconds, &
+            pressure_bytes, gc_interval_seconds
+        integer(c_int) :: owner, shard, budget, status, end_status
+        integer(c_long_long) :: offset, last_scan, last_gc, now
+        character(kind=c_char) :: key_bytes(65)
+        character(len=HASH_LEN) :: key
+        integer :: scan_cap, delete_cap, object_cap, i, retire_status
+        integer :: objects_scanned, collected_status
+        integer(int64) :: age_floor, byte_cap, gc_interval
+        integer(int64) :: allocated_bytes, reclaimed_bytes
+        logical :: did_retire
+
+        scanned = 0
+        retired = 0
+        deleted = 0
+        ierr = ACTION_RESULT_INVALID
+        if (.not. store%initialized) return
+        scan_cap = 64
+        if (present(max_scan)) scan_cap = max_scan
+        delete_cap = 32
+        if (present(max_delete)) delete_cap = max_delete
+        object_cap = 100000
+        if (present(pressure_objects)) object_cap = pressure_objects
+        age_floor = 30_int64 * 24_int64 * 3600_int64
+        if (present(min_age_seconds)) age_floor = min_age_seconds
+        byte_cap = 8_int64 * 1024_int64 * 1024_int64 * 1024_int64
+        if (present(pressure_bytes)) byte_cap = pressure_bytes
+        gc_interval = 3600_int64
+        if (present(gc_interval_seconds)) gc_interval = gc_interval_seconds
+        if (scan_cap < 1 .or. scan_cap > 4096 .or. delete_cap < 0 .or. &
+            delete_cap > 4096 .or. object_cap < 0 .or. age_floor < 0 .or. &
+            byte_cap < 0 .or. gc_interval < 0 .or. &
+            age_floor > int(huge(0), int64)) return
+        owner = c_maintenance_begin(store%root_dir//c_null_char)
+        if (owner == -2_c_int) then
+            ierr = ACTION_RESULT_OK
+            return
+        end if
+        if (owner < 0_c_int) then
+            ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        ierr = ACTION_RESULT_IO_ERROR
+        status = c_maintenance_load(store%root_dir//c_null_char, shard, &
+            offset, last_scan, last_gc)
+        if (status /= 0_c_int) goto 900
+        now = c_maintenance_now()
+        if (now < 0_c_long_long) goto 900
+        budget = int(scan_cap, c_int)
+        do while (budget > 0_c_int)
+            status = c_maintenance_next(store%root_dir//c_null_char, &
+                shard, offset, budget, key_bytes)
+            if (status < 0_c_int) goto 900
+            if (status == 0_c_int) exit
+            do i = 1, HASH_LEN
+                key(i:i) = key_bytes(i)
+            end do
+            scanned = scanned + 1
+            call retire_key_impl(store, key, int(age_floor), &
+                did_retire, retire_status, .true.)
+            if (retire_status /= ACTION_RESULT_OK .and. &
+                retire_status /= ACTION_RESULT_MISSING .and. &
+                retire_status /= ACTION_RESULT_QUARANTINED) goto 900
+            if (did_retire) retired = retired + 1
+        end do
+        last_scan = now
+        status = c_maintenance_save(store%root_dir//c_null_char, shard, &
+            offset, last_scan, last_gc)
+        if (status /= 0_c_int) goto 900
+        if (now - last_gc >= int(gc_interval, c_long_long)) then
+            call immutable_store_collect(store%objects, 1000000, delete_cap, &
+                age_floor, byte_cap, object_cap, objects_scanned, &
+                allocated_bytes, deleted, reclaimed_bytes, collected_status)
+            if (collected_status == IMMUTABLE_GC_CHANGED) then
+                ierr = ACTION_RESULT_OK
+                goto 900
+            end if
+            if (collected_status /= IMMUTABLE_OK) goto 900
+            last_gc = now
+            status = c_maintenance_save(store%root_dir//c_null_char, shard, &
+                offset, last_scan, last_gc)
+            if (status /= 0_c_int) goto 900
+        end if
+        ierr = ACTION_RESULT_OK
+900     end_status = c_maintenance_end(owner)
+        if (end_status /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
+    end subroutine action_result_maintenance_tick
 
     function retired_record(key) result(record)
         character(len=*), intent(in) :: key

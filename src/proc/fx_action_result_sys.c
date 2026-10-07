@@ -76,7 +76,7 @@ static int action_dir(const char *root, const char *id, char *out, size_t cap)
     return ensure_directory(out);
 }
 
-int fx_action_result_lock(const char *root, const char *id)
+static int action_lock(const char *root, const char *id, int nonblocking)
 {
     char dir[PATH_MAX], path[PATH_MAX];
     if (action_dir(root, id, dir, sizeof(dir)) != 0) return -1;
@@ -87,10 +87,24 @@ int fx_action_result_lock(const char *root, const char *id)
     if (n < 0 || (size_t)n >= sizeof(path)) return -1;
     int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) return -1;
-    while (flock(fd, LOCK_EX) != 0) {
+    while (flock(fd, LOCK_EX | (nonblocking ? LOCK_NB : 0)) != 0) {
+        if (nonblocking && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            close(fd);
+            return -2;
+        }
         if (errno != EINTR) { close(fd); return -1; }
     }
     return fd;
+}
+
+int fx_action_result_lock(const char *root, const char *id)
+{
+    return action_lock(root, id, 0);
+}
+
+int fx_action_result_try_lock(const char *root, const char *id)
+{
+    return action_lock(root, id, 1);
 }
 
 int fx_action_result_unlock(int fd)
