@@ -46,7 +46,8 @@ or broad benchmarks. Performance measurements are advisory independent evidence.
 
 The bounded collector and automatic maintenance are available. Successful
 action publication checks whether maintenance is due; an explicit tick is
-available for idle owners. Fo still needs to call that tick at owner start/stop.
+available for idle owners. Fo `b3a41e6` calls it at owner start, during idle
+periods and on stop, alongside bounded old-generation root compaction.
 The collector's mechanism, metadata layout and cache handle design are agent
 decisions, not fixed recipes.
 
@@ -61,8 +62,16 @@ integrated focused gate passed `test_immutable_gc`, `test_action_result_store`,
 automatic action scanner and maintenance trigger are delivered by Fx `271e5cc`.
 It scans at most 64 raw action entries per tick, persists a cursor, skips busy
 bindings, and runs at most 32 GC deletions per due pass. Its focused native gate
-passed `test_action_result_store` and `test_immutable_gc` (2/2). Fo owner
-start/stop integration and an original-consumer recheck remain open.
+passed `test_action_result_store` and `test_immutable_gc` (2/2). The Fo
+integration passed its focused current-Fx 3-case gate.
+
+Fx `3a6ebdf` removed the v1 action cache reader/writer, record module and debug
+APIs; its focused gate passed 2/2, and Fo `17893dc` removed the consumers. Fx
+`c75ed04` removed unused parser state and compatibility wrappers (3/3 gate).
+Fx `e236bd0` adds bounded exact-group compaction of old Fo generation roots.
+The focused lease, GC and compaction gate passed 3/3. Two 12-child groups
+shrunk an isolated snapshot from 1,951 to 469 bytes; active and changed groups
+were skipped. The real global snapshot still needs a resident owner pass.
 
 ### 2026-10-07 immutable publication protection
 
