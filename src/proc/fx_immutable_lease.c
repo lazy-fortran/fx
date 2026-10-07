@@ -929,3 +929,195 @@ done:
     if (lock >= 0) { (void)flock(lock, LOCK_UN); close(lock); }
     return result;
 }
+
+static int generation_root_row(const char *row, const lease_row_info_t *info)
+{
+    return info->valid && info->object_identity &&
+           row_field_equal(row, info, 0, "R") &&
+           row_field_equal(row, info, 2, "fo-generation");
+}
+
+static int hex_id(const char *value)
+{
+    if (!value || strlen(value) != 64) return 0;
+    for (int i = 0; i < 64; ++i)
+        if (!((value[i] >= '0' && value[i] <= '9') ||
+              (value[i] >= 'a' && value[i] <= 'f'))) return 0;
+    return 1;
+}
+
+static int generation_scope(const char *start, const char *reason)
+{
+    return hex_id(start) && strncmp(reason, "generation-", 11) == 0 &&
+           hex_id(reason + 11);
+}
+
+/* Return one bounded, inactive blob-root group. The cursor is a snapshot row
+ * offset; concurrent changes may skip work, but never authorize replacement. */
+int fx_immutable_lease_generation_candidate(const char *root, int *cursor,
+        int max_rows, int max_children, char *start, size_t start_cap,
+        char *reason, size_t reason_cap, char *ids, size_t ids_cap, int *count)
+{
+    char dir[PATH_MAX], lock_path[PATH_MAX];
+    int lock = -1, result = -1, cache_borrowed = 0, rows_owned = 0;
+    uint64_t epoch = 0;
+    char **rows = NULL;
+    lease_row_info_t *info = NULL;
+    size_t nrow = 0;
+    if (!root || !cursor || !start || !reason || !ids || !count ||
+        *cursor < 0 || max_rows <= 0 || max_children < 2 ||
+        max_children > 4096 || ids_cap < 131 ||
+        ensure_metadata(root, dir, sizeof(dir)) != 0) return -1;
+    int n = snprintf(lock_path, sizeof(lock_path), "%s/lock", dir);
+    if (n < 0 || (size_t)n >= sizeof(lock_path)) return -1;
+    lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lock < 0 || flock(lock, LOCK_EX) != 0) goto done;
+    if (read_snapshot(dir, &epoch, &rows, &info, &nrow,
+                      &cache_borrowed, &rows_owned) != 0) goto done;
+    /* Malformed metadata makes group membership ambiguous. */
+    for (size_t j = 0; j < nrow; ++j)
+        if (!info[j].valid) { result = 1; goto done; }
+    if ((size_t)*cursor >= nrow) { result = 1; goto done; }
+    size_t end = (size_t)*cursor + (size_t)max_rows;
+    if (end > nrow) end = nrow;
+    for (size_t i = (size_t)*cursor; i < end; ++i) {
+        *cursor = (int)(i + 1);
+        if (!generation_root_row(rows[i], &info[i]) ||
+            !row_field_equal(rows[i], &info[i], 5, "blob") ||
+            copy_row_field(start, start_cap, rows[i], &info[i], 3) != 0 ||
+            copy_row_field(reason, reason_cap, rows[i], &info[i], 4) != 0 ||
+            !generation_scope(start, reason)) continue;
+        size_t block_end = i + 1;
+        while (block_end < nrow &&
+               same_root(rows[block_end], &info[block_end],
+                         "fo-generation", start, reason)) ++block_end;
+        *cursor = (int)block_end;
+        int ambiguous = 0, active = 0, children = 0;
+        for (size_t j = 0; j < nrow; ++j) {
+            if (same_root(rows[j], &info[j], "fo-generation", start, reason)) {
+                if (j < i || j >= block_end || !info[j].object_identity ||
+                    !row_field_equal(rows[j], &info[j], 5, "blob"))
+                    ambiguous = 1;
+                ++children;
+            }
+            if ((row_field_equal(rows[j], &info[j], 0, "L") ||
+                 row_field_equal(rows[j], &info[j], 0, "P")) &&
+                row_field_equal(rows[j], &info[j], 2, "fo-generation") &&
+                row_field_equal(rows[j], &info[j], 3, start)) active = 1;
+        }
+        if (ambiguous || active || children < 2 || children > max_children ||
+            ids_cap < (size_t)children * 65 + 1) {
+            i = block_end - 1;
+            continue;
+        }
+        size_t offset = 0;
+        for (size_t j = i; j < block_end; ++j) {
+            memcpy(ids + offset, rows[j] + info[j].offset[6], 64);
+            ids[offset + 64] = '\n';
+            offset += 65;
+        }
+        ids[offset] = '\0';
+        *count = children;
+        result = 0;
+        goto done;
+    }
+    *cursor = (int)end;
+    result = 1;
+done:
+    if (cache_borrowed) release_snapshot_cache();
+    if (rows_owned && rows) {
+        for (size_t i = 0; i < nrow; ++i) free(rows[i]);
+        free(rows); free(info);
+    }
+    if (lock >= 0) { (void)flock(lock, LOCK_UN); close(lock); }
+    return result;
+}
+
+/* Return 1 when the group changed or became active. No root is released on
+ * that path. The publication lease must cover the replacement tree. */
+int fx_immutable_lease_generation_replace(const char *root, const char *start,
+        const char *reason, const char *ids, int count, const char *tree_id,
+        const char *publication_start, const char *publication_token)
+{
+    char dir[PATH_MAX], lock_path[PATH_MAX], tree_row[1100];
+    int lock = -1, result = -1, cache_borrowed = 0, rows_owned = 0;
+    int matched = 0, protected_tree = 0, active = 0;
+    uint64_t epoch = 0;
+    char **rows = NULL, **next = NULL;
+    lease_row_info_t *info = NULL, *next_info = NULL;
+    size_t nrow = 0, nnext = 0;
+    if (!root || !generation_scope(start, reason) || !ids || count < 2 ||
+        count > 4096 || !hex_id(tree_id) || !safe_field(publication_start) ||
+        !safe_field(publication_token) ||
+        ensure_metadata(root, dir, sizeof(dir)) != 0) return -1;
+    if (strnlen(ids, (size_t)count * 65 + 1) != (size_t)count * 65)
+        return -1;
+    for (int k = 0; k < count; ++k) {
+        char id[65];
+        memcpy(id, ids + (size_t)k * 65, 64);
+        id[64] = '\0';
+        if (!hex_id(id) || ids[(size_t)k * 65 + 64] != '\n') return -1;
+    }
+    int n = snprintf(lock_path, sizeof(lock_path), "%s/lock", dir);
+    if (n < 0 || (size_t)n >= sizeof(lock_path)) return -1;
+    lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lock < 0 || flock(lock, LOCK_EX) != 0) goto done;
+    if (read_snapshot(dir, &epoch, &rows, &info, &nrow,
+                      &cache_borrowed, &rows_owned) != 0) goto done;
+    for (size_t i = 0; i < nrow; ++i) {
+        if (!info[i].valid) { result = 1; goto done; }
+        if (same_root(rows[i], &info[i], "fo-generation", start, reason)) {
+            if (!info[i].object_identity || matched >= count ||
+                !row_field_equal(rows[i], &info[i], 5, "blob") ||
+                memcmp(rows[i] + info[i].offset[6], ids + (size_t)matched * 65,
+                       64) != 0) { result = 1; goto done; }
+            ++matched;
+        }
+        if ((row_field_equal(rows[i], &info[i], 0, "L") ||
+             row_field_equal(rows[i], &info[i], 0, "P")) &&
+            row_field_equal(rows[i], &info[i], 2, "fo-generation") &&
+            row_field_equal(rows[i], &info[i], 3, start)) active = 1;
+        if (row_field_equal(rows[i], &info[i], 0, "P") &&
+            row_field_equal(rows[i], &info[i], 1, publication_token) &&
+            row_field_equal(rows[i], &info[i], 2, "fx-root-compact") &&
+            row_field_equal(rows[i], &info[i], 3, publication_start) &&
+            row_field_equal(rows[i], &info[i], 5, "tree") &&
+            row_field_equal(rows[i], &info[i], 6, tree_id)) protected_tree = 1;
+    }
+    if (matched != count || active || !protected_tree) { result = 1; goto done; }
+    next = calloc(ROW_LIMIT, sizeof(char *));
+    next_info = calloc(ROW_LIMIT, sizeof(lease_row_info_t));
+    if (!next || !next_info) goto done;
+    for (size_t i = 0; i < nrow; ++i) {
+        if (same_root(rows[i], &info[i], "fo-generation", start, reason))
+            continue;
+        if (append_next_row(next, next_info, &nnext, rows[i], &info[i]) != 0)
+            goto done;
+    }
+    n = snprintf(tree_row, sizeof(tree_row),
+                 "R||fo-generation|%s|%s|tree|%s\n", start, reason, tree_id);
+    if (n < 0 || (size_t)n >= sizeof(tree_row) ||
+        append_next_row(next, next_info, &nnext, tree_row, NULL) != 0 ||
+        epoch >= (uint64_t)INT64_MAX) goto done;
+    ++epoch;
+    if (write_snapshot(dir, epoch, next, next_info, nnext) != 0) {
+        invalidate_snapshot_cache(dir);
+        goto done;
+    }
+    if (cache_borrowed) { release_snapshot_cache(); cache_borrowed = 0; }
+    invalidate_snapshot_cache(dir);
+    if (cache_published_snapshot(dir, epoch, next, next_info, nnext)) {
+        next = NULL; next_info = NULL;
+    }
+    result = 0;
+done:
+    if (cache_borrowed) release_snapshot_cache();
+    if (rows_owned && rows) {
+        for (size_t i = 0; i < nrow; ++i) free(rows[i]);
+        free(rows); free(info);
+    }
+    if (next) { for (size_t i = 0; i < nnext; ++i) free(next[i]); free(next); }
+    free(next_info);
+    if (lock >= 0) { (void)flock(lock, LOCK_UN); close(lock); }
+    return result;
+}
