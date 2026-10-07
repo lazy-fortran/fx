@@ -1,5 +1,6 @@
 program test_action_result_store
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
+        c_null_char
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
@@ -19,6 +20,8 @@ program test_action_result_store
     use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_publish_files, &
         action_result_lookup, action_result_conflicts, &
+        action_result_retire, action_result_retire_key, action_result_read_t, &
+        action_result_read_acquire, action_result_read_release, &
         action_result_put_blob, action_result_publish, &
         action_result_materialize_blob, ACTION_RESULT_OK, &
         ACTION_RESULT_CONFLICT, ACTION_RESULT_QUARANTINED, &
@@ -43,6 +46,22 @@ program test_action_result_store
             import c_int
             integer(c_int), value :: status
         end subroutine exit_child
+        integer(c_int) function raw_action_write(root_dir, action_key, &
+                bytes, count) bind(C, name='fx_action_result_write')
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: root_dir(*), action_key(*), &
+                bytes(*)
+            integer(c_int), value :: count
+        end function raw_action_write
+        integer(c_int) function set_mtime(path, mtime) &
+                bind(C, name='fx_c_set_mtime')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), value :: mtime
+        end function set_mtime
+        integer(c_long_long) function unix_time() bind(C, name='fx_c_unix_time')
+            import c_long_long
+        end function unix_time
     end interface
 
     type(test_suite_t) :: suite
@@ -82,6 +101,7 @@ program test_action_result_store
     call test_equal_concurrent_publishers()
     call test_conflicting_concurrent_publishers()
     call test_crash_boundaries()
+    call test_retirement_boundary()
 
     ierr = fx_test_remove_tree(trim(root))
     call test_assert_equal_int(suite, 0, ierr, 'test root directory is removed')
@@ -89,6 +109,126 @@ program test_action_result_store
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_retirement_boundary()
+        type(action_result_read_t) :: active_read
+        type(action_result_store_t) :: reopened
+        type(immutable_tree_entry_t), allocatable :: found_entries(:)
+        character(len=64) :: result_id, found_id, key
+        character(len=:), allocatable :: marker
+        character(len=512) :: source(1), record_path
+        type(immutable_tree_entry_t) :: entry(1)
+        logical :: retired
+        integer :: status
+        integer(c_int) :: child, child_status, waited
+
+        source(1) = trim(root)//'/retire-source'
+        call write_text(trim(source(1)), 'retirement bytes')
+        entry(1) = output_entry('retired.bin', 'runtime-companion', 420)
+        call action_result_publish_files(store, 'retire-action', source, entry, &
+            result_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'retirement fixture publishes')
+        key = action_result_action_key('retire-action')
+        record_path = trim(store%root_dir)//'/actions/sha256/'// &
+            key(1:2)//'/'//trim(key)
+        status = set_mtime(trim(record_path)//c_null_char, &
+            unix_time() - 172800_c_long_long)
+        call test_assert_equal_int(suite, 0, status, &
+            'fixture ages action record before hot lookup')
+        call action_result_lookup(store, 'retire-action', found_entries, &
+            found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'bound lookup refreshes old record age')
+        call action_result_retire(store, 'retire-action', 86400, retired, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'recently used binding is ineligible')
+        call test_assert(suite, .not. retired, 'hot binding survives age guard')
+        call action_result_read_acquire(store, 'retire-action', active_read, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'reader leases old result before retirement')
+        call action_result_retire(store, 'retire-action', 86400, retired, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'young binding is ineligible')
+        call test_assert(suite, .not. retired, 'age guard leaves binding intact')
+        child = fork_process()
+        call test_assert(suite, child >= 0_c_int, &
+            'retirement worker forks alongside live reader')
+        if (child == 0_c_int) then
+            call action_result_retire_key(store, key, 0, retired, status)
+            if (status == ACTION_RESULT_OK .and. retired) &
+                call exit_child(0_c_int)
+            call exit_child(1_c_int)
+        end if
+        if (child > 0_c_int) then
+            call bounded_child_wait(child, child_status, waited)
+            call test_assert_equal_int(suite, int(child), int(waited), &
+                'retirement worker is reaped')
+            call test_assert_equal_int(suite, 0, int(child_status), &
+                'concurrent retirement reports removed binding')
+        end if
+        call assert_action_root('retire-action', 'bound', result_id, .false.)
+        call action_result_lookup(store, 'retire-action', found_entries, &
+            found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_MISSING, status, &
+            'lookup safely misses after retirement')
+        call action_result_read_release(store, active_read, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'live reader releases its independent graph lease')
+        call action_result_retire(store, 'conflict-race-action', 0, retired, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_QUARANTINED, status, &
+            'conflict evidence is protected from retirement')
+        call test_assert(suite, .not. retired, 'conflict is not retired')
+
+        ! Model termination immediately after the marker rename and reopen.
+        call action_result_publish_files(store, 'retire-crash-action', source, &
+            entry, result_id, status)
+        key = action_result_action_key('retire-crash-action')
+        marker = 'FXACTION2'//achar(10)//trim(key)//achar(10)// &
+            'RETIRED'//achar(10)
+        status = raw_action_write(trim(store%root_dir)//c_null_char, &
+            trim(key)//c_null_char, marker//c_null_char, int(len(marker), c_int))
+        call test_assert_equal_int(suite, 0, status, &
+            'simulated crash leaves durable retired marker')
+        call action_result_store_init(reopened, trim(root)//'/store/v2', status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'retirement store reopens after crash')
+        call action_result_lookup(reopened, 'retire-crash-action', found_entries, &
+            found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_MISSING, status, &
+            'durable marker is a safe miss after restart')
+        call action_result_retire(reopened, 'retire-crash-action', 86400, &
+            retired, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'restart finishes marker cleanup regardless of age')
+        call test_assert(suite, retired, 'interrupted retirement completes')
+        call assert_action_root('retire-crash-action', 'bound', result_id, &
+            .false.)
+        call action_result_publish_files(reopened, 'retire-crash-action', &
+            source, entry, found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'fresh publication can reuse retired action key')
+
+        call action_result_publish_files(reopened, 'retire-rebind-action', &
+            source, entry, result_id, status)
+        key = action_result_action_key('retire-rebind-action')
+        marker = 'FXACTION2'//achar(10)//trim(key)//achar(10)// &
+            'RETIRED'//achar(10)
+        status = raw_action_write(trim(store%root_dir)//c_null_char, &
+            trim(key)//c_null_char, marker//c_null_char, int(len(marker), c_int))
+        call test_assert_equal_int(suite, 0, status, &
+            'second interrupted retirement marker is durable')
+        call action_result_publish_files(reopened, 'retire-rebind-action', &
+            source, entry, found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'publisher reconciles interrupted retirement before rebinding')
+        call action_result_lookup(reopened, 'retire-rebind-action', &
+            found_entries, found_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'rebound action remains readable')
+        call test_assert_equal_str(suite, trim(result_id), trim(found_id), &
+            'rebound action retains exact result graph')
+    end subroutine test_retirement_boundary
 
     subroutine test_action_key_completeness()
         character(len=96) :: source_key, flags, toolchain, runtime, oracle
@@ -371,8 +511,9 @@ contains
         call assert_action_root('conflict-race-action', 'conflict', race_result_b)
     end subroutine test_conflicting_concurrent_publishers
 
-    subroutine assert_action_root(action_id, reason, object_id)
+    subroutine assert_action_root(action_id, reason, object_id, expected)
         character(len=*), intent(in) :: action_id, reason, object_id
+        logical, intent(in), optional :: expected
         character(len=64) :: owner
         character(len=2048) :: line
         character(len=4096) :: metadata
@@ -393,7 +534,12 @@ contains
             end do
             close(unit)
         end if
-        call test_assert(suite, found, 'action result graph has a durable root')
+        if (present(expected)) then
+            call test_assert(suite, found .eqv. expected, &
+                'action result graph root matches retirement state')
+        else
+            call test_assert(suite, found, 'action result graph has a durable root')
+        end if
     end subroutine assert_action_root
 
     subroutine test_crash_boundaries()

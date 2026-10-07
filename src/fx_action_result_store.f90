@@ -1,5 +1,6 @@
 module fx_action_result_store
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
+        c_null_char
     use fx_hash, only: sha256_string
     use fx_cache_key, only: cache_digest
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_CORRUPT, &
@@ -60,6 +61,7 @@ module fx_action_result_store
     public :: action_result_materialize_blob, action_result_action_key, &
         action_result_action_key_parts, action_result_compile_action_key
     public :: action_result_file_mode
+    public :: action_result_retire, action_result_retire_key
 
     interface
         integer(c_int) function c_action_lock(root, action_id) &
@@ -85,12 +87,31 @@ module fx_action_result_store
             integer(c_int), value :: capacity
             integer(c_int), intent(out) :: count
         end function c_action_read
+        integer(c_int) function c_action_read_touch(root, action_id, bytes, &
+                capacity, count) bind(C, name='fx_action_result_read_touch')
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), action_id(*)
+            character(kind=c_char), intent(out) :: bytes(*)
+            integer(c_int), value :: capacity
+            integer(c_int), intent(out) :: count
+        end function c_action_read_touch
         integer(c_int) function c_action_write(root, action_id, bytes, count) &
                 bind(C, name='fx_action_result_write')
             import c_char, c_int
             character(kind=c_char), intent(in) :: root(*), action_id(*), bytes(*)
             integer(c_int), value :: count
         end function c_action_write
+        integer(c_int) function c_action_age(root, action_id, min_age) &
+                bind(C, name='fx_action_result_age')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root(*), action_id(*)
+            integer(c_long_long), value :: min_age
+        end function c_action_age
+        integer(c_int) function c_action_remove(root, action_id) &
+                bind(C, name='fx_action_result_remove')
+            import c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), action_id(*)
+        end function c_action_remove
         integer(c_int) function c_file_mode(path, mode) &
                 bind(C, name='fx_action_result_file_mode')
             import c_char, c_int
@@ -228,9 +249,6 @@ contains
         if (rc == 1_c_int) then
             record = action_result_bound_record(key, result_id)
             call write_record(c_root, c_key, record, ierr)
-            unlock_rc = c_action_unlock(lock)
-            if (ierr == ACTION_RESULT_OK .and. unlock_rc /= 0_c_int) &
-                ierr = ACTION_RESULT_IO_ERROR
             if (ierr == ACTION_RESULT_OK) then
                 call immutable_store_publication_commit(store%objects, &
                     publication_lease, 'bound', root_kinds(1:1), &
@@ -240,6 +258,8 @@ contains
                 call immutable_store_lease_release(store%objects, &
                     publication_lease, root_status)
             end if
+            unlock_rc = c_action_unlock(lock)
+            if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         if (rc /= 0_c_int) then
@@ -253,12 +273,35 @@ contains
         call action_result_record_parse(existing, int(count), key, current, ids, &
             parse_status)
         if (parse_status == ACTION_RECORD_CONFLICT) then
-            unlock_rc = c_action_unlock(lock)
             root_ids = ids
             call immutable_store_publication_commit(store%objects, &
                 publication_lease, 'conflict', root_kinds, root_ids, root_status)
+            unlock_rc = c_action_unlock(lock)
             ierr = ACTION_RESULT_QUARANTINED
-            if (root_status /= IMMUTABLE_OK) ierr = ACTION_RESULT_IO_ERROR
+            if (root_status /= IMMUTABLE_OK .or. unlock_rc /= 0_c_int) &
+                ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        if (record_retired(existing, int(count), key)) then
+            call immutable_store_reason_release(store%objects, key, &
+                'fx-action-v1', 'bound', root_status)
+            if (root_status == IMMUTABLE_OK) then
+                record = action_result_bound_record(key, result_id)
+                call write_record(c_root, c_key, record, ierr)
+                if (ierr == ACTION_RESULT_OK) then
+                    call immutable_store_publication_commit(store%objects, &
+                        publication_lease, 'bound', root_kinds(1:1), &
+                        root_ids(1:1), root_status)
+                    if (root_status /= IMMUTABLE_OK) ierr = ACTION_RESULT_IO_ERROR
+                end if
+            else
+                ierr = ACTION_RESULT_IO_ERROR
+            end if
+            if (publication_lease%active) &
+                call immutable_store_lease_release(store%objects, &
+                    publication_lease, root_status)
+            unlock_rc = c_action_unlock(lock)
+            if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         if (parse_status /= ACTION_RECORD_BOUND) then
@@ -269,10 +312,10 @@ contains
             return
         end if
         if (current == result_id) then
-            unlock_rc = c_action_unlock(lock)
             call immutable_store_publication_commit(store%objects, &
                 publication_lease, 'bound', root_kinds(1:1), root_ids(1:1), &
                 root_status)
+            unlock_rc = c_action_unlock(lock)
             ierr = ACTION_RESULT_OK
             if (unlock_rc /= 0_c_int .or. root_status /= IMMUTABLE_OK) &
                 ierr = ACTION_RESULT_IO_ERROR
@@ -288,7 +331,6 @@ contains
         end if
         record = action_result_conflict_record(key, ids)
         call write_record(c_root, c_key, record, ierr)
-        unlock_rc = c_action_unlock(lock)
         root_ids = ids
         if (ierr == ACTION_RESULT_OK) then
             call immutable_store_publication_commit(store%objects, &
@@ -303,10 +345,132 @@ contains
             call immutable_store_lease_release(store%objects, publication_lease, &
                 root_status)
         end if
+        unlock_rc = c_action_unlock(lock)
         if (ierr == ACTION_RESULT_OK .and. unlock_rc == 0_c_int) &
             ierr = ACTION_RESULT_CONFLICT
         if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
     end subroutine action_result_publish
+
+    subroutine action_result_retire(store, action_id, min_age_seconds, retired, ierr)
+        !! Retire one action identified by its external action ID.
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: action_id
+        integer, intent(in) :: min_age_seconds
+        logical, intent(out) :: retired
+        integer, intent(out) :: ierr
+        character(len=HASH_LEN) :: key
+
+        key = action_result_action_key(action_id)
+        call action_result_retire_key(store, key, min_age_seconds, &
+            retired, ierr)
+    end subroutine action_result_retire
+
+    subroutine action_result_retire_key(store, key, min_age_seconds, retired, ierr)
+        !! Retire one old bound record. A durable marker closes the crash gap
+        !! between hiding the binding and releasing its root. Retry this call
+        !! on a marker to finish interrupted cleanup, regardless of its age.
+        !! The key is the exact 64-hex action filename for bounded scanners.
+        type(action_result_store_t), intent(in) :: store
+        character(len=*), intent(in) :: key
+        integer, intent(in) :: min_age_seconds
+        logical, intent(out) :: retired
+        integer, intent(out) :: ierr
+        character(len=HASH_LEN) :: bound, ids(2)
+        character(len=:), allocatable :: marker
+        character(kind=c_char), allocatable :: c_root(:), c_key(:)
+        character(kind=c_char) :: bytes(RECORD_LIMIT)
+        integer(c_int) :: lock, count, rc, age, unlock_rc
+        integer :: parse_status, root_status
+
+        retired = .false.
+        ierr = ACTION_RESULT_INVALID
+        if (.not. store%initialized .or. min_age_seconds < 0) return
+        if (.not. immutable_id_valid(key)) return
+        call to_c_text(store%root_dir, c_root)
+        call to_c_text(key, c_key)
+        lock = c_action_lock(c_root, c_key)
+        if (lock < 0_c_int) then
+            ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        rc = c_action_read(c_root, c_key, bytes, RECORD_LIMIT, count)
+        if (rc == 1_c_int) then
+            ierr = ACTION_RESULT_MISSING
+        else if (rc /= 0_c_int) then
+            ierr = ACTION_RESULT_CORRUPT
+        else if (record_retired(bytes, int(count), key)) then
+            call immutable_store_reason_release(store%objects, key, &
+                'fx-action-v1', 'bound', root_status)
+            ierr = ACTION_RESULT_IO_ERROR
+            if (root_status == IMMUTABLE_OK) then
+                rc = c_action_remove(c_root, c_key)
+                if (rc == 0_c_int) then
+                    retired = .true.
+                    ierr = ACTION_RESULT_OK
+                end if
+            end if
+        else
+            call action_result_record_parse(bytes, int(count), key, bound, &
+                ids, parse_status)
+            if (parse_status == ACTION_RECORD_CONFLICT) then
+                ierr = ACTION_RESULT_QUARANTINED
+            else if (parse_status /= ACTION_RECORD_BOUND) then
+                ierr = ACTION_RESULT_CORRUPT
+            else
+                age = c_action_age(c_root, c_key, int(min_age_seconds, c_long_long))
+                if (age == 2_c_int) then
+                    ierr = ACTION_RESULT_OK
+                else if (age == 1_c_int) then
+                    ierr = ACTION_RESULT_MISSING
+                else if (age /= 0_c_int) then
+                    ierr = ACTION_RESULT_IO_ERROR
+                else
+                    marker = retired_record(key)
+                    call write_record(c_root, c_key, marker, ierr)
+                    if (ierr == ACTION_RESULT_OK) then
+                        call immutable_store_reason_release(store%objects, &
+                            key, 'fx-action-v1', 'bound', root_status)
+                        if (root_status /= IMMUTABLE_OK) then
+                            ierr = ACTION_RESULT_IO_ERROR
+                        else
+                            rc = c_action_remove(c_root, c_key)
+                            if (rc /= 0_c_int) then
+                                ierr = ACTION_RESULT_IO_ERROR
+                            else
+                                retired = .true.
+                            end if
+                        end if
+                    end if
+                end if
+            end if
+        end if
+        unlock_rc = c_action_unlock(lock)
+        if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
+    end subroutine action_result_retire_key
+
+    function retired_record(key) result(record)
+        character(len=*), intent(in) :: key
+        character(len=:), allocatable :: record
+
+        record = 'FXACTION2'//achar(10)//trim(key)//achar(10)// &
+            'RETIRED'//achar(10)
+    end function retired_record
+
+    logical function record_retired(bytes, count, key)
+        character(kind=c_char), intent(in) :: bytes(:)
+        integer, intent(in) :: count
+        character(len=*), intent(in) :: key
+        character(len=:), allocatable :: marker
+        integer :: i
+
+        record_retired = .false.
+        marker = retired_record(key)
+        if (count /= len(marker)) return
+        do i = 1, count
+            if (bytes(i) /= marker(i:i)) return
+        end do
+        record_retired = .true.
+    end function record_retired
 
     subroutine action_result_publish_files(store, action_id, source_paths, &
             entries, result_id, ierr)
@@ -509,25 +673,36 @@ contains
             ierr = ACTION_RESULT_IO_ERROR
             return
         end if
-        rc = c_action_read(c_root, c_key, record_bytes, RECORD_LIMIT, count)
+        rc = c_action_read_touch(c_root, c_key, record_bytes, RECORD_LIMIT, count)
         if (rc /= 0_c_int) then
             unlock_status = c_action_unlock(lock)
-            ierr = ACTION_RESULT_CORRUPT
+            ierr = missing_status
+            if (rc /= 1_c_int) ierr = ACTION_RESULT_CORRUPT
+            return
+        end if
+        if (record_retired(record_bytes, int(count), key)) then
+            unlock_status = c_action_unlock(lock)
+            ierr = ACTION_RESULT_MISSING
+            if (unlock_status /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         call action_result_record_parse(record_bytes, int(count), key, current, &
             ids, parse_status)
-        unlock_status = c_action_unlock(lock)
-        if (unlock_status /= 0_c_int) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
         if (parse_status == ACTION_RECORD_CONFLICT) then
+            unlock_status = c_action_unlock(lock)
             ierr = ACTION_RESULT_QUARANTINED
+            if (unlock_status /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         if (parse_status /= ACTION_RECORD_BOUND) then
+            unlock_status = c_action_unlock(lock)
             ierr = ACTION_RESULT_CORRUPT
+            if (unlock_status /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
+            return
+        end if
+        unlock_status = c_action_unlock(lock)
+        if (unlock_status /= 0_c_int) then
+            ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         result_id = current

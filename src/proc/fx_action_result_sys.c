@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -126,8 +127,8 @@ static int action_record(const char *root, const char *id, char *dir,
     return n < 0 || (size_t)n >= name_cap ? -1 : 0;
 }
 
-int fx_action_result_read(const char *root, const char *id, char *bytes,
-                          int capacity, int *count)
+static int action_result_read(const char *root, const char *id, char *bytes,
+                              int capacity, int *count, int refresh_age)
 {
     char dir[PATH_MAX], name[80], path[PATH_MAX];
     *count = 0;
@@ -147,9 +148,34 @@ int fx_action_result_read(const char *root, const char *id, char *bytes,
         if (got <= 0) { close(fd); return -1; }
         total += (int)got;
     }
+    if (refresh_age) {
+        time_t now = time(NULL);
+        if (now == (time_t)-1) { close(fd); return -1; }
+        if (st.st_mtime <= now - 86400) {
+            struct timespec times[2] = {{0, UTIME_OMIT}, {0, UTIME_NOW}};
+            if (futimens(fd, times) != 0 || fsync(fd) != 0) {
+                close(fd);
+                return -1;
+            }
+        }
+    }
     close(fd);
     *count = total;
     return 0;
+}
+
+int fx_action_result_read(const char *root, const char *id, char *bytes,
+                          int capacity, int *count)
+{
+    return action_result_read(root, id, bytes, capacity, count, 0);
+}
+
+/* Called with the per-action lock held; the read's fstat avoids a hot-path
+ * reopen, while an old mtime is durably refreshed at most once daily. */
+int fx_action_result_read_touch(const char *root, const char *id, char *bytes,
+                                int capacity, int *count)
+{
+    return action_result_read(root, id, bytes, capacity, count, 1);
 }
 
 int fx_action_result_write(const char *root, const char *id,
@@ -178,6 +204,45 @@ int fx_action_result_write(const char *root, const char *id,
     close(fd);
     if (renameat(dfd, temp, dfd, name) != 0) {
         unlinkat(dfd, temp, 0); close(dfd); return -1;
+    }
+    int rc = fsync(dfd);
+    close(dfd);
+    return rc;
+}
+
+/* Called with the per-action lock held. 0=old enough, 1=missing, 2=young. */
+int fx_action_result_age(const char *root, const char *id, long long min_age)
+{
+    char dir[PATH_MAX], name[80];
+    if (min_age < 0 || action_record(root, id, dir, sizeof(dir),
+                                     name, sizeof(name)) != 0) return -1;
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dfd < 0) return -1;
+    int fd = openat(dfd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int saved = errno;
+    close(dfd);
+    if (fd < 0) return saved == ENOENT ? 1 : -1;
+    struct stat st;
+    int rc = fstat(fd, &st);
+    close(fd);
+    time_t now = time(NULL);
+    if (rc != 0 || !S_ISREG(st.st_mode) || now == (time_t)-1) return -1;
+    if (st.st_mtime > now || (long long)(now - st.st_mtime) < min_age)
+        return 2;
+    return 0;
+}
+
+/* Called with the per-action lock held after durable root release. */
+int fx_action_result_remove(const char *root, const char *id)
+{
+    char dir[PATH_MAX], name[80];
+    if (action_record(root, id, dir, sizeof(dir), name, sizeof(name)) != 0)
+        return -1;
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dfd < 0) return -1;
+    if (unlinkat(dfd, name, 0) != 0 && errno != ENOENT) {
+        close(dfd);
+        return -1;
     }
     int rc = fsync(dfd);
     close(dfd);
