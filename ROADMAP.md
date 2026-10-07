@@ -51,6 +51,13 @@ periods and on stop, alongside bounded old-generation root compaction.
 The collector's mechanism, metadata layout and cache handle design are agent
 decisions, not fixed recipes.
 
+Fx `a18ff23` removes orphan `.leases.<number>.<number>.<number>` snapshot
+temps on the next immutable lease update while holding the metadata lock. The
+focused `test_immutable_leases` Gremlin gate passed 1/1; its independent
+fixture checks orphan removal, unrelated-file retention and the authoritative
+lease row. This repairs an observed accumulation of about 340 MiB from
+interrupted writers without shortening persistent cache lifetime.
+
 ### 2026-10-07 bounded immutable collection and action retirement
 
 Fx `39a11a9` adds an explicit age-guarded collector with byte and inode
