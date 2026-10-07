@@ -44,9 +44,20 @@ crash durability while simplifying implementation. Recheck the original consumer
 after a provider change. Push locally verified increments without waiting for CI
 or broad benchmarks. Performance measurements are advisory independent evidence.
 
-The initial collection-disabled boundary remains until protection for all
-active paths is demonstrated. The collector's mechanism, metadata layout and
-cache handle design are agent decisions, not fixed recipes.
+The explicit bounded collector is now available, but automatic maintenance is
+not wired yet. The collector's mechanism, metadata layout and cache handle
+design are agent decisions, not fixed recipes.
+
+### 2026-10-07 bounded immutable collection and action retirement
+
+Fx `39a11a9` adds an explicit age-guarded collector with byte and inode
+pressure, inventory and deletion caps, transitive tree marking, and a metadata
+epoch recheck before unlink. Fx `0bf3182` adds durable age-guarded retirement
+of old action bindings and a once-daily refresh of successful hits. The
+integrated focused gate passed `test_immutable_gc`, `test_action_result_store`,
+`test_action_result_read_lease`, and `test_action_cache` (4/4). A bounded
+automatic action scanner and maintenance trigger remain open; current cache
+material is retained until that trigger is verified.
 
 ### 2026-10-07 immutable publication protection
 
@@ -59,7 +70,7 @@ with zero failures and a green local gate. On integrated Fx `main`, Fo's
 `test_gremlin_manifest` and `test_gremlin_execution_view` passed 2/2 with the
 installed driver SHA256
 `2eda4f4ac3d7a04f550d43d38123f5fe8937f9a235a0b306a0d2f822eb834254`.
-Durable Fo generation root retirement and bounded collection remain open.
+Fo now releases per-materialization roots after explicit safe generation prune.
 
 ### 2026-10-05 bounded lease publication repair
 
