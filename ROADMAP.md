@@ -48,6 +48,19 @@ The initial collection-disabled boundary remains until protection for all
 active paths is demonstrated. The collector's mechanism, metadata layout and
 cache handle design are agent decisions, not fixed recipes.
 
+### 2026-10-07 immutable publication protection
+
+Fx `dd92af4` now acquires a publication lease before accepting an existing blob,
+protects a tree and its direct children while verifying and publishing it, and
+keeps output blobs leased until their action graph is committed. The exact
+candidate passed the four focused publication/action-result cases in Fo Gremlin
+generation `c4b1d12d8531b0379f2af1cbda7de5d0388e662b384307ada1eab4d5c3963e58`
+with zero failures and a green local gate. On integrated Fx `main`, Fo's
+`test_gremlin_manifest` and `test_gremlin_execution_view` passed 2/2 with the
+installed driver SHA256
+`2eda4f4ac3d7a04f550d43d38123f5fe8937f9a235a0b306a0d2f822eb834254`.
+Durable Fo generation root retirement and bounded collection remain open.
+
 ### 2026-10-05 bounded lease publication repair
 
 Fo Gremlin's shared lease snapshot reached 64,962 rows against the prior
