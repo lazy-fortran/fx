@@ -44,9 +44,11 @@ crash durability while simplifying implementation. Recheck the original consumer
 after a provider change. Push locally verified increments without waiting for CI
 or broad benchmarks. Performance measurements are advisory independent evidence.
 
-The explicit bounded collector is now available, but automatic maintenance is
-not wired yet. The collector's mechanism, metadata layout and cache handle
-design are agent decisions, not fixed recipes.
+The bounded collector and automatic maintenance are available. Successful
+action publication checks whether maintenance is due; an explicit tick is
+available for idle owners. Fo still needs to call that tick at owner start/stop.
+The collector's mechanism, metadata layout and cache handle design are agent
+decisions, not fixed recipes.
 
 ### 2026-10-07 bounded immutable collection and action retirement
 
@@ -56,8 +58,11 @@ epoch recheck before unlink. Fx `0bf3182` adds durable age-guarded retirement
 of old action bindings and a once-daily refresh of successful hits. The
 integrated focused gate passed `test_immutable_gc`, `test_action_result_store`,
 `test_action_result_read_lease`, and `test_action_cache` (4/4). A bounded
-automatic action scanner and maintenance trigger remain open; current cache
-material is retained until that trigger is verified.
+automatic action scanner and maintenance trigger are delivered by Fx `271e5cc`.
+It scans at most 64 raw action entries per tick, persists a cursor, skips busy
+bindings, and runs at most 32 GC deletions per due pass. Its focused native gate
+passed `test_action_result_store` and `test_immutable_gc` (2/2). Fo owner
+start/stop integration and an original-consumer recheck remain open.
 
 ### 2026-10-07 immutable publication protection
 
