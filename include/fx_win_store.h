@@ -10,6 +10,12 @@
 #include <time.h>
 #include <stdio.h>
 
+/* UTF-8 path capacities match the shared Fortran interface, not MAX_PATH. */
+#ifdef PATH_MAX
+#undef PATH_MAX
+#endif
+#define PATH_MAX 4096
+
 /* These flags have real native semantics; directory/reparse checks are mandatory. */
 #define O_DIRECTORY 0x01000000
 #define O_NOFOLLOW  0x02000000

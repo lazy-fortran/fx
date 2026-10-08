@@ -318,7 +318,7 @@ int fx_win_lstat(const char *path, struct fx_win_stat *st)
 }
 int fx_win_stat(const char *path, struct fx_win_stat *st)
 {
-    wchar_t *wide = fx_win32_wide(path);
+    wchar_t *wide = fx_win32_path(path);
     HANDLE handle;
     int rc;
     if (!wide) return fx_win32_errno(GetLastError());
@@ -406,7 +406,7 @@ static int rename_relative(int olddir, const char *oldname, int newdir,
     source = child_handle(handle_of(olddir), wide, O_RDONLY, DELETE, 0, -1);
     free(wide);
     if (source == INVALID_HANDLE_VALUE) return -1;
-    rc = name_change(source, handle_of(newdir), newname, replace, replace ? 65 : 10);
+    rc = name_change(source, handle_of(newdir), newname, replace, 65);
     CloseHandle(source);
     return rc;
 }
@@ -744,7 +744,7 @@ int fx_win_resolve_root(const char *path, char *out, size_t capacity)
 }
 char *fx_win_realpath(const char *path, char *out)
 {
-    wchar_t *wide = fx_win32_wide(path), *final;
+    wchar_t *wide = fx_win32_path(path), *final;
     HANDLE handle;
     char *utf8, *result;
     DWORD count;
@@ -951,7 +951,7 @@ ssize_t fx_win_readlinkat(int parent, const char *name, char *out, size_t capaci
 }
 int fx_win_symlink(const char *target, const char *path)
 {
-    wchar_t *wide_target = fx_win32_wide(target), *wide_path = fx_win32_wide(path);
+    wchar_t *wide_target = fx_win32_wide(target), *wide_path = fx_win32_path(path);
     DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
     if (!wide_target || !wide_path) {
         free(wide_target); free(wide_path); return fx_win32_errno(GetLastError());

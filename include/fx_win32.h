@@ -25,6 +25,31 @@ static inline wchar_t *fx_win32_wide(const char *text)
     return wide;
 }
 
+/* Absolute extended-length path for Win32 filename APIs. */
+static inline wchar_t *fx_win32_path(const char *text)
+{
+    wchar_t *wide = fx_win32_wide(text), *full, *extended;
+    DWORD count;
+    size_t prefix;
+    if (!wide) return NULL;
+    if (!wcsncmp(wide, L"\\\\?\\", 4)) return wide;
+    count = GetFullPathNameW(wide, 0, NULL, NULL);
+    if (!count) { DWORD error = GetLastError(); free(wide); SetLastError(error); return NULL; }
+    full = malloc((size_t)count * sizeof(*full));
+    if (!full) { free(wide); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+    if (!GetFullPathNameW(wide, count, full, NULL)) {
+        DWORD error = GetLastError(); free(full); free(wide); SetLastError(error); return NULL;
+    }
+    free(wide);
+    for (wchar_t *p = full; *p; ++p) if (*p == L'/') *p = L'\\';
+    prefix = full[0] == L'\\' && full[1] == L'\\' ? 8 : 4;
+    extended = malloc((wcslen(full) + prefix + 1) * sizeof(*extended));
+    if (!extended) { free(full); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+    wcscpy(extended, prefix == 8 ? L"\\\\?\\UNC\\" : L"\\\\?\\");
+    wcscat(extended, full + (prefix == 8 ? 2 : 0));
+    free(full); return extended;
+}
+
 static inline char *fx_win32_utf8(const wchar_t *wide)
 {
     int count;
