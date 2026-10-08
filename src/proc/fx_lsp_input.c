@@ -1,7 +1,7 @@
 /* Raw, bounded stdin transport: formatted Fortran input may read ahead. */
 #include <errno.h>
 #include <stdio.h>
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__CYGWIN__)
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
@@ -13,7 +13,7 @@
 /* Positive byte count, zero timeout, -1 EOF, -2 transport error. */
 int fx_lsp_input(char *bytes, int capacity, int timeout_ms)
 {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__CYGWIN__)
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     DWORD available, count;
     ULONGLONG start = GetTickCount64();
