@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <unistd.h>
 
+/* Internal metadata opens must not require file data permissions. */
+#define FX_METADATA_ONLY 0x08000000
 #define FX_NT_DIRECTORY 0x00000001UL
 #define FX_NT_WRITE_THROUGH 0x00000002UL
 #define FX_NT_SYNCHRONOUS 0x00000020UL
@@ -32,7 +34,9 @@ static int nt_error(NTSTATUS status)
 {
     error_fn convert = (error_fn)(void *)GetProcAddress(
         GetModuleHandleW(L"ntdll.dll"), "RtlNtStatusToDosError");
-    return fx_win32_errno(convert ? convert(status) : ERROR_GEN_FAILURE);
+    DWORD error = convert ? convert(status) : ERROR_GEN_FAILURE;
+    SetLastError(error);
+    return fx_win32_errno(error);
 }
 
 static HANDLE handle_of(int fd)
@@ -83,6 +87,50 @@ static PSECURITY_DESCRIPTOR private_descriptor(void)
     return descriptor;
 }
 
+static PSECURITY_DESCRIPTOR mode_descriptor(HANDLE held, mode_t mode, int directory)
+{
+    PSECURITY_DESCRIPTOR ownership = NULL;
+    PSID owner_sid = NULL;
+    LPWSTR sid = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    /* Entry deletion belongs to the writable parent, as it does on POSIX.
+     * A child's independent DELETE grant would bypass a frozen parent. */
+    DWORD owner = READ_CONTROL | WRITE_DAC | WRITE_OWNER | SYNCHRONIZE |
+        FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+    DWORD others = 0;
+    unsigned shared = ((unsigned)mode | ((unsigned)mode >> 3)) & 7;
+    if (mode & 0400) owner |= FILE_GENERIC_READ;
+    if (mode & 0200) owner |= FILE_GENERIC_WRITE;
+    if (mode & 0100) owner |= FILE_GENERIC_EXECUTE;
+    if (directory && (mode & 0200)) owner |= FILE_DELETE_CHILD;
+    if (shared & 4) others |= FILE_GENERIC_READ;
+    if (shared & 2) others |= FILE_GENERIC_WRITE;
+    if (shared & 1) others |= FILE_GENERIC_EXECUTE;
+    if (directory && (shared & 2)) others |= FILE_DELETE_CHILD;
+    DWORD error = GetSecurityInfo(held, SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION, &owner_sid, NULL, NULL, NULL, &ownership);
+    if (error != ERROR_SUCCESS) { SetLastError(error); return NULL; }
+    if (!owner_sid || !IsValidSid(owner_sid)) {
+        LocalFree(ownership); SetLastError(ERROR_INVALID_SECURITY_DESCR); return NULL;
+    }
+    if (!ConvertSidToStringSidW(owner_sid, &sid)) {
+        error = GetLastError(); LocalFree(ownership); SetLastError(error); return NULL;
+    }
+    LocalFree(ownership);
+    size_t count = 2 * wcslen(sid) + 100;
+    wchar_t *sddl = malloc(count * sizeof(*sddl));
+    if (!sddl) {
+        LocalFree(sid); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL;
+    }
+    swprintf(sddl, count, L"O:%lsD:P(A;;0x%lx;;;%ls)", sid, (unsigned long)owner, sid);
+    if (others) swprintf(sddl + wcslen(sddl), count - wcslen(sddl),
+        L"(A;;0x%lx;;;WD)", (unsigned long)others);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl,
+        SDDL_REVISION_1, &descriptor, NULL)) descriptor = NULL;
+    error = GetLastError(); free(sddl); LocalFree(sid); SetLastError(error);
+    return descriptor;
+}
+
 static HANDLE child_handle(HANDLE parent, const wchar_t *name, int flags,
                            ACCESS_MASK extra, int allow_reparse, int mode)
 {
@@ -102,8 +150,10 @@ static HANDLE child_handle(HANDLE parent, const wchar_t *name, int flags,
         wcschr(name, L'/') || wcschr(name, L':') || !wcscmp(name, L"..")) {
         errno = EINVAL; return INVALID_HANDLE_VALUE;
     }
-    if ((flags & O_ACCMODE) != O_WRONLY) access |= FILE_READ_DATA;
-    if ((flags & O_ACCMODE) != O_RDONLY) access |= FILE_WRITE_DATA;
+    if (!(flags & FX_METADATA_ONLY)) {
+        if ((flags & O_ACCMODE) != O_WRONLY) access |= FILE_READ_DATA;
+        if ((flags & O_ACCMODE) != O_RDONLY) access |= FILE_WRITE_DATA;
+    }
     if (flags & O_CREAT) {
         access |= FILE_WRITE_ATTRIBUTES | WRITE_DAC;
         disposition = flags & O_EXCL ? FX_NT_CREATE :
@@ -276,12 +326,68 @@ int fx_win_fstatat(int parent, const char *name, struct fx_win_stat *st, int fla
     int rc;
     (void)flags;
     if (!wide) return fx_win32_errno(GetLastError());
-    handle = child_handle(handle_of(parent), wide, O_RDONLY, 0, 1, -1);
+    handle = child_handle(handle_of(parent), wide,
+        O_RDONLY | FX_METADATA_ONLY, 0, 1, -1);
     free(wide);
     if (handle == INVALID_HANDLE_VALUE) return -1;
     rc = stat_handle(handle, st);
     CloseHandle(handle);
     return rc;
+}
+
+static HANDLE directory_access(HANDLE held, ACCESS_MASK access)
+{
+    BY_HANDLE_FILE_INFORMATION before, after;
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES object;
+    IO_STATUS_BLOCK io;
+    WCHAR empty[] = L"";
+    HANDLE reopened = INVALID_HANDLE_VALUE;
+    create_fn create = (create_fn)(void *)GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "NtCreateFile");
+    if (!create) {
+        fx_win32_errno(ERROR_NOT_SUPPORTED); return INVALID_HANDLE_VALUE;
+    }
+    if (!GetFileInformationByHandle(held, &before)) {
+        fx_win32_errno(GetLastError()); return INVALID_HANDLE_VALUE;
+    }
+    if (before.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        errno = ELOOP; return INVALID_HANDLE_VALUE;
+    }
+    if (!(before.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        errno = ENOTDIR; return INVALID_HANDLE_VALUE;
+    }
+    /* A counted empty name reopens the related object itself. Dot would
+       request a child filename. Never reconstruct the held object's path. */
+    name.Buffer = empty;
+    name.Length = 0;
+    name.MaximumLength = sizeof(empty);
+    memset(&object, 0, sizeof(object));
+    object.Length = sizeof(object);
+    object.RootDirectory = held;
+    object.ObjectName = &name;
+    object.Attributes = 0x40; /* OBJ_CASE_INSENSITIVE; no backup intent. */
+    memset(&io, 0, sizeof(io));
+    NTSTATUS status = create(&reopened,
+        access | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        &object, &io, NULL, 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FX_NT_OPEN, FX_NT_DIRECTORY | FX_NT_SYNCHRONOUS |
+        FX_NT_REPARSE | FX_NT_WRITE_THROUGH, NULL, 0);
+    if (status < 0) { nt_error(status); return INVALID_HANDLE_VALUE; }
+    if (!GetFileInformationByHandle(reopened, &after)) {
+        DWORD error = GetLastError(); CloseHandle(reopened);
+        fx_win32_errno(error); return INVALID_HANDLE_VALUE;
+    }
+    if ((after.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+        !(after.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        before.dwVolumeSerialNumber != after.dwVolumeSerialNumber ||
+        before.nFileIndexHigh != after.nFileIndexHigh ||
+        before.nFileIndexLow != after.nFileIndexLow) {
+        CloseHandle(reopened); fx_win32_errno(ERROR_INVALID_DATA);
+        return INVALID_HANDLE_VALUE;
+    }
+    return reopened;
 }
 
 static HANDLE path_handle(const char *path, ACCESS_MASK access, int allow_reparse)
@@ -302,7 +408,13 @@ static HANDLE path_handle(const char *path, ACCESS_MASK access, int allow_repars
     directory = walk_absolute(parent, O_RDONLY | O_DIRECTORY, 0, -1);
     free(parent);
     if (directory == INVALID_HANDLE_VALUE) { free(full); return directory; }
-    result = child_handle(directory, slash + 1, O_RDONLY, access, allow_reparse, -1);
+    if (access & DELETE) {
+        HANDLE authorized = directory_access(directory, FILE_DELETE_CHILD);
+        CloseHandle(directory); directory = authorized;
+        if (directory == INVALID_HANDLE_VALUE) { free(full); return directory; }
+    }
+    result = child_handle(directory, slash + 1, O_RDONLY | FX_METADATA_ONLY,
+        access, allow_reparse, -1);
     CloseHandle(directory);
     free(full);
     return result;
@@ -400,11 +512,15 @@ static int rename_relative(int olddir, const char *oldname, int newdir,
                            const char *newname, int replace)
 {
     wchar_t *wide = fx_win32_wide(oldname);
-    HANDLE source;
+    HANDLE source, authorized;
     int rc;
     if (!wide) return fx_win32_errno(GetLastError());
-    source = child_handle(handle_of(olddir), wide, O_RDONLY, DELETE, 0, -1);
-    free(wide);
+    authorized = directory_access(handle_of(olddir), FILE_DELETE_CHILD);
+    if (authorized == INVALID_HANDLE_VALUE) { free(wide); return -1; }
+    source = child_handle(authorized, wide, O_RDONLY | FX_METADATA_ONLY,
+        DELETE, 0, -1);
+    DWORD error = GetLastError();
+    CloseHandle(authorized); free(wide); SetLastError(error);
     if (source == INVALID_HANDLE_VALUE) return -1;
     rc = name_change(source, handle_of(newdir), newname, replace, 65);
     CloseHandle(source);
@@ -433,12 +549,15 @@ static int remove_handle(HANDLE handle, int directory)
 int fx_win_unlinkat(int parent, const char *name, int flags)
 {
     wchar_t *wide = fx_win32_wide(name);
-    HANDLE handle;
+    HANDLE handle, authorized;
     int rc;
     if (!wide) return fx_win32_errno(GetLastError());
-    handle = child_handle(handle_of(parent), wide, O_RDONLY,
-        DELETE | FILE_WRITE_ATTRIBUTES, 1, -1);
-    free(wide);
+    authorized = directory_access(handle_of(parent), FILE_DELETE_CHILD);
+    if (authorized == INVALID_HANDLE_VALUE) { free(wide); return -1; }
+    handle = child_handle(authorized, wide, O_RDONLY | FX_METADATA_ONLY,
+        DELETE, 1, -1);
+    DWORD error = GetLastError();
+    CloseHandle(authorized); free(wide); SetLastError(error);
     if (handle == INVALID_HANDLE_VALUE) return -1;
     rc = remove_handle(handle, flags & AT_REMOVEDIR);
     CloseHandle(handle);
@@ -446,7 +565,7 @@ int fx_win_unlinkat(int parent, const char *name, int flags)
 }
 static int remove_path(const char *path, int directory)
 {
-    HANDLE handle = path_handle(path, DELETE | FILE_WRITE_ATTRIBUTES, 1);
+    HANDLE handle = path_handle(path, DELETE, 1);
     int rc;
     if (handle == INVALID_HANDLE_VALUE) return -1;
     rc = remove_handle(handle, directory);
@@ -481,6 +600,12 @@ int fx_win_fsync(int fd)
 }
 static HANDLE metadata_handle(int fd, ACCESS_MASK access)
 {
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle_of(fd), &info)) {
+        fx_win32_errno(GetLastError()); return INVALID_HANDLE_VALUE;
+    }
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        return directory_access(handle_of(fd), access);
     HANDLE handle = ReOpenFile(handle_of(fd), access | READ_CONTROL | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH);
@@ -490,11 +615,14 @@ static HANDLE metadata_handle(int fd, ACCESS_MASK access)
 int fx_win_fchmod(int fd, mode_t mode)
 {
     FILE_BASIC_INFO basic;
-    HANDLE writable = metadata_handle(fd, FILE_WRITE_ATTRIBUTES |
-        (!(mode & 0077) ? WRITE_DAC : 0));
+    HANDLE writable = metadata_handle(fd, FILE_WRITE_ATTRIBUTES | WRITE_DAC);
     if (writable == INVALID_HANDLE_VALUE) return -1;
-    if (!(mode & 0077)) {
-        PSECURITY_DESCRIPTOR security = private_descriptor();
+    if (!GetFileInformationByHandleEx(writable, FileBasicInfo, &basic, sizeof(basic))) {
+        DWORD error = GetLastError(); CloseHandle(writable); return fx_win32_errno(error);
+    }
+    {
+        PSECURITY_DESCRIPTOR security = mode_descriptor(writable, mode,
+            (basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
         BOOL present, defaulted;
         PACL dacl;
         if (!security) { CloseHandle(writable); return fx_win32_errno(GetLastError()); }
@@ -507,9 +635,6 @@ int fx_win_fchmod(int fd, mode_t mode)
             NULL, NULL, dacl, NULL);
         LocalFree(security);
         if (error != ERROR_SUCCESS) { CloseHandle(writable); return fx_win32_errno(error); }
-    }
-    if (!GetFileInformationByHandleEx(writable, FileBasicInfo, &basic, sizeof(basic))) {
-        DWORD error = GetLastError(); CloseHandle(writable); return fx_win32_errno(error);
     }
     if (mode & 0222) basic.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
     else basic.FileAttributes |= FILE_ATTRIBUTE_READONLY;
@@ -888,7 +1013,6 @@ int fx_win_current_owned(int fd)
     if (!owned) errno = EACCES;
     return owned;
 }
-
 
 int fx_win_private_owned(int fd)
 {

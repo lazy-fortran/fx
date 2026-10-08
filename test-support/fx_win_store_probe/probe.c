@@ -4,6 +4,7 @@
 #include <string.h>
 #include <io.h>
 #include <aclapi.h>
+#include <sddl.h>
 #include <stddef.h>
 
 int fx_immutable_store_initialize(const char *);
@@ -32,6 +33,17 @@ static int check(int condition, const char *claim)
 static void path(char *out, const char *root, const char *name)
 { snprintf(out, 4096, "%s/%s", root, name); }
 
+static int count_owned_stages(const char *root)
+{
+    DIR *directory = opendir(root);
+    struct dirent *entry;
+    int count = 0;
+    if (!directory) return -1;
+    while ((entry = readdir(directory)))
+        if (!strncmp(entry->d_name, ".fx-owned-", 10)) ++count;
+    closedir(directory); return count;
+}
+
 static int native_rename(const char *source, const char *destination)
 {
     wchar_t *from = fx_win32_path(source), *to = fx_win32_path(destination);
@@ -50,6 +62,202 @@ static int native_rename(const char *source, const char *destination)
     int rc = SetFileInformationByHandle(handle, FileRenameInfoEx, info, size) ? 0 : -1;
     DWORD error = GetLastError(); free(to); free(info); CloseHandle(handle); SetLastError(error);
     return rc;
+}
+
+static int native_bytes_equal(const char *name, const char *expected, DWORD size)
+{
+    wchar_t *wide = fx_win32_path(name);
+    HANDLE handle = CreateFileW(wide, FILE_READ_DATA, FILE_SHARE_READ |
+        FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    char bytes[32]; DWORD got = 0;
+    int equal = size <= sizeof(bytes) && ReadFile(handle, bytes, sizeof(bytes), &got, NULL) &&
+        got == size && memcmp(bytes, expected, size) == 0;
+    CloseHandle(handle);
+    return equal;
+}
+
+static int native_write_denied(const char *name)
+{
+    wchar_t *wide = fx_win32_path(name);
+    HANDLE handle = CreateFileW(wide, FILE_WRITE_DATA | FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    free(wide);
+    DWORD error = GetLastError();
+    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    return handle == INVALID_HANDLE_VALUE && error == ERROR_ACCESS_DENIED;
+}
+
+static void report_native_permissions(const char *name)
+{
+    wchar_t *wide = fx_win32_path(name), *sddl = NULL;
+    PSECURITY_DESCRIPTOR security = NULL;
+    DWORD result = GetNamedSecurityInfoW(wide, SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        NULL, NULL, NULL, NULL, &security);
+    if (result == ERROR_SUCCESS && ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            security, SDDL_REVISION_1, OWNER_SECURITY_INFORMATION |
+            DACL_SECURITY_INFORMATION, &sddl, NULL)) printf("actual-directory-security=%ls\n", sddl);
+    else printf("security-query-error=%lu\n", (unsigned long)result);
+    LocalFree(sddl); LocalFree(security); free(wide);
+    HANDLE token;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+    DWORD size = 0;
+    GetTokenInformation(token, TokenPrivileges, NULL, 0, &size);
+    TOKEN_PRIVILEGES *privileges = malloc(size);
+    if (privileges && GetTokenInformation(token, TokenPrivileges, privileges, size, &size)) {
+        for (DWORD i = 0; i < privileges->PrivilegeCount; ++i) {
+            if (!(privileges->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED)) continue;
+            wchar_t privilege[128]; DWORD count = 128;
+            if (LookupPrivilegeNameW(NULL, &privileges->Privileges[i].Luid, privilege, &count))
+                printf("enabled-privilege=%ls\n", privilege);
+        }
+    }
+    free(privileges); CloseHandle(token);
+}
+
+static int ordinary_access_token(void)
+{
+    HANDLE token;
+    const wchar_t *names[] = {L"SeBackupPrivilege", L"SeRestorePrivilege"};
+    if (!ImpersonateSelf(SecurityImpersonation)) return -1;
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
+            FALSE, &token)) { RevertToSelf(); return -1; }
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        TOKEN_PRIVILEGES privileges = {0};
+        PRIVILEGE_SET required = {0};
+        BOOL enabled = TRUE;
+        privileges.PrivilegeCount = 1;
+        if (!LookupPrivilegeValueW(NULL, names[i], &privileges.Privileges[0].Luid) ||
+            !AdjustTokenPrivileges(token, FALSE, &privileges, 0, NULL, NULL)) {
+            CloseHandle(token); RevertToSelf(); return -1;
+        }
+        required.PrivilegeCount = 1;
+        required.Control = PRIVILEGE_SET_ALL_NECESSARY;
+        required.Privilege[0].Luid = privileges.Privileges[0].Luid;
+        required.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (!PrivilegeCheck(token, &required, &enabled) || enabled) {
+            CloseHandle(token); RevertToSelf(); return -1;
+        }
+    }
+    CloseHandle(token);
+    return 0;
+}
+
+static int held_directory_freeze_oracles(const char *root)
+{
+    char original[4096], moved[4096], addition[4096];
+    int errors = 0;
+    errors += check(ordinary_access_token() == 0,
+        "held-directory oracle uses ordinary access without backup/restore bypass");
+    if (errors) return errors;
+    path(original, root, "held-freeze-original");
+    path(moved, root, "held-freeze-moved");
+    errors += check(mkdir(original, 0700) == 0, "held freeze directory creates");
+    int fd = fx_win_open_directory(original);
+    errors += check(fd >= 0, "held freeze directory opens");
+    if (fd < 0) { RevertToSelf(); return errors; }
+    errors += check(native_rename(original, moved) == 0,
+        "independent actor displaces the held directory");
+    errors += check(mkdir(original, 0700) == 0, "replacement directory creates");
+    errors += check(fchmod(fd, 0555) == 0, "freeze applies to the held renamed object");
+    path(addition, moved, "forbidden");
+    wchar_t *wide = fx_win32_path(addition);
+    HANDLE created = CreateFileW(wide, GENERIC_WRITE, FILE_SHARE_READ |
+        FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD error = GetLastError(); free(wide);
+    errors += check(created == INVALID_HANDLE_VALUE && error == ERROR_ACCESS_DENIED,
+        "moved original denies native additions after held freeze");
+    if (created != INVALID_HANDLE_VALUE) CloseHandle(created);
+    path(addition, original, "replacement-child");
+    wide = fx_win32_path(addition);
+    created = CreateFileW(wide, GENERIC_WRITE, FILE_SHARE_READ |
+        FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wide);
+    errors += check(created != INVALID_HANDLE_VALUE,
+        "replacement directory permissions remain writable");
+    if (created != INVALID_HANDLE_VALUE) CloseHandle(created);
+    errors += check(fchmod(fd, 0700) == 0, "owner thaws the held renamed object");
+    close(fd);
+    errors += check(RevertToSelf(), "held-directory oracle restores its private thread token");
+    return errors;
+}
+
+static int frozen_directory_oracles(const char *root)
+{
+    char directory[4096], child[4096], addition[4096], survivor[4096];
+    int errors = 0;
+    errors += check(ordinary_access_token() == 0,
+        "frozen-directory oracle uses ordinary access without backup/restore bypass");
+    if (errors) return errors;
+    path(directory, root, "frozen-directory");
+    errors += check(mkdir(directory, 0700) == 0, "frozen-directory fixture creates");
+    path(child, directory, "known");
+    int fd = open(child, O_CREAT | O_RDWR | O_EXCL, 0600);
+    errors += check(fd >= 0 && _write(fd, "known", 5) == 5, "freeze fixture writes known bytes");
+    if (fd >= 0) close(fd);
+    path(survivor, root, "frozen-hardlink-survivor");
+    wchar_t *child_wide = fx_win32_path(child), *survivor_wide = fx_win32_path(survivor);
+    errors += check(CreateHardLinkW(survivor_wide, child_wide, NULL),
+        "independent hardlink retains the same object outside the frozen directory");
+    errors += check(chmod(child, 0444) == 0 && chmod(directory, 0555) == 0,
+        "file and directory freeze succeeds");
+    errors += check(native_write_denied(child), "fresh native writes to frozen child are denied");
+    HANDLE deletion = CreateFileW(child_wide, DELETE, FILE_SHARE_READ |
+        FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    DWORD delete_error = GetLastError();
+    errors += check(deletion == INVALID_HANDLE_VALUE && delete_error == ERROR_ACCESS_DENIED,
+        "frozen child rejects fresh delete access independently of readonly disposition");
+    if (deletion != INVALID_HANDLE_VALUE) CloseHandle(deletion);
+    fd = fx_win_open_directory(directory);
+    errors += check(fd >= 0 && fx_win_current_owned(fd) == 1,
+        "readonly shared directory retains actual owner SID identity");
+    errors += check(fd >= 0 && fx_win_private_owned(fd) == 0,
+        "owner identity does not imply a private DACL");
+    if (fd >= 0) close(fd);
+    path(addition, directory, "new-file");
+    wchar_t *wide = fx_win32_path(addition);
+    HANDLE created = CreateFileW(wide, GENERIC_WRITE, FILE_SHARE_READ |
+        FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wide);
+    DWORD native_error = GetLastError();
+    printf("frozen-create handle=%d error=%lu\n", created != INVALID_HANDLE_VALUE,
+        (unsigned long)native_error);
+    errors += check(created == INVALID_HANDLE_VALUE && native_error == ERROR_ACCESS_DENIED,
+        "native child creation is denied by a frozen directory");
+    if (created != INVALID_HANDLE_VALUE) CloseHandle(created);
+    path(addition, directory, "new-directory");
+    wide = fx_win32_path(addition);
+    int made = CreateDirectoryW(wide, NULL);
+    DWORD made_error = GetLastError();
+    DWORD made_attributes = GetFileAttributesW(wide);
+    printf("frozen-mkdir made=%d error=%lu attributes=%lu\n", made,
+        (unsigned long)made_error, (unsigned long)made_attributes);
+    if (made) report_native_permissions(directory);
+    free(wide);
+    errors += check(!made && made_error == ERROR_ACCESS_DENIED,
+        "native subdirectory creation is denied by a frozen directory");
+    errors += check(unlink(child) != 0 && errno == EACCES,
+        "frozen directory rejects changing an existing child entry");
+    errors += check(native_bytes_equal(child, "known", 5),
+        "frozen child bytes survive rejected entry removal");
+    errors += check(chmod(directory, 0700) == 0, "owner can thaw frozen directory");
+    errors += check(native_write_denied(child), "directory thaw preserves child immutability");
+    path(addition, directory, "after-thaw");
+    fd = open(addition, O_CREAT | O_RDWR | O_EXCL, 0600);
+    errors += check(fd >= 0, "thawed directory accepts legitimate new children");
+    if (fd >= 0) close(fd);
+    errors += check(unlink(child) == 0, "writable parent can remove immutable owned child");
+    DWORD attributes = GetFileAttributesW(survivor_wide);
+    errors += check(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY),
+        "unlinking one name preserves shared hardlink readonly attributes");
+    errors += check(native_bytes_equal(survivor, "known", 5) && native_write_denied(survivor),
+        "surviving hardlink retains immutable original bytes");
+    errors += check(unlink(survivor) == 0, "writable root removes immutable surviving name");
+    free(child_wide); free(survivor_wide);
+    errors += check(RevertToSelf(), "frozen-directory oracle restores its private thread token");
+    return errors;
 }
 
 int fx_test_fs_lock(const char *);
@@ -359,7 +567,13 @@ int main(int argc, char **argv)
     errors += check(flock(fd, LOCK_UN) == 0 && flock(fd, LOCK_EX | LOCK_NB) == 0,
         "one unlock releases idempotent ownership");
     close(fd);
+    char shard[4096];
+    path(shard, root, "blobs/sha256/2c");
+    errors += check(count_owned_stages(shard) == 0,
+        "completed blob transactions clean their owned staging directories");
     errors += boundary_oracles(root);
+    errors += frozen_directory_oracles(root);
+    errors += held_directory_freeze_oracles(root);
     errors += test_fs_oracles(root);
     printf("native-store-errors=%d\n", errors);
     return errors ? 1 : 0;
