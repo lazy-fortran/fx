@@ -124,6 +124,26 @@ int fx_test_fs_temp_root(char *out, int cap)
     return length >= 0 && length < cap ? 0 : -1;
 }
 
+#ifndef _WIN32
+static int fixture_child_path(const char *path, const char *root)
+{
+    size_t n = strlen(root);
+    if (strncmp(path, root, n) != 0 || path[n] != '/' || path[n + 1] == '\0')
+        return 0;
+    const char *part = path + n + 1;
+    while (*part != '\0') {
+        const char *end = strchr(part, '/');
+        size_t len = end == NULL ? strlen(part) : (size_t)(end - part);
+        if (len == 0 || (len == 1 && part[0] == '.') ||
+            (len == 2 && part[0] == '.' && part[1] == '.')) return 0;
+        if (end == NULL) return 1;
+        part = end + 1;
+    }
+    return 0;
+}
+
+#endif
+
 static int safe_fixture_root(const char *path)
 {
 #ifdef _WIN32
@@ -148,22 +168,14 @@ static int safe_fixture_root(const char *path)
     }
     return 0;
 #else
-    static const char *const prefixes[] = {"/tmp/", "/var/tmp/"};
+    static const char *const roots[] = {"/tmp", "/var/tmp"};
     size_t i;
     if (path == NULL || path[0] == '\0') return 0;
-    for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
-        size_t n = strlen(prefixes[i]);
-        if (strncmp(path, prefixes[i], n) == 0 && path[n] != '\0') {
-            const char *part = path + n;
-            while (*part != '\0') {
-                const char *end = strchr(part, '/');
-                size_t len = end == NULL ? strlen(part) : (size_t)(end - part);
-                if (len == 0 || (len == 1 && part[0] == '.') ||
-                    (len == 2 && part[0] == '.' && part[1] == '.')) return 0;
-                if (end == NULL) return 1;
-                part = end + 1;
-            }
-        }
+    for (i = 0; i < sizeof(roots) / sizeof(roots[0]); ++i) {
+        char physical[PATH_MAX];
+        if (fixture_child_path(path, roots[i])) return 1;
+        if (realpath(roots[i], physical) != NULL &&
+            fixture_child_path(path, physical)) return 1;
     }
     return 0;
 #endif
