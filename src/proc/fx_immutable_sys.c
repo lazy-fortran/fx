@@ -26,6 +26,10 @@
 #include <sys/clonefile.h>
 #endif
 
+#ifdef _WIN32
+#include "../../include/fx_win_store.h"
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -44,6 +48,9 @@ static int directory_flags(void)
 
 static int open_existing_directory(const char *path)
 {
+#ifdef _WIN32
+    return fx_win_open_directory(path);
+#else
     char clean[PATH_MAX], component[PATH_MAX];
     const char *cursor, *start;
     size_t n, length;
@@ -86,6 +93,7 @@ static int open_existing_directory(const char *path)
         fd = next;
     }
     return fd;
+#endif
 }
 
 int fx_immutable_open_directory(const char *path)
@@ -150,6 +158,9 @@ static int open_matching_parent(const char *src, const char *dst,
 
 static int immutable_mkdirs(const char *path, int sync)
 {
+#ifdef _WIN32
+    return fx_win_mkdirs(path, sync);
+#else
     char clean[PATH_MAX], component[PATH_MAX], walked[PATH_MAX];
     const char *cursor, *start;
     size_t n, length, used;
@@ -207,6 +218,7 @@ static int immutable_mkdirs(const char *path, int sync)
 fail:
     close(fd);
     return -1;
+#endif
 }
 
 int fx_immutable_mkdirs_sync(const char *path)
@@ -253,6 +265,9 @@ int fx_immutable_mkdirs_ephemeral(const char *path)
 
 int fx_immutable_resolve_root(const char *path, char *resolved, size_t capacity)
 {
+#ifdef _WIN32
+    return fx_win_resolve_root(path, resolved, capacity);
+#else
     char candidate[PATH_MAX], canonical[PATH_MAX], suffix[PATH_MAX] = "";
     char cwd[PATH_MAX];
     int n;
@@ -303,6 +318,7 @@ int fx_immutable_resolve_root(const char *path, char *resolved, size_t capacity)
         return -1;
     }
     return 0;
+#endif
 }
 
 int fx_immutable_mkdir_mode(const char *path, int mode)
@@ -446,6 +462,8 @@ int fx_immutable_publish_tree(const char *tmp, const char *dst)
                       RENAME_NOREPLACE);
 #elif defined(__APPLE__)
     rc = renameatx_np(dirfd, base_tmp, dirfd, base_dst, RENAME_EXCL);
+#elif defined(_WIN32)
+    rc = fx_win_rename_exclusive(dirfd, base_tmp, dirfd, base_dst);
 #else
     close(dirfd);
     errno = ENOTSUP;

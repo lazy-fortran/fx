@@ -15,6 +15,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include "../../include/fx_win_store.h"
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
