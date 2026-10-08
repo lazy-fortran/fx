@@ -16,7 +16,7 @@ program test_immutable_leases
     use fx_proc, only: proc_pid
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_clock_ms, test_process_sleep_ms
-    use fx_test_fs, only: fx_test_rename
+    use fx_test_fs, only: fx_test_rename, fx_test_remove_tree
     implicit none
 
     type(test_suite_t) :: suite
@@ -32,7 +32,7 @@ program test_immutable_leases
     integer(kind=8) :: concurrent_epochs(8)
     integer :: ierr, status, child_pid, thread_errors(8), thread_id
     character(len=32) :: thread_owner, thread_start
-    character(len=512) :: cold_root
+    character(len=512) :: cold_root, scratch_root
     character(len=512) :: orphan_snapshot, retained_metadata_file
     logical :: exists, completed, child_exited
     integer :: fixture_unit
@@ -47,7 +47,9 @@ program test_immutable_leases
         stop 0
     end if
     call test_suite_init(suite, 'fx_immutable_leases')
-    write(root, '(A,I0)') '/var/tmp/fx_leases_', proc_pid()
+    call get_environment_variable('TMPDIR', scratch_root, status=ierr)
+    if (ierr /= 0 .or. len_trim(scratch_root) == 0) scratch_root = '/var/tmp'
+    write(root, '(A,A,I0)') trim(scratch_root), '/fx_leases_', proc_pid()
     call immutable_store_init(store, trim(root), ierr)
     if (ierr /= IMMUTABLE_OK) write (*, '(A,I0,2A)') &
         'lease init error=', ierr, ' root=', trim(root)
@@ -63,7 +65,7 @@ program test_immutable_leases
     ids(1) = object_id
 
     do thread_id = 1, 8
-        write(cold_root, '(A,I0,A,I0)') '/var/tmp/fx_leases_cold_', &
+        write(cold_root, '(A,A,I0,A,I0)') trim(scratch_root), '/fx_leases_cold_', &
             proc_pid(), '_', thread_id
         call immutable_store_init(cold_stores(thread_id), trim(cold_root), ierr)
         call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
@@ -208,6 +210,15 @@ program test_immutable_leases
 
     inquire(file=immutable_store_blob_path(store, object_id), exist=exists)
     call test_assert(suite, exists, 'lease updates and releases delete no blob')
+    ! Keep the stores as evidence when anything failed; remove them otherwise.
+    if (suite%n_fail == 0) then
+        ierr = fx_test_remove_tree(trim(root))
+        do thread_id = 1, 8
+            write(cold_root, '(A,A,I0,A,I0)') trim(scratch_root), &
+                '/fx_leases_cold_', proc_pid(), '_', thread_id
+            ierr = fx_test_remove_tree(trim(cold_root))
+        end do
+    end if
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
