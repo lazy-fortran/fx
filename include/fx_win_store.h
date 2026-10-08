@@ -71,6 +71,7 @@ int fx_win_fchmod(int, mode_t);
 int fx_win_chmod(const char *, mode_t);
 int fx_win_flock(int, int);
 int fx_win_private_owned(int);
+int fx_win_current_owned(int);
 ssize_t fx_win_readlinkat(int, const char *, char *, size_t);
 int fx_win_symlink(const char *, const char *);
 int fx_win_faccessat(int, const char *, int, int);

@@ -870,6 +870,26 @@ ssize_t fx_win_getline(char **line, size_t *capacity, FILE *file)
     (*line)[used] = 0;
     return (ssize_t)used;
 }
+int fx_win_current_owned(int fd)
+{
+    HANDLE handle = handle_of(fd);
+    BY_HANDLE_FILE_INFORMATION info;
+    PSECURITY_DESCRIPTOR security = NULL;
+    PSID owner = NULL;
+    if (!GetFileInformationByHandle(handle, &info)) return fx_win32_errno(GetLastError());
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { errno = ELOOP; return 0; }
+    DWORD error = GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+        &owner, NULL, NULL, NULL, &security);
+    if (error != ERROR_SUCCESS) return fx_win32_errno(error);
+    TOKEN_USER *user = current_user();
+    if (!user) { LocalFree(security); return fx_win32_errno(GetLastError()); }
+    int owned = owner && EqualSid(owner, user->User.Sid);
+    free(user); LocalFree(security);
+    if (!owned) errno = EACCES;
+    return owned;
+}
+
+
 int fx_win_private_owned(int fd)
 {
     HANDLE handle = handle_of(fd);
