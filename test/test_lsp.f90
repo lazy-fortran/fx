@@ -47,9 +47,9 @@ contains
             'initialize response enables openClose', failures, passes)
         call expect_true(index(response, '"save":{"includeText":false}') > 0, &
             'initialize response uses includeText false', failures, passes)
-        call expect_true(index(response, &
-            '"diagnosticProvider":{"interFileDependencies":true,"workspaceDiagnostics":false}') > 0, &
-            'initialize response has diagnosticProvider', failures, passes)
+        call expect_true(index(response, '"diagnosticProvider"') == 0, &
+            'push-only server does not advertise unsupported pull diagnostics', &
+            failures, passes)
         call expect_true(index(response, '"name":"fx-lsp-test"') > 0, &
             'initialize response sets server name', failures, passes)
     end subroutine test_initialize_response
@@ -84,6 +84,15 @@ contains
             'diagnostic keeps zero column as zero', failures, passes)
         call expect_true(index(payload, '"severity":2') > 0, &
             'diagnostic emits warning severity 2', failures, passes)
+
+        d%end_line = 5
+        d%end_col = 7
+        d%code = 123
+        payload = lsp_make_diagnostic(d)
+        call expect_true(index(payload, '"end":{"line":4,"character":6}') > 0, &
+            'diagnostic preserves end span', failures, passes)
+        call expect_true(index(payload, '"code":123') > 0, &
+            'diagnostic preserves stable code', failures, passes)
 
         d = diag_t(file='file:///tmp/info.f90', line=1, col=1, &
             severity=DIAG_HINT, message='info')
@@ -218,6 +227,9 @@ contains
         call expect_true(index(response, '"id":17') > 0, &
             'shutdown response preserves numeric id', failures, passes)
 
+        call lsp_make_shutdown_response('-17', response)
+        call expect_true(index(response, '"id":-17') > 0, &
+            'shutdown response preserves negative integer ids', failures, passes)
         call lsp_make_shutdown_response('abc', response)
         call expect_true(index(response, '"id":"abc"') > 0, &
             'shutdown response preserves string id', failures, passes)
@@ -232,12 +244,24 @@ contains
         character(len=:), allocatable :: path
 
         uri = lsp_path_to_uri('C:/projects/my space/hello?x=1')
+        call expect_true(index(uri, 'file:///C:/') == 1, &
+            'Windows drive URI has an empty authority', failures, passes)
         call expect_true(index(uri, '%20') > 0, 'path_to_uri escapes spaces', failures, passes)
         call expect_true(index(uri, 'hello') > 0, 'path_to_uri preserves safe text', failures, passes)
 
         path = lsp_uri_to_path(uri)
         call expect_true(path == 'C:/projects/my space/hello?x=1', &
             'uri_to_path reverses encoding', failures, passes)
+        uri = lsp_path_to_uri('C:' // achar(92) // 'space name' // &
+            achar(92) // 'example.f90')
+        call expect_true(uri == 'file:///C:/space%20name/example.f90', &
+            'Windows native separators produce a valid drive URI', failures, passes)
+        uri = lsp_path_to_uri('//server/share/space name.f90')
+        call expect_true(uri == 'file://server/share/space%20name.f90', &
+            'UNC URI preserves network authority', failures, passes)
+        path = lsp_uri_to_path(uri)
+        call expect_true(path == '//server/share/space name.f90', &
+            'UNC URI decodes to a network path', failures, passes)
     end subroutine test_uri_encoding_roundtrip
 
     subroutine expect_true(condition, message, failures, passes)

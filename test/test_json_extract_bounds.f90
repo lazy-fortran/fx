@@ -9,10 +9,35 @@ program test_json_extract_bounds
     call test_root_scalars(suite)
     call test_path_capacity(suite)
     call test_container_boundaries(suite)
+    call test_nested_array_elements(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_nested_array_elements(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(:), allocatable :: text
+        integer :: number
+        logical :: found, value
+        character(len=*), parameter :: input = &
+            '{"items":[{"name":"first","n":11,"ok":false},' // &
+            '{"name":"second","n":22,"ok":true}],' // &
+            '"nested":[["zero"],["one","two"]]}'
+
+        call json_extract_string(input, 'items[2].name', text, found)
+        call test_assert(suite, found, 'object array string exists')
+        call test_assert_equal_str(suite, 'second', text, 'second object string')
+        call json_extract_int(input, 'items[2].n', number, found)
+        call test_assert(suite, found, 'object array integer exists')
+        call test_assert_equal_int(suite, 22, number, 'second object integer')
+        call json_extract_bool(input, 'items[2].ok', value, found)
+        call test_assert(suite, found, 'object array boolean exists')
+        call test_assert(suite, value, 'second object boolean')
+        call json_extract_string(input, 'nested[2][2]', text, found)
+        call test_assert(suite, found, 'nested array string exists')
+        call test_assert_equal_str(suite, 'two', text, 'nested array position')
+    end subroutine test_nested_array_elements
 
     subroutine test_root_scalars(suite)
         type(test_suite_t), intent(inout) :: suite

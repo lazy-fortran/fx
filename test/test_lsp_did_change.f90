@@ -8,6 +8,7 @@ program test_lsp_did_change
     failures = 0
     passes = 0
 
+    call test_unicode_and_multiple_changes(failures, passes)
     call test_parse_did_change_basic(failures, passes)
     call test_parse_did_change_with_newlines(failures, passes)
     call test_parse_did_change_with_escaped_quotes(failures, passes)
@@ -21,6 +22,19 @@ program test_lsp_did_change
     end if
 
 contains
+
+    subroutine test_unicode_and_multiple_changes(failures, passes)
+        integer, intent(inout) :: failures, passes
+        character(:), allocatable :: uri, text
+
+        call lsp_parse_did_change('{"params":{"textDocument":{"uri":' // &
+            '"file:///test%20space.f90"},"contentChanges":[' // &
+            '{"text":"superseded"},{"text":"\u03b1\ud83d\ude00"}]}}', uri, text)
+        call expect_true(text == achar(206)//achar(177)//achar(240)// &
+            achar(159)//achar(152)//achar(128), &
+            'full-sync applies latest edit and decodes Unicode/surrogate pair', &
+            failures, passes)
+    end subroutine test_unicode_and_multiple_changes
 
     subroutine test_parse_did_change_basic(failures, passes)
         integer, intent(inout) :: failures

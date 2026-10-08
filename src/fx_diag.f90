@@ -16,6 +16,9 @@ module fx_diag
         character(len=512) :: file = ' '
         integer :: line = 0
         integer :: col = 0
+        integer :: end_line = 0
+        integer :: end_col = 0
+        integer :: code = 0
         integer :: severity = DIAG_ERROR
         character(len=512) :: message = ' '
         character(len=256) :: hint = ' '

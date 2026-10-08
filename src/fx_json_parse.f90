@@ -668,11 +668,17 @@ module fx_json_parse
                 return
             case (JSON_OBJECT_START)
                 if (.not. stack_index_is_valid(depth + 1)) return
+                if (depth > 0) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 depth = depth + 1
                 is_arr(depth) = .false.
                 key_stack(depth) = ''
             case (JSON_ARRAY_START)
                 if (.not. stack_index_is_valid(depth + 1)) return
+                if (depth > 0) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 depth = depth + 1
                 is_arr(depth) = .true.
                 arr_idx(depth) = 0
@@ -734,11 +740,17 @@ module fx_json_parse
                 return
             case (JSON_OBJECT_START)
                 if (.not. stack_index_is_valid(depth + 1)) return
+                if (depth > 0) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 depth = depth + 1
                 is_arr(depth) = .false.
                 key_stack(depth) = ''
             case (JSON_ARRAY_START)
                 if (.not. stack_index_is_valid(depth + 1)) return
+                if (depth > 0) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 depth = depth + 1
                 is_arr(depth) = .true.
                 arr_idx(depth) = 0
@@ -800,11 +812,17 @@ module fx_json_parse
                 return
             case (JSON_OBJECT_START)
                 if (.not. stack_index_is_valid(depth + 1)) return
+                if (depth > 0) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 depth = depth + 1
                 is_arr(depth) = .false.
                 key_stack(depth) = ''
             case (JSON_ARRAY_START)
                 if (.not. stack_index_is_valid(depth + 1)) return
+                if (depth > 0) then
+                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
+                end if
                 depth = depth + 1
                 is_arr(depth) = .true.
                 arr_idx(depth) = 0
