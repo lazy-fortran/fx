@@ -25,6 +25,7 @@ program test_action_cache
     call test_root_resolution(suite)
     call test_action_round_trip(suite)
     call test_smod_round_trip(suite)
+    call test_multiple_interfaces(suite)
     call test_action_result_warm_validation(suite)
     call test_smod_requirement(suite)
     call test_smod_metadata_rejection(suite)
@@ -53,8 +54,6 @@ contains
         character(len=:), allocatable :: root, src_dir, dst_dir
         character(len=:), allocatable :: obj_path, mod_path, obj2, mod2
         character(len=HASH_LEN) :: out_id, out_id2, mkey, mkey_after
-        character(len=HASH_LEN) :: object_key, expected_id
-        character(len=512) :: identity_parts(6)
         integer :: ierr, content_size
         logical :: restored, hit, found
 
@@ -72,22 +71,11 @@ contains
 
         call cache_init(store_c, root//'/cache')
         call cache_store_action(store_c, 'act-widget', obj_path, src_dir, &
-            'Widget', out_id, ierr)
+            ['Widget'], out_id, ierr)
         call test_assert(suite, ierr == 0, 'action store succeeds')
         call test_assert(suite, len_trim(out_id) == HASH_LEN, &
             'store returns full-length output id')
-        call cache_file_content_key(obj_path, 'object', object_key, &
-            content_size, ierr)
         call cache_file_content_key(mod_path, 'mod', mkey, content_size, ierr)
-        identity_parts = ''
-        identity_parts(1) = 'fx-output-schema-2'
-        identity_parts(2) = object_key
-        identity_parts(3) = mkey
-        identity_parts(4) = 'widget'
-        expected_id = cache_digest(identity_parts, 6)
-        call test_assert_equal_str(suite, trim(expected_id), trim(out_id), &
-            'stored output id keeps the schema-2 dependency identity')
-
         call cache_init(restore_c, root//'/cache')
         hit = cache_lookup(restore_c, 'act-widget')
         call test_assert(suite, hit, 'fresh cache reports action hit')
@@ -134,14 +122,14 @@ contains
         call write_file(mod_path, 'MODULE-BYTES')
         call write_file(smod_path, 'SUBMODULE-BYTES-ONE')
         call cache_init(c, root//'/cache')
-        call cache_store_action(c, 'smod-first', obj_path, root, 'Root', &
-            first_id, ierr, stem)
+        call cache_store_action(c, 'smod-first', obj_path, root, ['Root'], &
+            first_id, ierr, [stem])
         call test_assert(suite, ierr == 0, 'store object, mod and long-name smod')
         call delete_file(obj_path)
         call delete_file(mod_path)
         call delete_file(smod_path)
         call cache_restore_action(c, 'smod-first', obj_path, root, restored, &
-            restored_id, required_smod_name=stem)
+            restored_id, required_smod_names=[stem])
         call test_assert(suite, restored, 'restore all deleted compiler outputs')
         call test_assert_equal_str(suite, trim(first_id), trim(restored_id), &
             'submodule output identity survives v2 restoration')
@@ -152,17 +140,86 @@ contains
         call test_assert(suite, file_has_bytes(smod_path, 'SUBMODULE-BYTES-ONE'), &
             'restored submodule bytes match the independent payload')
         call write_file(smod_path, 'SUBMODULE-BYTES-TWO')
-        call cache_store_action(c, 'smod-second', obj_path, root, 'Root', &
-            second_id, ierr, stem)
+        call cache_store_action(c, 'smod-second', obj_path, root, ['Root'], &
+            second_id, ierr, [stem])
         call test_assert(suite, ierr == 0 .and. first_id /= second_id, &
             'submodule content participates in the output identity')
         call cache_restore_action(c, 'smod-first', obj_path, root, restored, &
-            required_smod_name=stem)
+            required_smod_names=[stem])
         call test_assert(suite, restored, 'repair changed local submodule output')
         call test_assert(suite, file_has_bytes(smod_path, 'SUBMODULE-BYTES-ONE'), &
             'repair restores the recorded submodule content')
         call cleanup_tree(root)
     end subroutine test_smod_round_trip
+
+    subroutine test_multiple_interfaces(suite)
+        type(test_suite_t), intent(inout) :: suite
+        type(cache_t) :: c
+        character(len=:), allocatable :: root, outputs, object
+        character(len=HASH_LEN) :: published, restored_id, first_key, changed_key
+        integer :: ierr, i
+        logical :: restored, first_found, changed_found
+        character(len=6), parameter :: names(2) = ['first ', 'second']
+
+        root = temp_root('multiple-interfaces')
+        call cleanup_tree(root)
+        call make_dir(root)
+        outputs = root//'/outputs'
+        call make_dir(outputs)
+        object = outputs//'/object.o'
+        call write_file(object, 'KNOWN OBJECT')
+        do i = 1, size(names)
+            call write_file(outputs//'/'//trim(names(i))//'.mod', &
+                trim(names(i))//' MODULE BYTES')
+            call write_file(outputs//'/'//trim(names(i))//'.smod', &
+                trim(names(i))//' SUBMODULE BYTES')
+        end do
+        call cache_init(c, root//'/cache')
+        call cache_store_action(c, 'complete', object, outputs, names, &
+            published, ierr, smod_names=names)
+        call test_assert(suite, ierr == 0, 'publish two modules and two submodules')
+        call cleanup_tree(outputs)
+        call make_dir(outputs)
+        call cache_restore_action(c, 'complete', object, outputs, restored, &
+            restored_id, required_mod_names=names, required_smod_names=names)
+        call test_assert(suite, restored, 'restore every required interface')
+        call test_assert_equal_str(suite, published, restored_id, &
+            'complete restoration retains canonical result identity')
+        do i = 1, size(names)
+            call test_assert(suite, file_has_bytes(outputs//'/'//trim(names(i))// &
+                '.mod', trim(names(i))//' MODULE BYTES'), &
+                'module payload survives independent restoration')
+            call test_assert(suite, file_has_bytes(outputs//'/'//trim(names(i))// &
+                '.smod', trim(names(i))//' SUBMODULE BYTES'), &
+                'submodule payload survives independent restoration')
+        end do
+        call cache_action_mod_key(c, 'complete', first_key, first_found)
+        call write_file(outputs//'/second.mod', 'CHANGED SECOND INTERFACE')
+        call cache_store_action(c, 'changed-second', object, outputs, names, &
+            published, ierr, smod_names=names)
+        call cache_action_mod_key(c, 'changed-second', changed_key, changed_found)
+        call test_assert(suite, first_found .and. changed_found, &
+            'complete interface packets expose dependency identities')
+        call test_assert(suite, first_key /= changed_key, &
+            'second module interface bytes change dependency identity')
+        call cache_store_action(c, 'incomplete', object, outputs, &
+            names(:1), published, ierr)
+        call test_assert(suite, ierr == 0, &
+            'seed historical incomplete interface packet')
+        call write_file(object, 'UNTOUCHED DESTINATION')
+        call cache_restore_action(c, 'incomplete', object, outputs, restored, &
+            required_mod_names=names)
+        call test_assert(suite, .not. restored, 'missing second module rejects packet')
+        call test_assert(suite, file_has_bytes(object, 'UNTOUCHED DESTINATION'), &
+            'rejected packet never overwrites destination object')
+        call cache_restore_action(c, 'complete', object, outputs, restored, &
+            required_smod_names=['absent'])
+        call test_assert(suite, .not. restored, &
+            'missing required submodule rejects packet')
+        call test_assert(suite, file_has_bytes(object, 'UNTOUCHED DESTINATION'), &
+            'rejected submodule packet never materializes')
+        call cleanup_tree(root)
+    end subroutine test_multiple_interfaces
 
     subroutine test_action_result_warm_validation(suite)
         type(test_suite_t), intent(inout) :: suite
@@ -180,7 +237,8 @@ contains
         object_file = root//'/object.o'
         call write_file(object_file, 'WARM OBJECT BYTES')
         call cache_init(c, root//'/cache')
-        call cache_store_action(c, 'warm-result', object_file, root, '', &
+        call cache_store_action(c, 'warm-result', object_file, root,&
+            [character(len=1) ::], &
             result_id, ierr)
         call test_assert(suite, ierr == 0, 'publish the warm action result')
         call action_result_store_init(result_store, &
@@ -257,14 +315,15 @@ contains
         call write_file(obj_path, 'CHILD-OBJECT')
         call write_file(smod_path, 'CHILD-INTERFACE')
         call cache_init(c, root//'/cache')
-        call cache_store_action(c, 'smod-child', obj_path, root, '', &
-            out_id, ierr, 'root@child')
+        call cache_store_action(c, 'smod-child', obj_path, root,&
+            [character(len=1) ::], &
+            out_id, ierr, ['root@child'])
         call test_assert(suite, ierr == 0, 'store child submodule without a mod')
         call cache_restore_action(c, 'smod-child', obj_path, root, restored, &
-            required_smod_name='ROOT@CHILD')
+            required_smod_names=['ROOT@CHILD'])
         call test_assert(suite, restored, 'required submodule name is case insensitive')
         call cache_restore_action(c, 'smod-child', obj_path, root, restored, &
-            required_smod_name='other@child')
+            required_smod_names=['other@child'])
         call test_assert(suite, .not. restored, &
             'required submodule must match the published result')
         call cleanup_tree(root)
@@ -285,20 +344,23 @@ contains
         call write_file(obj_path, 'PARENT-OBJECT')
         call write_file(root//'/root.smod', 'STALE-LOCAL-INTERFACE')
         call cache_init(c, root//'/cache')
-        call cache_store_action(c, 'object-only', obj_path, root, '', out_id, ierr)
+        call cache_store_action(c, 'object-only', obj_path, root,&
+            [character(len=1) ::], out_id, ierr)
         call test_assert(suite, ierr == 0, 'existing object-only API still stores')
         call cache_restore_action(c, 'object-only', obj_path, root, restored, &
-            required_smod_name='root')
+            required_smod_names=['root'])
         call test_assert(suite, .not. restored, &
             'stale local submodule cannot supply missing record metadata')
         call make_dir(root//'/input')
         call write_file(root//'/escaped.smod', 'ESCAPED-INTERFACE')
-        call cache_store_action(c, 'escaped-smod', obj_path, root//'/input', '', &
-            out_id, ierr, '../escaped')
+        call cache_store_action(c, 'escaped-smod', obj_path, root//'/input',&
+            [character(len=1) ::], &
+            out_id, ierr, ['../escaped'])
         call test_assert(suite, ierr /= 0, &
             'submodule stem cannot escape its compiler output directory')
-        call cache_store_action(c, 'missing-smod', obj_path, root, '', &
-            out_id, ierr, 'missing')
+        call cache_store_action(c, 'missing-smod', obj_path, root,&
+            [character(len=1) ::], &
+            out_id, ierr, ['missing'])
         call test_assert(suite, ierr /= 0, 'missing required store artifact fails')
         call test_assert(suite, .not. cache_lookup(c, 'missing-smod'), &
             'failed submodule store never publishes an action result')
@@ -353,7 +415,8 @@ contains
         destination = root//'/restored.o'
         call write_file(object_file, 'PERSISTENT V2 OBJECT')
         call cache_init(c, root//'/cache')
-        call cache_store_action(c, 'v2-action', object_file, root, '', &
+        call cache_store_action(c, 'v2-action', object_file, root,&
+            [character(len=1) ::], &
             output_id, ierr)
         call test_assert(suite, ierr == 0, 'v2 action publication succeeds')
         inquire (file=root//'/cache/store/v1', exist=v1_exists)
@@ -366,7 +429,7 @@ contains
             restored_id)
         call test_assert(suite, restored, 'v2 object restores')
         call test_assert_equal_str(suite, trim(output_id), trim(restored_id), &
-            'v2 manifest preserves schema-2 output identity')
+            'restored complete packet preserves its canonical identity')
         call test_assert(suite, file_has_bytes(destination, 'PERSISTENT V2 OBJECT'), &
             'v2 restore yields original object bytes')
         call cleanup_tree(root)

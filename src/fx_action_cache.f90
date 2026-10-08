@@ -139,44 +139,6 @@ contains
         entry%mode = mode
     end function result_entry
 
-    function compile_output_id(entries) result(output_id)
-        !! Preserve the schema-2 dependency identity from the v2 manifest.
-        type(immutable_tree_entry_t), intent(in) :: entries(:)
-        character(len=HASH_LEN) :: output_id
-        character(len=512) :: parts(6), payload(3)
-        integer :: i, slot
-
-        output_id = ''
-        parts = ''
-        parts(1) = 'fx-output-schema-2'
-        do i = 1, size(entries)
-            select case (entries(i)%role)
-            case ('object')
-                slot = 2
-                if (entries(i)%path /= 'object') return
-                payload(2) = 'object'
-            case ('module')
-                slot = 3
-                if (index(entries(i)%path, 'module-') /= 1) return
-                parts(4) = entries(i)%path(8:)
-                payload(2) = 'mod'
-            case ('smod')
-                slot = 5
-                if (index(entries(i)%path, 'smod-') /= 1) return
-                parts(6) = entries(i)%path(6:)
-                payload(2) = 'smod'
-            case default
-                return
-            end select
-            if (len_trim(parts(slot)) /= 0) return
-            payload(1) = 'fx-payload-schema-1'
-            payload(3) = entries(i)%object_id
-            parts(slot) = cache_digest(payload, 3)
-        end do
-        if (len_trim(parts(2)) == 0) return
-        output_id = cache_digest(parts, 6)
-    end function compile_output_id
-
     pure logical function valid_smod_name(name) result(valid)
         character(len=*), intent(in) :: name
         integer :: i, code, separators
@@ -206,18 +168,54 @@ contains
         valid = .not. initial
     end function valid_smod_name
 
-    logical function result_has_smod(entries, required_name)
+    logical function valid_compile_entries(entries) result(valid)
         type(immutable_tree_entry_t), intent(in) :: entries(:)
-        character(len=*), intent(in) :: required_name
-        integer :: i
+        character(len=:), allocatable :: name
+        integer :: i, objects
 
-        result_has_smod = .false.
+        valid = .false.
+        objects = 0
         do i = 1, size(entries)
-            if (entries(i)%role /= 'smod') cycle
-            if (entries(i)%path == 'smod-'//to_lower(trim(required_name))) &
-                result_has_smod = .true.
+            select case (entries(i)%role)
+            case ('object')
+                if (entries(i)%path /= 'object') return
+                objects = objects + 1
+            case ('module')
+                if (index(entries(i)%path, 'module-') /= 1) return
+                name = entries(i)%path(8:)
+                if (.not. valid_smod_name(name)) return
+                if (index(name, '@') > 0) return
+            case ('smod')
+                if (index(entries(i)%path, 'smod-') /= 1) return
+                name = entries(i)%path(6:)
+                if (.not. valid_smod_name(name)) return
+            case default
+                return
+            end select
         end do
-    end function result_has_smod
+        valid = objects == 1
+    end function valid_compile_entries
+
+    logical function result_has_artifacts(entries, names, role, prefix) result(found)
+        type(immutable_tree_entry_t), intent(in) :: entries(:)
+        character(len=*), intent(in) :: names(:), role, prefix
+        integer :: i, j
+        logical :: matched
+
+        found = .false.
+        do i = 1, size(names)
+            if (.not. valid_smod_name(names(i))) return
+            if (role == 'module' .and. index(names(i), '@') > 0) return
+            matched = .false.
+            do j = 1, size(entries)
+                if (entries(j)%role /= role) cycle
+                if (entries(j)%path == prefix//to_lower(trim(names(i)))) &
+                    matched = .true.
+            end do
+            if (.not. matched) return
+        end do
+        found = .true.
+    end function result_has_artifacts
 
     recursive subroutine compile_destination(entry, obj_path, mod_dir, path)
         ! An output argument keeps the allocation and its length with the caller.
@@ -270,12 +268,13 @@ contains
     end function local_result_entry_matches
 
     subroutine cache_restore_action(c, action_id, obj_path, mod_dir, &
-            restored, output_id, required_smod_name)
+            restored, output_id, required_mod_names, required_smod_names)
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: action_id, obj_path, mod_dir
         logical, intent(out) :: restored
         character(len=HASH_LEN), intent(out), optional :: output_id
-        character(len=*), intent(in), optional :: required_smod_name
+        character(len=*), intent(in), optional :: required_mod_names(:), &
+            required_smod_names(:)
 
         type(action_result_store_t) :: store
         type(action_result_read_t) :: read
@@ -295,12 +294,14 @@ contains
 
         call action_result_preview(store, action_id, entries, result_id, ierr)
         preview_ok = ierr == ACTION_RESULT_OK
-        if (preview_ok) then
-            if (present(required_smod_name)) then
-                if (len_trim(required_smod_name) > 0) then
-                    preview_ok = result_has_smod(entries, required_smod_name)
-                end if
-            end if
+        if (preview_ok) preview_ok = valid_compile_entries(entries)
+        if (preview_ok .and. present(required_mod_names)) then
+            preview_ok = result_has_artifacts(entries, required_mod_names, &
+                'module', 'module-')
+        end if
+        if (preview_ok .and. present(required_smod_names)) then
+            preview_ok = result_has_artifacts(entries, required_smod_names, &
+                'smod', 'smod-')
         end if
         if (preview_ok) then
             preview_ok = local_result_matches(entries, obj_path, mod_dir)
@@ -309,7 +310,7 @@ contains
             call action_result_preview_confirm(store, action_id, result_id, &
                 preview_status)
             if (preview_status == ACTION_RESULT_OK) then
-                if (present(output_id)) output_id = compile_output_id(entries)
+                if (present(output_id)) output_id = result_id
                 restored = .true.
                 return
             end if
@@ -318,15 +319,25 @@ contains
         call lookup_result_read(store, action_id, read, entries, &
             result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
-        if (present(required_smod_name)) then
-            if (len_trim(required_smod_name) > 0) then
-                if (.not. result_has_smod(entries, required_smod_name)) then
-                    call action_result_read_release(store, read, release_status)
-                    return
-                end if
+        if (.not. valid_compile_entries(entries)) then
+            call action_result_read_release(store, read, release_status)
+            return
+        end if
+        if (present(required_mod_names)) then
+            if (.not. result_has_artifacts(entries, required_mod_names, &
+                    'module', 'module-')) then
+                call action_result_read_release(store, read, release_status)
+                return
             end if
         end if
-        if (present(output_id)) output_id = compile_output_id(entries)
+        if (present(required_smod_names)) then
+            if (.not. result_has_artifacts(entries, required_smod_names, &
+                    'smod', 'smod-')) then
+                call action_result_read_release(store, read, release_status)
+                return
+            end if
+        end if
+        if (present(output_id)) output_id = result_id
         local_ok = local_result_matches(entries, obj_path, mod_dir)
         if (local_ok) then
             call action_result_read_release(store, read, release_status)
@@ -350,74 +361,54 @@ contains
         if (release_status /= ACTION_RESULT_OK) restored = .false.
     end subroutine cache_restore_action
 
-    subroutine cache_store_action(c, action_id, obj_path, mod_dir, mod_name, &
-            output_id, ierr, smod_name)
+    subroutine cache_store_action(c, action_id, obj_path, mod_dir, module_names, &
+            output_id, ierr, smod_names)
         type(cache_t), intent(in) :: c
-        character(len=*), intent(in) :: action_id, obj_path, mod_dir, mod_name
+        character(len=*), intent(in) :: action_id, obj_path, mod_dir, module_names(:)
         character(len=HASH_LEN), intent(out) :: output_id
         integer, intent(out) :: ierr
-        character(len=*), intent(in), optional :: smod_name
+        character(len=*), intent(in), optional :: smod_names(:)
 
-        character(len=512) :: sources(3)
+        character(len=512), allocatable :: sources(:)
         type(action_result_store_t) :: result_store
-        type(immutable_tree_entry_t) :: entries(3)
-        character(len=HASH_LEN) :: result_id
-        character(len=:), allocatable :: lower_name, mod_path, smod_label, smod_path
-        integer :: store_ierr, n_entries
-        logical :: has_mod, has_smod
+        type(immutable_tree_entry_t), allocatable :: entries(:)
+        character(len=:), allocatable :: name
+        integer :: store_ierr, n_entries, n_smod, i
+        logical :: exists
 
         output_id = ''
-        ierr = 0
-        if (.not. c%initialized) then
-            ierr = 1
-            return
-        end if
-
-        lower_name = to_lower(trim(mod_name))
-        if (len(lower_name) > MAX_MOD_NAME) then
-            ierr = 1
-            return
-        end if
-        mod_path = trim(mod_dir)//'/'//lower_name//'.mod'
-        inquire (file=mod_path, exist=has_mod)
-        smod_label = ''
-        if (present(smod_name)) smod_label = to_lower(trim(smod_name))
-        has_smod = len(smod_label) > 0
-        if (has_smod) then
-            if (.not. valid_smod_name(smod_label)) then
-                ierr = 1
-                return
-            end if
-            smod_path = trim(mod_dir)//'/'//smod_label//'.smod'
-        end if
-
-        n_entries = 1
+        ierr = 1
+        if (.not. c%initialized) return
+        n_smod = 0
+        if (present(smod_names)) n_smod = size(smod_names)
+        allocate (sources(1 + size(module_names) + n_smod))
+        allocate (entries(size(sources)))
         sources(1) = trim(obj_path)
         entries(1) = result_entry('object', 'object', 420)
-        if (has_mod) then
+        n_entries = 1
+        do i = 1, size(module_names)
+            name = to_lower(trim(module_names(i)))
+            if (.not. valid_smod_name(name)) return
+            if (index(name, '@') > 0) return
             n_entries = n_entries + 1
-            sources(n_entries) = mod_path
-            entries(n_entries) = result_entry('module-'//trim(lower_name), &
-                'module', 420)
-        end if
-        if (has_smod) then
+            sources(n_entries) = trim(mod_dir)//'/'//name//'.mod'
+            inquire (file=trim(sources(n_entries)), exist=exists)
+            if (.not. exists) return
+            entries(n_entries) = result_entry('module-'//name, 'module', 420)
+        end do
+        do i = 1, n_smod
+            name = to_lower(trim(smod_names(i)))
+            if (len(name) == 0) cycle
+            if (.not. valid_smod_name(name)) return
             n_entries = n_entries + 1
-            sources(n_entries) = smod_path
-            entries(n_entries) = result_entry('smod-'//trim(smod_label), &
-                'smod', 420)
-        end if
+            sources(n_entries) = trim(mod_dir)//'/'//name//'.smod'
+            entries(n_entries) = result_entry('smod-'//name, 'smod', 420)
+        end do
         call init_result_store(c, result_store, store_ierr)
-        if (store_ierr /= 0) then
-            ierr = 1
-            return
-        end if
+        if (store_ierr /= 0) return
         call action_result_publish_files(result_store, action_id, &
-            sources(1:n_entries), entries(1:n_entries), result_id, store_ierr)
-        ierr = 1
-        if (store_ierr == ACTION_RESULT_OK) then
-            output_id = compile_output_id(entries(1:n_entries))
-            if (len_trim(output_id) == HASH_LEN) ierr = 0
-        end if
+            sources(:n_entries), entries(:n_entries), output_id, store_ierr)
+        if (store_ierr == ACTION_RESULT_OK) ierr = 0
     end subroutine cache_store_action
 
     subroutine cache_action_mod_key(c, action_id, mod_key, found)
@@ -431,7 +422,8 @@ contains
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=HASH_LEN) :: result_id
         character(len=:), allocatable :: blob_path
-        integer :: ierr, init_status, size_bytes, i, release_status
+        integer :: ierr, init_status, size_bytes, i, n, release_status
+        character(len=HASH_LEN), allocatable :: interface_keys(:)
 
         mod_key = ''
         found = .false.
@@ -442,14 +434,23 @@ contains
         call lookup_result_read(store, action_id, read, entries, &
             result_id, ierr)
         if (ierr /= ACTION_RESULT_OK) return
-        do i = 1, size(entries)
-            if (entries(i)%role /= 'module') cycle
-            blob_path = immutable_store_blob_path(store%objects, &
-                entries(i)%object_id)
-            call cache_file_content_key(blob_path, 'mod', mod_key, size_bytes, ierr)
-            if (ierr == 0) found = .true.
-            exit
-        end do
+        n = 0
+        allocate (interface_keys(size(entries)))
+        if (valid_compile_entries(entries)) then
+            do i = 1, size(entries)
+                if (entries(i)%role /= 'module' .and. entries(i)%role /= 'smod') cycle
+                n = n + 1
+                blob_path = immutable_store_blob_path(store%objects, entries(i)%object_id)
+                call cache_file_content_key(blob_path, 'mod', interface_keys(n), &
+                    size_bytes, ierr)
+                if (ierr /= 0) exit
+            end do
+            if (n > 0 .and. ierr == 0) then
+                mod_key = interface_keys(1)
+                if (n > 1) mod_key = cache_digest(interface_keys, n)
+                found = .true.
+            end if
+        end if
         call action_result_read_release(store, read, release_status)
         if (release_status /= ACTION_RESULT_OK) then
             mod_key = ''

@@ -49,7 +49,7 @@ program action_restore_parallel_oracle
         call write_file(trim(object_path), trim(object_bytes(thread)))
         call write_file(trim(module_path), trim(module_bytes(thread)))
         call cache_store_action(writer, trim(action_ids(thread)), &
-            trim(object_path), trim(source_dir), trim(module_names(thread)), &
+            trim(object_path), trim(source_dir), [trim(module_names(thread))], &
             output_id, ierr)
         if (ierr /= 0) error stop 'could not seed action result'
     end do
