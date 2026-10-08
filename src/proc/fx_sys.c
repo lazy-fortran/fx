@@ -1,3 +1,6 @@
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_sys_win32.h"
+#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -447,6 +450,8 @@ int fx_c_stderr_restore(int saved_fd)
     return (rc < 0) ? -1 : 0;
 }
 
+#endif
+
 /* Framing state used for MCP input/output.
  * -1 = unknown, 0 = bare JSON, 1 = Content-Length.
  */
@@ -464,6 +469,9 @@ void fx_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
     size_t got;
 
     *nread = 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
     if (bufsize <= 0) return;
 
     for (;;) {
@@ -565,6 +573,8 @@ int fx_c_get_mcp_framing(void) {
     return fx_mcp_framing;
 }
 
+
+#if !defined(_WIN32) || defined(__CYGWIN__)
 #ifdef __linux__
 typedef struct watch_entry {
     int wd;
@@ -1829,3 +1839,5 @@ int fx_c_path_is_dir(const char *path)
     if (fx_path_kind(path, &is_dir, &is_symlink_dir) != 0) return 0;
     return is_dir ? 1 : 0;
 }
+
+#endif

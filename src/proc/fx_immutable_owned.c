@@ -20,6 +20,10 @@
 #ifdef __APPLE__
 #include <sys/clonefile.h>
 #endif
+#ifdef _WIN32
+#include "../../include/fx_win_store.h"
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -223,6 +227,9 @@ static int publish_owned_file(owned_t *t, int cas)
         return fclonefileat(t->fd, t->parent, t->name, CLONE_NOOWNERCOPY);
     }
     return linkat(t->staging, "payload", t->parent, t->name, 0);
+#elif defined(_WIN32)
+    (void)cas;
+    return fx_win_link_fd(t->fd, t->parent, t->name);
 #else
     (void)cas;
     errno = ENOTSUP;
@@ -231,6 +238,9 @@ static int publish_owned_file(owned_t *t, int cas)
 }
 static int retain_publication(owned_t *t, int cas)
 {
+#ifndef __APPLE__
+    (void)cas;
+#endif
     t->published = 1;
 #ifdef __APPLE__
     if (cas) t->published_fd = openat(t->parent, t->name, O_RDONLY | O_NOFOLLOW);
@@ -257,6 +267,8 @@ static int publish_boundary(owned_t *t, int cas, int sync)
             t->parent, t->name, RENAME_NOREPLACE);
 #elif defined(__APPLE__)
         rc = renameatx_np(t->parent, t->temp, t->parent, t->name, RENAME_EXCL);
+#elif defined(_WIN32)
+        rc = fx_win_rename_exclusive(t->parent, t->temp, t->parent, t->name);
 #else
         return 2;
 #endif

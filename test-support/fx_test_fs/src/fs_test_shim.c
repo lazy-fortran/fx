@@ -16,16 +16,25 @@
 #include <sys/file.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include "../../../include/fx_win_store.h"
+#endif
 
 int fx_test_fs_lock(const char *path)
 {
     int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) return -1;
+#ifndef _WIN32
     struct timespec delay = {0, 10000000};
+#endif
     for (int i = 0; i < 1500; ++i) {
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
         if (errno != EWOULDBLOCK && errno != EINTR) break;
+#ifdef _WIN32
+        Sleep(10);
+#else
         (void)nanosleep(&delay, NULL);
+#endif
     }
     close(fd);
     return -1;
@@ -41,6 +50,12 @@ int fx_test_fs_unlock(int fd)
 
 int fx_test_fs_descriptor_count(void)
 {
+#ifdef _WIN32
+    DWORD count;
+    if (!GetProcessHandleCount(GetCurrentProcess(), &count) || count > INT_MAX)
+        return -1;
+    return (int)count;
+#else
     DIR *directory = opendir("/dev/fd");
     struct dirent *entry;
     int count = 0;
@@ -53,6 +68,7 @@ int fx_test_fs_descriptor_count(void)
     }
     closedir(directory);
     return count;
+#endif
 }
 
 int fx_test_fs_lock_directory(const char *path)
@@ -64,11 +80,17 @@ int fx_test_fs_lock_directory(const char *path)
 #endif
     fd = open(path, flags);
     if (fd < 0) return -1;
+#ifndef _WIN32
     struct timespec delay = {0, 10000000};
+#endif
     for (int i = 0; i < 1500; ++i) {
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
         if (errno != EWOULDBLOCK && errno != EINTR) break;
+#ifdef _WIN32
+        Sleep(10);
+#else
         (void)nanosleep(&delay, NULL);
+#endif
     }
     close(fd);
     return -1;
@@ -76,7 +98,25 @@ int fx_test_fs_lock_directory(const char *path)
 
 int fx_test_fs_temp_root(char *out, int cap)
 {
+#ifdef _WIN32
+    DWORD count = GetEnvironmentVariableW(L"TMPDIR", NULL, 0);
+    wchar_t *wide;
+    char *selected;
+    if (count) {
+        wide = malloc((size_t)count * sizeof(*wide));
+        if (!wide) return -1;
+        if (!GetEnvironmentVariableW(L"TMPDIR", wide, count)) { free(wide); return -1; }
+    } else {
+        count = GetTempPathW(0, NULL);
+        wide = malloc(((size_t)count + 1) * sizeof(*wide));
+        if (!count || !wide || !GetTempPathW(count + 1, wide)) { free(wide); return -1; }
+    }
+    selected = fx_win32_utf8(wide); free(wide);
+    if (!selected) return -1;
+    char *path = realpath(selected, NULL); free(selected);
+#else
     char *path = realpath("/var/tmp", NULL);
+#endif
     int length;
     if (!path) return -1;
     length = snprintf(out, (size_t)cap, "%s", path);
@@ -86,6 +126,28 @@ int fx_test_fs_temp_root(char *out, int cap)
 
 static int safe_fixture_root(const char *path)
 {
+#ifdef _WIN32
+    char temporary[PATH_MAX], resolved[PATH_MAX];
+    if (!path || !*path || fx_test_fs_temp_root(temporary, sizeof(temporary)) != 0 ||
+        fx_win_resolve_root(path, resolved, sizeof(resolved)) != 0) return 0;
+    size_t length = strlen(temporary);
+    while (length && temporary[length - 1] == '/') temporary[--length] = 0;
+    if (strncmp(resolved, temporary, length) || resolved[length] != '/' ||
+        !resolved[length + 1]) return 0;
+    /* Reject traversal before normalization, including paths still inside TMPDIR. */
+    const char *part = path;
+    while (*part == '/' || *part == '\\') ++part;
+    while (*part) {
+        const char *end = part;
+        while (*end && *end != '/' && *end != '\\') ++end;
+        size_t size = (size_t)(end - part);
+        if (!size || (size == 1 && part[0] == '.') ||
+            (size == 2 && part[0] == '.' && part[1] == '.')) return 0;
+        if (!*end) return 1;
+        part = end + 1;
+    }
+    return 0;
+#else
     static const char *const prefixes[] = {"/tmp/", "/var/tmp/"};
     size_t i;
     if (path == NULL || path[0] == '\0') return 0;
@@ -104,10 +166,14 @@ static int safe_fixture_root(const char *path)
         }
     }
     return 0;
+#endif
 }
 
 static int mkdir_p_path(const char *path)
 {
+#ifdef _WIN32
+    return fx_win_mkdirs(path, 0);
+#else
     char *copy;
     char *p;
     struct stat st;
@@ -136,6 +202,7 @@ static int mkdir_p_path(const char *path)
     }
     free(copy);
     return 0;
+#endif
 }
 
 int fx_test_fs_mkdir_p(const char *path)
@@ -206,6 +273,16 @@ int fx_test_fs_chmod(const char *path, int mode)
 
 int fx_test_fs_sleep_ms(int64_t milliseconds)
 {
+#ifdef _WIN32
+    if (milliseconds < 0) { errno = EINVAL; return -1; }
+    uint64_t deadline = GetTickCount64() + (uint64_t)milliseconds;
+    for (;;) {
+        uint64_t now = GetTickCount64();
+        if (now >= deadline) return 0;
+        uint64_t remaining = deadline - now;
+        Sleep((DWORD)(remaining < 0xfffffffeULL ? remaining : 0xfffffffeULL));
+    }
+#else
     struct timespec now;
     struct timespec deadline;
     struct timespec request;
@@ -229,4 +306,5 @@ int fx_test_fs_sleep_ms(int64_t milliseconds)
         if (nanosleep(&request, NULL) != 0 && errno != EINTR) return -1;
         if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
     }
+#endif
 }

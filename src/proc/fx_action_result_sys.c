@@ -13,6 +13,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include "../../include/fx_win_store.h"
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -37,6 +41,9 @@ static int sync_directory(const char *path)
 
 static int ensure_directory(const char *path)
 {
+#ifdef _WIN32
+    return fx_win_mkdirs(path, 1);
+#else
     char copy[PATH_MAX];
     size_t n = strlen(path);
     if (n == 0 || n >= sizeof(copy)) return -1;
@@ -66,6 +73,7 @@ static int ensure_directory(const char *path)
         *p = saved;
     }
     return 0;
+#endif
 }
 
 static int action_dir(const char *root, const char *id, char *out, size_t cap)

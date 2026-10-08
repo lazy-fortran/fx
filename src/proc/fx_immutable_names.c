@@ -6,6 +6,9 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include "../../include/fx_win_store.h"
+#endif
 #include <string.h>
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -48,7 +51,31 @@ static CFMutableStringRef normalized(const char *name)
 #endif
 int fx_immutable_name_valid(const char *name)
 {
-#ifdef __APPLE__
+#ifdef _WIN32
+    wchar_t *wide = fx_win32_wide(name);
+    if (!wide) return 0;
+    size_t length = wcslen(wide);
+    int valid = length > 0 && wide[length - 1] != L'.' && wide[length - 1] != L' ';
+    for (size_t i = 0; valid && i < length; ++i)
+        if (wide[i] < 32 || wcschr(L"<>:\"/\\|?*", wide[i])) valid = 0;
+    wchar_t stem[9] = {0};
+    size_t used = 0;
+    while (used < 8 && wide[used] && wide[used] != L'.') {
+        stem[used] = wide[used]; ++used;
+    }
+    if (!wcscmp(stem, L"CON") || !wcscmp(stem, L"PRN") ||
+        !wcscmp(stem, L"AUX") || !wcscmp(stem, L"NUL")) valid = 0;
+    if (used == 4 && (stem[3] >= L'1' && stem[3] <= L'9') &&
+        (!wcsncmp(stem, L"COM", 3) || !wcsncmp(stem, L"LPT", 3))) valid = 0;
+    /* Device names are ASCII case insensitive. */
+    for (size_t i = 0; i < used; ++i)
+        if (stem[i] >= L'a' && stem[i] <= L'z') stem[i] -= L'a' - L'A';
+    if (!wcscmp(stem, L"CON") || !wcscmp(stem, L"PRN") ||
+        !wcscmp(stem, L"AUX") || !wcscmp(stem, L"NUL")) valid = 0;
+    if (used == 4 && (stem[3] >= L'1' && stem[3] <= L'9') &&
+        (!wcsncmp(stem, L"COM", 3) || !wcsncmp(stem, L"LPT", 3))) valid = 0;
+    free(wide); return valid;
+#elif defined(__APPLE__)
     pthread_once(&name_once, load_names);
     if (!names_available) return 0;
     CFMutableStringRef value = normalized(name);
@@ -61,7 +88,13 @@ int fx_immutable_name_valid(const char *name)
 }
 int fx_immutable_names_equivalent(const char *a, const char *b)
 {
-#ifdef __APPLE__
+#ifdef _WIN32
+    wchar_t *left = fx_win32_wide(a), *right = fx_win32_wide(b);
+    if (!left || !right) { free(left); free(right); return -1; }
+    int comparison = CompareStringOrdinal(left, -1, right, -1, TRUE);
+    free(left); free(right);
+    return comparison ? comparison == CSTR_EQUAL : -1;
+#elif defined(__APPLE__)
     pthread_once(&name_once, load_names);
     if (!names_available) return -1;
     CFMutableStringRef left = normalized(a), right = normalized(b);
