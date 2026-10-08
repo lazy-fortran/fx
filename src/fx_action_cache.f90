@@ -219,10 +219,12 @@ contains
         end do
     end function result_has_smod
 
-    function compile_destination(entry, obj_path, mod_dir) result(path)
+    recursive subroutine compile_destination(entry, obj_path, mod_dir, path)
+        ! An output argument keeps the allocation and its length with the caller.
+        ! Deferred-length function results use shared compiler-generated lengths.
         type(immutable_tree_entry_t), intent(in) :: entry
         character(len=*), intent(in) :: obj_path, mod_dir
-        character(len=:), allocatable :: path
+        character(len=:), allocatable, intent(out) :: path
         character(len=MAX_MOD_NAME) :: label
 
         path = ''
@@ -235,7 +237,7 @@ contains
             label = entry%path(6:)
             path = trim(mod_dir)//'/'//trim(label)//'.smod'
         end if
-    end function compile_destination
+    end subroutine compile_destination
 
     logical function local_result_matches(entries, obj_path, mod_dir)
         type(immutable_tree_entry_t), intent(in) :: entries(:)
@@ -257,7 +259,7 @@ contains
         integer :: ierr, mode
 
         local_result_entry_matches = .false.
-        path = compile_destination(entry, obj_path, mod_dir)
+        call compile_destination(entry, obj_path, mod_dir, path)
         if (len(path) == 0) return
         call immutable_store_hash_file(path, actual, ierr)
         if (ierr /= 0) return
@@ -278,6 +280,7 @@ contains
         type(action_result_store_t) :: store
         type(action_result_read_t) :: read
         type(immutable_tree_entry_t), allocatable :: entries(:)
+        character(len=:), allocatable :: destination
         character(len=HASH_LEN) :: result_id
         integer :: ierr, i, init_status, release_status
         integer :: preview_status
@@ -332,8 +335,9 @@ contains
         end if
         do i = 1, size(entries)
             if (local_result_entry_matches(entries(i), obj_path, mod_dir)) cycle
+            call compile_destination(entries(i), obj_path, mod_dir, destination)
             call action_result_materialize_blob(store, entries(i)%object_id, &
-                compile_destination(entries(i), obj_path, mod_dir), &
+                destination, &
                 entries(i)%mode, ierr)
             if (ierr /= ACTION_RESULT_OK) exit
         end do
