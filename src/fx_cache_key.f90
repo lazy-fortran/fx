@@ -52,17 +52,18 @@ contains
     end subroutine hash_file
 
     function cache_key_for(filename, compiler, flags, dep_keys, &
-            n_dep_keys) result(key)
+            n_dep_keys, include_dirs) result(key)
         character(len=*), intent(in) :: filename, compiler, flags
         character(len=HASH_LEN), intent(in) :: dep_keys(:)
         integer, intent(in) :: n_dep_keys
+        character(len=*), intent(in), optional :: include_dirs(:)
         character(len=HASH_LEN) :: key
 
         character(len=HASH_LEN) :: file_hash
         integer :: i, n_parts
         character(len=512) :: parts(MAX_PARTS)
 
-        call cache_source_tree_hash(filename, file_hash)
+        call cache_source_tree_hash(filename, file_hash, include_dirs)
 
         parts(1) = 'fx-cache-schema-1'
         parts(2) = file_hash
@@ -76,19 +77,20 @@ contains
         key = digest_parts(parts, n_parts)
     end function cache_key_for
 
-    subroutine cache_source_tree_hash(filename, hash)
+    subroutine cache_source_tree_hash(filename, hash, include_dirs)
         !! Hash a source file together with every file it (recursively) pulls in
         !! via Fortran `include` statements. Without this, editing an .inc file
         !! leaves the including .f90's content hash unchanged, so the compile
         !! cache serves a stale object and the edit silently never takes effect.
         character(len=*), intent(in) :: filename
         character(len=HASH_LEN), intent(out) :: hash
+        character(len=*), intent(in), optional :: include_dirs(:)
 
         character(len=512) :: parts(MAX_PARTS)
         integer :: n_parts
 
         n_parts = 0
-        call accumulate_source_hashes(filename, parts, n_parts, 0)
+        call accumulate_source_hashes(filename, parts, n_parts, 0, include_dirs)
         if (n_parts == 0) then
             hash = ''
         else
@@ -96,14 +98,16 @@ contains
         end if
     end subroutine cache_source_tree_hash
 
-    recursive subroutine accumulate_source_hashes(filename, parts, n_parts, depth)
+    recursive subroutine accumulate_source_hashes(filename, parts, n_parts, depth, &
+            include_dirs)
         character(len=*), intent(in) :: filename
         character(len=512), intent(inout) :: parts(:)
         integer, intent(inout) :: n_parts
         integer, intent(in) :: depth
+        character(len=*), intent(in), optional :: include_dirs(:)
 
         character(len=HASH_LEN) :: fh
-        character(len=512) :: line, incfile, dir
+        character(len=512) :: line, incfile, resolved
         integer :: u, ios, ierr
 
         if (depth > MAX_INCLUDE_DEPTH .or. n_parts >= size(parts)) return
@@ -114,7 +118,6 @@ contains
             parts(n_parts) = fh
         end if
 
-        dir = dirname_of(filename)
         open (newunit=u, file=trim(filename), status='old', iostat=ios)
         if (ios /= 0) return
         do
@@ -122,11 +125,32 @@ contains
             if (ios /= 0) exit
             call parse_include_path(line, incfile)
             if (len_trim(incfile) == 0) cycle
-            if (incfile(1:1) /= '/') incfile = trim(dir)//trim(incfile)
-            call accumulate_source_hashes(trim(incfile), parts, n_parts, depth + 1)
+            call resolve_include(filename, incfile, include_dirs, resolved)
+            call accumulate_source_hashes(trim(resolved), parts, n_parts, depth + 1, &
+                include_dirs)
         end do
         close (u)
     end subroutine accumulate_source_hashes
+
+    subroutine resolve_include(source, name, include_dirs, path)
+        character(len=*), intent(in) :: source, name
+        character(len=*), intent(in), optional :: include_dirs(:)
+        character(len=*), intent(out) :: path
+        integer :: i
+        logical :: exists
+
+        path = name
+        if (name(1:1) == '/') return
+        path = trim(dirname_of(source))//trim(name)
+        inquire (file=trim(path), exist=exists)
+        if (exists) return
+        if (.not. present(include_dirs)) return
+        do i = 1, size(include_dirs)
+            path = trim(include_dirs(i))//'/'//trim(name)
+            inquire (file=trim(path), exist=exists)
+            if (exists) return
+        end do
+    end subroutine resolve_include
 
     subroutine parse_include_path(line, incfile)
         character(len=*), intent(in) :: line
@@ -139,6 +163,7 @@ contains
 
         incfile = ''
         t = adjustl(line)
+        if (t(1:1) == '#') t = adjustl(t(2:))
         if (len_trim(t) < 9) return
         head = t(1:7)
         do i = 1, 7

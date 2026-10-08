@@ -6,7 +6,8 @@ program test_action_cache
         cache_source_tree_hash, cache_set_file_hash_hook, &
         cache_clear_file_hash_hook
     use fx_cache, only: cache_init
-    use fx_cache_key, only: cache_file_content_key, cache_digest
+    use fx_cache_key, only: cache_file_content_key, cache_digest, cache_key_for
+    use fx_proc, only: proc_exec, proc_result_t
         use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_preview, ACTION_RESULT_OK
     use fx_immutable_manifest, only: immutable_tree_entry_t
@@ -30,6 +31,7 @@ program test_action_cache
     call test_binary_fingerprint(suite)
     call test_v2_only(suite)
     call test_file_hash_hook(suite)
+    call test_include_search_dirs(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -375,10 +377,14 @@ contains
         character(len=:), allocatable :: path
         integer, save :: counter = 0
         character(len=32) :: counter_text
+        character(len=512) :: tmpdir
+        integer :: status
 
         counter = counter + 1
         write (counter_text, '(I0)') counter
-        path = '/var/tmp/fx action;$(fixture)-'//trim(tag)//'-'// &
+        call get_environment_variable('TMPDIR', tmpdir, status=status)
+        if (status /= 0 .or. len_trim(tmpdir) == 0) tmpdir = '/var/tmp'
+        path = trim(tmpdir)//'/fx action;$(fixture)-'//trim(tag)//'-'// &
             trim(counter_text)
     end function temp_root
 
@@ -487,6 +493,109 @@ contains
         close (ua)
         close (ub)
     end function files_equal
+
+    subroutine test_include_search_dirs(suite)
+        !! The compiler independently selects headers; cache receipts must follow it.
+        type(test_suite_t), intent(inout) :: suite
+        type(cache_t) :: cache
+        character(:), allocatable :: root, source, executable, restored
+        character(len=512) :: directories(2), swapped(2)
+        character(len=HASH_LEN) :: initial, warm, changed, cpp_key, dep_keys(0)
+        integer :: ierr
+        logical :: hit
+        character(len=1), parameter :: nl = new_line('a')
+
+        root = temp_root('include-search')
+        call cleanup_tree(root)
+        call make_dir(root//'/src')
+        call make_dir(root//'/first')
+        call make_dir(root//'/second')
+        directories = [character(len=512) :: root//'/first', root//'/second']
+        source = root//'/src/main.f90'
+        executable = root//'/reference'
+        restored = root//'/restored'
+        call write_file(source, "program p"//nl//"include 'value.inc'"//nl// &
+            'end program p'//nl)
+        call write_file(root//'/first/value.inc', "include 'nested.inc'"//nl)
+        call write_file(root//'/first/nested.inc', "print '(i0)', 11"//nl)
+        call write_file(root//'/second/value.inc', "print '(i0)', 99"//nl)
+        call reference_include_program(suite, source, directories, executable, '11')
+        call cache_init(cache, root//'/cache')
+        initial = cache_key_for(source, 'reference-compiler', '-cpp', dep_keys, 0, &
+            include_dirs=directories)
+        call cache_store_binary(cache, initial, executable, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'stores compiled include behavior')
+
+        call write_file(root//'/second/value.inc', "print '(i0)', 77"//nl)
+        warm = cache_key_for(source, 'reference-compiler', '-cpp', dep_keys, 0, &
+            include_dirs=directories)
+        call cache_restore_binary(cache, warm, restored, hit)
+        call test_assert(suite, hit, 'editing unselected include retains warm receipt')
+        call assert_program_output(suite, restored, '11')
+
+        call write_file(root//'/first/nested.inc', "print '(i0)', 22"//nl)
+        changed = cache_key_for(source, 'reference-compiler', '-cpp', dep_keys, 0, &
+            include_dirs=directories)
+        call cache_restore_binary(cache, changed, restored, hit)
+        call test_assert(suite, .not. hit, &
+            'recursive selected include invalidates receipt')
+        call reference_include_program(suite, source, directories, executable, '22')
+        call cache_store_binary(cache, changed, executable, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'stores updated include behavior')
+        call cache_restore_binary(cache, changed, restored, hit)
+        call test_assert(suite, hit, 'updated include result restores')
+        call assert_program_output(suite, restored, '22')
+
+        swapped = directories(2:1:-1)
+        changed = cache_key_for(source, 'reference-compiler', '-cpp', dep_keys, 0, &
+            include_dirs=swapped)
+        call cache_restore_binary(cache, changed, restored, hit)
+        call test_assert(suite, .not. hit, 'include search order changes receipt')
+        call reference_include_program(suite, source, swapped, executable, '77')
+        call write_file(source, 'program p'//nl//'#include "value.inc"'//nl// &
+            'end program p'//nl)
+        cpp_key = cache_key_for(source, 'reference-compiler', '-cpp', dep_keys, 0, &
+            include_dirs=directories)
+        call reference_include_program(suite, source, directories, executable, '22')
+        call cache_store_binary(cache, cpp_key, executable, ierr)
+        call write_file(root//'/first/nested.inc', "print '(i0)', 33"//nl)
+        changed = cache_key_for(source, 'reference-compiler', '-cpp', dep_keys, 0, &
+            include_dirs=directories)
+        call cache_restore_binary(cache, changed, restored, hit)
+        call test_assert(suite, .not. hit, 'quoted CPP include invalidates receipt')
+        call reference_include_program(suite, source, directories, executable, '33')
+        call cleanup_tree(root)
+    end subroutine test_include_search_dirs
+
+    subroutine reference_include_program(suite, source, directories, executable, wanted)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=*), intent(in) :: source, directories(:), executable, wanted
+        character(len=512) :: arguments(7)
+        type(proc_result_t) :: child
+
+        arguments = [character(len=512) :: 'gfortran', '-cpp', &
+            '-I'//trim(directories(1)), '-I'//trim(directories(2)), &
+            source, '-o', executable]
+        call proc_exec(arguments, size(arguments), child)
+        call test_assert_equal_int(suite, 0, child%exit_code, &
+            'independent compiler builds include fixture')
+        if (child%exit_code /= 0) then
+            write (*, '(a)') child%stderr_text
+            return
+        end if
+        call assert_program_output(suite, executable, wanted)
+    end subroutine reference_include_program
+
+    subroutine assert_program_output(suite, executable, wanted)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=*), intent(in) :: executable, wanted
+        type(proc_result_t) :: child
+
+        call proc_exec([executable], 1, child)
+        call test_assert_equal_int(suite, 0, child%exit_code, 'include program runs')
+        call test_assert_equal_str(suite, wanted//new_line('a'), child%stdout_text, &
+            'include-selected observable executable output')
+    end subroutine assert_program_output
 
     subroutine test_file_hash_hook(suite)
         !! Installing a file-hash hook must route source keying through it, and
