@@ -1,3 +1,6 @@
+#ifdef _WIN32
+#include "immutable_test_process_windows.inc"
+#else
 #define _POSIX_C_SOURCE 200809L
 #define _DARWIN_C_SOURCE
 #include <errno.h>
@@ -202,3 +205,4 @@ void fx_test_process_sleep_ms(int milliseconds)
                              (milliseconds % 1000) * 1000000L};
     while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
 }
+#endif /* !_WIN32 */
