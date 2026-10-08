@@ -25,6 +25,8 @@
 #define COMPACT_GROUP_MIN 8
 #define SNAPSHOT_WRITE_BUFFER (64 * 1024)
 
+int fx_immutable_store_validate(const char *root);
+
 typedef struct {
     char bytes[SNAPSHOT_WRITE_BUFFER];
     size_t used;
@@ -63,6 +65,7 @@ static int write_all(int fd, const char *bytes, size_t count)
 
 static int ensure_metadata(const char *root, char *dir, size_t cap)
 {
+    if (fx_immutable_store_validate(root) != 0) return -2;
     int n = snprintf(dir, cap, "%s/.fx-metadata", root);
     if (n < 0 || (size_t)n >= cap) return -1;
     int created = mkdir(dir, 0700) == 0;
@@ -787,7 +790,8 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
         (op == 6 && !safe_field(token)) ||
         (op == 7 && (!safe_field(reason) || !out_token || out_cap < 32)))
         return -1;
-    if (ensure_metadata(root, dir, sizeof(dir)) != 0) return -1;
+    int metadata_status = ensure_metadata(root, dir, sizeof(dir));
+    if (metadata_status != 0) return metadata_status;
     n = snprintf(lock_path, sizeof(lock_path), "%s/lock", dir);
     if (n < 0 || (size_t)n >= sizeof(lock_path)) return -1;
     lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);

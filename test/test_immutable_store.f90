@@ -409,6 +409,9 @@ contains
             'symlink test store initializes')
         link_target = trim(external_root)//'/blobs'
         link_path = trim(linked_root)//'/blobs'
+        local_err = fx_test_remove_tree(trim(link_path))
+        call test_assert_equal_int(s, 0, local_err, &
+            'empty initialized namespace is removed before shard substitution')
         link_argv(1) = 'ln'
         link_argv(2) = '-s'
         link_argv(3) = trim(link_target)

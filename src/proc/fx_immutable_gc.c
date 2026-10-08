@@ -22,6 +22,8 @@
 #define SNAPSHOT_LIMIT (16 * 1024 * 1024)
 #define RECORD_LIMIT 512
 
+int fx_immutable_store_validate(const char *root);
+
 typedef struct {
     char id[65];
     char kind;
@@ -511,6 +513,7 @@ int fx_immutable_gc_collect(const char *root, int max_scan, int max_delete,
         min_age_seconds < 0 || pressure_bytes < 0 ||
         pressure_objects < 0 || now == (time_t)-1)
         return -2;
+    if (fx_immutable_store_validate(root) != 0) return -2;
     g.root = root;
     g.capacity = (size_t)max_scan;
     g.lock = -1;

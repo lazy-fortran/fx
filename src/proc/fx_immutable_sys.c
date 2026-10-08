@@ -214,6 +214,38 @@ int fx_immutable_mkdirs_sync(const char *path)
     return immutable_mkdirs(path, 1);
 }
 
+/* An initialized store has both canonical object namespaces. Validate with
+ * held directory descriptors before lease/GC metadata can be written. */
+int fx_immutable_store_validate(const char *root)
+{
+    const char *classes[] = {"blobs", "trees"};
+    int base = open_existing_directory(root);
+    if (base < 0) return -1;
+    for (size_t i = 0; i < 2; ++i) {
+        int parent = openat(base, classes[i], directory_flags());
+        int objects = parent < 0 ? -1 :
+            openat(parent, "sha256", directory_flags());
+        if (parent >= 0) close(parent);
+        if (objects < 0) { close(base); return -1; }
+        close(objects);
+    }
+    close(base);
+    return 0;
+}
+
+int fx_immutable_store_initialize(const char *root)
+{
+    const char *classes[] = {"blobs", "trees"};
+    char path[PATH_MAX];
+    if (fx_immutable_store_validate(root) == 0) return 0;
+    for (size_t i = 0; i < 2; ++i) {
+        int n = snprintf(path, sizeof(path), "%s/%s/sha256", root, classes[i]);
+        if (n < 0 || (size_t)n >= sizeof(path) ||
+            immutable_mkdirs(path, 1) != 0) return -1;
+    }
+    return fx_immutable_store_validate(root);
+}
+
 int fx_immutable_mkdirs_ephemeral(const char *path)
 {
     return immutable_mkdirs(path, 0);

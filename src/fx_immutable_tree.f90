@@ -66,7 +66,7 @@ contains
         call immutable_store_publication_lease_acquire(store, 'fx-publisher', &
             store%writer_start, 'tree', kinds, ids, publication, lease_status)
         if (lease_status /= IMMUTABLE_OK) then
-            ierr = IMMUTABLE_IO_ERROR
+            ierr = lease_status
             return
         end if
         do i = 1, size(sorted)

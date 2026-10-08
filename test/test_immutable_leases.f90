@@ -16,7 +16,8 @@ program test_immutable_leases
     use fx_proc, only: proc_pid
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_clock_ms, test_process_sleep_ms
-    use fx_test_fs, only: fx_test_rename, fx_test_remove_tree
+    use fx_test_fs, only: fx_test_rename, fx_test_remove_tree, fx_test_mkdir_p
+    use fx_immutable_gc, only: immutable_store_collect
     implicit none
 
     type(test_suite_t) :: suite
@@ -58,6 +59,7 @@ program test_immutable_leases
             write (*, '(2A)') 'resolved lease root=', store%root_dir
     end if
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'lease store initializes')
+    call test_nonstore_root()
     source = trim(root)//'/source'
     call write_bytes(trim(source), bytes, ierr)
     call immutable_store_put_blob(store, trim(source), object_id, ierr)
@@ -223,6 +225,45 @@ program test_immutable_leases
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_nonstore_root()
+        type(immutable_store_t) :: misplaced
+        character(len=:), allocatable :: project
+        character(len=64) :: empty_ids(1)
+        integer :: rc, scanned, deleted
+        integer(int64) :: allocated_bytes, reclaimed_bytes
+        logical :: metadata_exists
+
+        project = trim(root)//'/ordinary-project'
+        rc = fx_test_mkdir_p(project)
+        call test_assert_equal_int(suite, 0, rc, 'ordinary project fixture opens')
+        ! A stale/misdirected handle must not authorize writes to another root.
+        misplaced = store
+        misplaced%root_dir = project
+        empty_ids(1) = repeat('a', 64)
+        call immutable_store_root_set(misplaced, 'wrong_root', 'start', 'result', &
+            kinds, empty_ids, rc)
+        call test_assert(suite, rc /= IMMUTABLE_OK, 'non-store lease is rejected')
+        inquire(file=project//'/.fx-metadata', exist=metadata_exists)
+        call test_assert(suite, .not. metadata_exists, &
+            'rejected lease writes no project metadata')
+        call immutable_store_collect(misplaced, 8, 1, 0_int64, 0_int64, 0, &
+            scanned, allocated_bytes, deleted, reclaimed_bytes, rc)
+        call test_assert_equal_int(suite, IMMUTABLE_INVALID, rc, &
+            'non-store collection is rejected')
+        call test_assert_equal_int(suite, 0, deleted, 'non-store deletes nothing')
+        inquire(file=project//'/.fx-metadata', exist=metadata_exists)
+        call test_assert(suite, .not. metadata_exists, &
+            'rejected collection writes no project metadata')
+        rc = fx_test_mkdir_p(project//'/blobs/sha256')
+        call test_assert_equal_int(suite, 0, rc, 'partial store fixture opens')
+        call immutable_store_root_set(misplaced, 'wrong_root', 'start', 'result', &
+            kinds, empty_ids, rc)
+        call test_assert(suite, rc /= IMMUTABLE_OK, 'partial store is rejected')
+        inquire(file=project//'/.fx-metadata', exist=metadata_exists)
+        call test_assert(suite, .not. metadata_exists, &
+            'partial store rejection writes no metadata')
+    end subroutine test_nonstore_root
 
     subroutine test_snapshot_cache_replacement(s, base, root_kinds, root_ids)
         type(test_suite_t), intent(inout) :: s

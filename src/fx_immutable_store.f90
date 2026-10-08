@@ -55,11 +55,11 @@ module fx_immutable_store
             integer(c_size_t), value :: out_capacity
             integer(c_long_long), intent(out) :: epoch
         end function c_lease_update
-        integer(c_int) function c_mkdirs(path) &
-                bind(C, name='fx_immutable_mkdirs_sync')
+        integer(c_int) function c_initialize(path) &
+                bind(C, name='fx_immutable_store_initialize')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
-        end function c_mkdirs
+        end function c_initialize
         integer(c_int) function c_resolve_root(path, resolved, capacity) &
                 bind(C, name='fx_immutable_resolve_root')
             import :: c_char, c_int, c_size_t
@@ -116,7 +116,7 @@ contains
         clean = path_normalize(from_c_text(c_resolved))
         if (len(clean) == 0 .or. len(clean) >= PATH_LIMIT) return
         call to_c_text(clean, c_root)
-        if (c_mkdirs(c_root) /= 0_c_int) then
+        if (c_initialize(c_root) /= 0_c_int) then
             ierr = IMMUTABLE_IO_ERROR
             return
         end if
@@ -186,7 +186,7 @@ contains
         call immutable_store_publication_lease_acquire(store, 'fx-publisher', &
             store%writer_start, 'blob', kinds, ids, publication, status)
         if (status /= IMMUTABLE_OK) then
-            ierr = IMMUTABLE_IO_ERROR
+            ierr = status
             return
         end if
         call immutable_store_verify_blob(store, object_id, status)
@@ -538,6 +538,7 @@ contains
         ierr = IMMUTABLE_IO_ERROR
         if (status == 0_c_int) ierr = IMMUTABLE_OK
         if (status == 1_c_int) ierr = IMMUTABLE_MISSING
+        if (status == -2_c_int) ierr = IMMUTABLE_CORRUPT
     end subroutine lease_update
 
     subroutine build_root_rows(kinds, ids, roots, ierr)
