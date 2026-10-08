@@ -38,6 +38,16 @@ their actual unresolved goals, not instructions to recreate finished work.
 
 ## Delivery
 
+The 2026-10-08 LSP increment replaces save/change callbacks with one document
+diagnostic callback and migrates Fo in the same delivery. The shared reader
+debounces per URI/version, drains queued edits before publication and clears
+closed documents. Strict JSON extraction now counts nested array/object
+elements correctly. Four owning Linux checks and four Darwin checks pass;
+the actual Fo framed consumer passes parser/semantic diagnostics, current
+versions, stale-edit rejection, UTF-16 spans and correction/close clearing.
+Native Windows transport is implemented; its full Fo consumer gate remains
+part of the platform delivery.
+
 Use the exact controller-supplied Fo driver and the smallest affected native
 oracle. Preserve bytes/modes, companions, binding conflicts, concurrent use and
 crash durability while simplifying implementation. Recheck the original consumer
