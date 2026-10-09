@@ -86,7 +86,7 @@ contains
     subroutine run_timed_reader(framed)
         logical, intent(in) :: framed
         type(session_t) :: s
-        character(len=4096) :: self
+        character(len=4096) :: self, argv(3)
         character(len=32) :: length_text
         character(:), allocatable :: stage, body, mode
         integer :: spawn_error, code
@@ -99,8 +99,10 @@ contains
             mode = 'framed'
             body = '{"payload":"framed"}'
         end if
-        call test_process_spawn_piped([character(len=4096) :: trim(self), &
-            '--timed-reader', mode], s%process, .false., spawn_error)
+        argv(1) = self
+        argv(2) = '--timed-reader'
+        argv(3) = mode
+        call test_process_spawn_piped(argv, s%process, .false., spawn_error)
         call check(spawn_error == 0, 'timed transport reader starts')
         if (spawn_error /= 0) return
         s%pending = ''

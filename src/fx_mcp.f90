@@ -865,7 +865,8 @@ contains
         i = 1
         do while (i <= len_trim(path))
             segment_start = i
-            do while (i <= len_trim(path) .and. path(i:i) /= '.')
+            do while (i <= len_trim(path))
+                if (path(i:i) == '.') exit
                 i = i + 1
             end do
             segment = path(segment_start:i-1)
