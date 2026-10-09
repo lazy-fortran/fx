@@ -77,8 +77,8 @@ contains
         ierr = fx_test_mkdir_p(directory)
         call test_assert_equal_int(suite, 0, ierr, 'create long Unicode hash path')
         path = directory//'/binary'
-        payload = 'f'//achar(0)//'o'//achar(255)//achar(13)//achar(10)
-        call proc_file_write(path, payload, ierr)
+        payload = 'f'//achar(0)//'o'//char(255)//achar(13)//achar(10)
+        call proc_file_write(path, payload, len(payload), ierr)
         call test_assert_equal_int(suite, 0, ierr, 'write exact native binary bytes')
         call sha256_file(path, digest, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'hash complete long Unicode path')
@@ -98,7 +98,7 @@ contains
             'XXH preserves bytes')
 
         path = directory//'/empty'
-        call proc_file_write(path, '', ierr)
+        call proc_file_write(path, '', 0, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'write native empty file')
         call sha256_file(path, digest, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'hash native empty file')
@@ -141,7 +141,7 @@ contains
         integer :: ierr
 
         ! Write known content to a temp file
-        call proc_file_write(root//'/fnv1a.bin', 'foobar', ierr)
+        call proc_file_write(root//'/fnv1a.bin', 'foobar', 6, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'write FNV fixture')
 
         call fnv1a_file(root//'/fnv1a.bin', h_file, ierr)
@@ -232,7 +232,7 @@ contains
         call test_assert_equal_str(suite, h_foo, h_stream, &
             'sha256: streaming chunks match one-shot')
 
-        call proc_file_write(root//'/wide.bin', 'foo', ierr)
+        call proc_file_write(root//'/wide.bin', 'foo', 3, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'write SHA fixture')
         call sha256_file(root//'/wide.bin', h_file, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'sha256_file: no error')
