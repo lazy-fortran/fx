@@ -466,7 +466,7 @@ contains
         type(action_result_store_t) :: store
         type(immutable_tree_entry_t) :: entry(1)
         character(len=HASH_LEN) :: result_id
-        character(len=512) :: sources(1)
+        character(len=:), allocatable :: sources(:)
         integer :: mode, init_status
 
         call init_result_store(c, store, init_status)
@@ -478,6 +478,7 @@ contains
             return
         end if
         entry(1) = result_entry('program', 'executable', mode)
+        allocate (character(len=len(bin_path)) :: sources(1))
         sources(1) = bin_path
         call action_result_publish_files(store, action_id, sources, entry, &
             result_id, ierr)

@@ -9,7 +9,8 @@ program test_action_cache
     use fx_cache_key, only: cache_file_content_key, cache_digest, cache_key_for
     use fx_proc, only: proc_exec, proc_result_t
         use fx_action_result_store, only: action_result_store_t, &
-        action_result_store_init, action_result_preview, ACTION_RESULT_OK
+        action_result_store_init, action_result_preview, action_result_file_mode, &
+        ACTION_RESULT_OK
     use fx_immutable_manifest, only: immutable_tree_entry_t
     use fx_immutable_store, only: immutable_store_blob_path
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_chmod
@@ -371,7 +372,8 @@ contains
         type(test_suite_t), intent(inout) :: suite
         type(cache_t) :: c
         character(len=:), allocatable :: root, bin_path, restored_path
-        integer :: ierr
+        character(len=:), allocatable :: source_dir, prefix_path
+        integer :: ierr, mode, component_length
         logical :: matches, restored
 
         root = temp_root('binary')
@@ -396,6 +398,41 @@ contains
         call write_file(bin_path, 'BINARY-TWO-LONGER-PAYLOAD')
         call cache_binary_matches(c, 'link-prog', bin_path, matches)
         call test_assert(suite, .not. matches, 'resized binary fails fingerprint')
+
+        source_dir = root//'/long-source'
+        do while (len(source_dir) < 490)
+            component_length = max(1, min(64, 490 - len(source_dir) - 1))
+            source_dir = source_dir//'/'//repeat('d', component_length)
+        end do
+        call make_dir(source_dir)
+        bin_path = source_dir//'/'//repeat('p', 48)
+        prefix_path = bin_path(:512)
+        call write_file(prefix_path, 'WRONG TRUNCATED PREFIX')
+        call write_file(bin_path, 'COMPLETE LONG-PATH PRODUCER')
+        ierr = fx_test_chmod(prefix_path, 292)
+        call test_assert(suite, ierr == 0, 'set truncated-prefix file read-only')
+        ierr = fx_test_chmod(bin_path, 292)
+        call test_assert(suite, ierr == 0, 'set long-path producer read-only')
+
+        call cache_store_binary(c, 'link-long-path', bin_path, ierr)
+        call test_assert(suite, ierr == 0, 'publish binary from its complete long path')
+        restored_path = root//'/restored-long-path'
+        call cache_restore_binary(c, 'link-long-path', restored_path, restored)
+        call test_assert(suite, restored, 'restore long-path producer to a short path')
+        call test_assert(suite, &
+            file_has_bytes(restored_path, 'COMPLETE LONG-PATH PRODUCER'), &
+            'restore producer bytes rather than the different truncated-prefix file')
+        call action_result_file_mode(restored_path, mode, ierr)
+        call test_assert(suite, ierr == ACTION_RESULT_OK, &
+            'restored long-path output has readable native permissions')
+        call test_assert_equal_int(suite, mode, 292, &
+            'restored output preserves independently assigned read-only permissions')
+        call cache_binary_matches(c, 'link-long-path', bin_path, matches)
+        call test_assert(suite, matches, &
+            'receipt matches the complete long-path producer')
+        call cache_binary_matches(c, 'link-long-path', prefix_path, matches)
+        call test_assert(suite, .not. matches, &
+            'different truncated-prefix bytes cannot satisfy the producer receipt')
 
         call cleanup_tree(root)
     end subroutine test_binary_fingerprint
