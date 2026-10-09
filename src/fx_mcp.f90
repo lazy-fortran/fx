@@ -1,5 +1,7 @@
 module fx_mcp
     use fx_json_build, only: json_builder_t
+    use fx_string, only: to_lower
+    use, intrinsic :: iso_fortran_env, only: int64
     use, intrinsic :: iso_c_binding, only: c_int, c_char
     implicit none
     private
@@ -13,6 +15,8 @@ module fx_mcp
     integer, parameter :: MCP_READ_OK = 0
     integer, parameter :: MCP_READ_EOF = -1
     integer, parameter :: MCP_READ_TOO_LARGE = -2
+    integer, parameter, public :: MCP_READ_TIMEOUT = 1
+    integer, save :: input_framing = MCP_FRAME_UNKNOWN
 
     type, public :: mcp_tool_t
         character(len=64) :: name = ' '
@@ -49,16 +53,12 @@ module fx_mcp
     public :: mcp_extract_param
 
     interface
-        integer(c_int) function fx_c_get_mcp_framing() bind(C)
-            import :: c_int
-        end function fx_c_get_mcp_framing
-
-        subroutine fx_c_read_jsonrpc_message(buf, bufsize, nread) bind(C)
+        integer(c_int) function input_bytes(bytes, capacity, timeout_ms) &
+                bind(C, name='fx_stdin_input')
             import :: c_int, c_char
-            character(kind=c_char), intent(out) :: buf(*)
-            integer(c_int), intent(in), value :: bufsize
-            integer(c_int), intent(out) :: nread
-        end subroutine fx_c_read_jsonrpc_message
+            character(kind=c_char), intent(out) :: bytes(*)
+            integer(c_int), intent(in), value :: capacity, timeout_ms
+        end function input_bytes
     end interface
 
 contains
@@ -190,52 +190,145 @@ contains
         end do
     end subroutine mcp_server_run
 
-    subroutine mcp_read_message(line, max_len, framing, eof, read_status)
+    subroutine mcp_read_message(line, max_len, framing, eof, read_status, timeout_ms)
         character(len=*), intent(out) :: line
         integer, intent(in) :: max_len
         integer, intent(inout) :: framing
         logical, intent(out) :: eof
         integer, intent(out) :: read_status
-        character(kind=c_char), allocatable :: c_buf(:)
-        integer(c_int) :: c_nread
-        integer :: i, n
+        integer, intent(in), optional :: timeout_ms
+        character(:), allocatable, save :: buffered, payload
+        integer, save :: content_length = -1, body_remaining = 0
+        logical, save :: saw_header = .false., discarding_line = .false.
+        character(kind=c_char) :: bytes(4096)
+        character(len=4096) :: chunk
+        character(:), allocatable :: text, length_text
+        integer :: i, n, newline, take, wait_ms, limit, ios
+        integer(int64) :: started, now, rate
+        logical :: read_attempted
 
+        line = ' '
+        eof = .false.
+        read_status = MCP_READ_TIMEOUT
         if (max_len <= 0) then
-            line = ' '
             eof = .true.
             read_status = MCP_READ_EOF
             return
         end if
-
-        allocate(character(kind=c_char) :: c_buf(max_len))
-        call fx_c_read_jsonrpc_message(c_buf, int(max_len, c_int), c_nread)
-        read_status = int(c_nread, kind=4)
-        if (read_status == MCP_READ_TOO_LARGE) then
-            line = ' '
-            eof = .false.
-            framing = fx_c_get_mcp_framing()
-            deallocate(c_buf)
-            return
-        end if
-
-        if (c_nread <= 0) then
-            line = ' '
-            eof = (c_nread == MCP_READ_EOF) .or. (c_nread == 0)
-            read_status = int(c_nread, kind=4)
-            framing = fx_c_get_mcp_framing()
-            deallocate(c_buf)
-            return
-        end if
-
-        line = ' '
-        n = min(max_len, int(c_nread))
-        do i = 1, n
-            line(i:i) = c_buf(i)
+        if (.not. allocated(buffered)) buffered = ''
+        if (.not. allocated(payload)) payload = ''
+        limit = min(max_len, len(line))
+        wait_ms = -1
+        if (present(timeout_ms)) wait_ms = timeout_ms
+        read_attempted = .false.
+        call system_clock(started, rate)
+        do
+            if (body_remaining > 0) then
+                take = min(body_remaining, len(buffered))
+                if (content_length <= limit) payload = payload // buffered(:take)
+                buffered = buffered(take + 1:)
+                body_remaining = body_remaining - take
+                if (body_remaining == 0) then
+                    read_status = MCP_READ_TOO_LARGE
+                    if (content_length <= limit) then
+                        line = payload
+                        read_status = MCP_READ_OK
+                    end if
+                    payload = ''
+                    content_length = -1
+                    saw_header = .false.
+                    return
+                end if
+            else
+                newline = index(buffered, achar(10))
+                if (newline > 0) then
+                    text = buffered(:newline - 1)
+                    buffered = buffered(newline + 1:)
+                    if (discarding_line) then
+                        discarding_line = .false.
+                        read_status = MCP_READ_TOO_LARGE
+                        return
+                    end if
+                    i = verify(text, ' ' // achar(9) // achar(13))
+                    if (i == 0) then
+                        text = ''
+                    else
+                        text = text(i:)
+                    end if
+                    n = len(text)
+                    if (n > 0) then
+                        if (text(n:n) == achar(13)) text = text(:n - 1)
+                    end if
+                    if (len(text) == 0) then
+                        if (content_length > 0) then
+                            body_remaining = content_length
+                            cycle
+                        end if
+                        if (.not. saw_header) cycle
+                    else if (text(1:1) == '{') then
+                        framing = MCP_FRAME_BARE_JSON
+                        input_framing = framing
+                        read_status = MCP_READ_TOO_LARGE
+                        if (len(text) <= limit) then
+                            line = text
+                            read_status = MCP_READ_OK
+                        end if
+                        return
+                    else
+                        framing = MCP_FRAME_CONTENT_LENGTH
+                        input_framing = framing
+                        saw_header = .true.
+                        if (index(to_lower(text), 'content-length:') /= 1) cycle
+                        length_text = trim(adjustl(text(16:)))
+                        ios = 1
+                        if (len(length_text) > 0) then
+                            if (verify(length_text, '0123456789') == 0) &
+                                read(length_text, *, iostat=ios) content_length
+                        end if
+                        if (ios == 0 .and. content_length > 0) cycle
+                    end if
+                    content_length = -1
+                    saw_header = .false.
+                    read_status = MCP_READ_TOO_LARGE
+                    return
+                end if
+                if (len(buffered) > limit) then
+                    discarding_line = .true.
+                    buffered = ''
+                end if
+            end if
+            if (present(timeout_ms)) then
+                if (timeout_ms >= 0) then
+                    call system_clock(now)
+                    wait_ms = max(0, timeout_ms - &
+                        int((now - started) * 1000_int64 / max(1_int64, rate)))
+                    if (read_attempted .and. wait_ms == 0) return
+                end if
+            end if
+            n = int(input_bytes(bytes, 4096_c_int, int(wait_ms, c_int)))
+            read_attempted = .true.
+            if (n == 0) return
+            if (n < 0) then
+                eof = n == -1
+                read_status = MCP_READ_TOO_LARGE
+                if (eof) then
+                    eof = len(buffered) == 0 .and. .not. saw_header .and. &
+                        body_remaining == 0 .and. .not. discarding_line
+                    if (eof) read_status = MCP_READ_EOF
+                end if
+                buffered = ''
+                payload = ''
+                content_length = -1
+                body_remaining = 0
+                saw_header = .false.
+                discarding_line = .false.
+                return
+            end if
+            do i = 1, n
+                chunk(i:i) = bytes(i)
+            end do
+            buffered = buffered // chunk(:n)
         end do
-        read_status = MCP_READ_OK
-        eof = .false.
-        framing = fx_c_get_mcp_framing()
-        deallocate(c_buf)
     end subroutine mcp_read_message
 
     subroutine mcp_send_response(response, framing)
@@ -245,9 +338,7 @@ contains
         character(len=32) :: len_str
 
         out_framing = framing
-        if (out_framing == MCP_FRAME_UNKNOWN) then
-            out_framing = fx_c_get_mcp_framing()
-        end if
+        if (out_framing == MCP_FRAME_UNKNOWN) out_framing = input_framing
         if (out_framing == MCP_FRAME_UNKNOWN) out_framing = MCP_FRAME_BARE_JSON
 
         select case (out_framing)

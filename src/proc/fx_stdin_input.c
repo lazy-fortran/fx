@@ -11,7 +11,7 @@
 #endif
 
 /* Positive byte count, zero timeout, -1 EOF, -2 transport error. */
-int fx_lsp_input(char *bytes, int capacity, int timeout_ms)
+int fx_stdin_input(char *bytes, int capacity, int timeout_ms)
 {
 #if defined(_WIN32) && !defined(__CYGWIN__)
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);

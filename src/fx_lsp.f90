@@ -32,7 +32,7 @@ module fx_lsp
 
     interface
         integer(c_int) function input_bytes(bytes, capacity, timeout_ms) &
-                bind(C, name='fx_lsp_input')
+                bind(C, name='fx_stdin_input')
             import :: c_char, c_int
             character(kind=c_char), intent(out) :: bytes(*)
             integer(c_int), intent(in), value :: capacity, timeout_ms

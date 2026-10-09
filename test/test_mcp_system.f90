@@ -1,5 +1,8 @@
 program test_mcp_system
     use iso_c_binding, only: c_char
+    use, intrinsic :: iso_fortran_env, only: output_unit
+    use fx_mcp, only: mcp_read_message, MCP_READ_TIMEOUT, MCP_FRAME_UNKNOWN
+    use fx_mcp, only: MCP_FRAME_BARE_JSON, MCP_FRAME_CONTENT_LENGTH
     use mcp_test_json, only: document_t,parse_json,child,string_is,atom_is,array_size
     use fx_test_process, only: test_process_t, test_process_spawn_piped, &
         test_process_is_executable, test_process_write, test_process_read, &
@@ -16,6 +19,11 @@ program test_mcp_system
     failures=0
     requested=' '
     call get_command_argument(1,requested)
+    if (trim(requested) == '--timed-reader') then
+        call get_command_argument(2, requested)
+        call timed_reader(trim(requested) == 'framed')
+        stop
+    end if
     if(len_trim(requested)==0) call get_environment_variable('FX_MCP_SERVER',requested)
     call find_server(trim(requested),server,server_found)
     if(.not.server_found) then
@@ -25,9 +33,103 @@ program test_mcp_system
     write(*,'(A)') 'fx MCP independent Fortran process oracle'
     call run_mode(trim(server),.true.)
     call run_mode(trim(server),.false.)
+    call run_timed_reader(.false.)
+    call run_timed_reader(.true.)
     write(*,'(A,I0,A)') 'MCP process oracle failures: ',failures
     if(failures/=0) stop 1
 contains
+    subroutine timed_reader(framed)
+        logical, intent(in) :: framed
+        character(len=128) :: message
+        integer :: framing, status, expected_framing
+        logical :: eof
+
+        framing = MCP_FRAME_UNKNOWN
+        expected_framing = MCP_FRAME_BARE_JSON
+        if (framed) expected_framing = MCP_FRAME_CONTENT_LENGTH
+        call mcp_read_message(message, len(message), framing, eof, status, &
+            timeout_ms=100)
+        if (eof .or. status /= MCP_READ_TIMEOUT) error stop 'idle read is not a timeout'
+        write(*, '(a)') 'idle'
+        flush(output_unit)
+        call mcp_read_message(message, len(message), framing, eof, status, &
+            timeout_ms=100)
+        if (eof .or. status /= MCP_READ_TIMEOUT) &
+            error stop 'partial read is not a timeout'
+        write(*, '(a)') 'partial'
+        flush(output_unit)
+        if (framed) then
+            call mcp_read_message(message, len(message), framing, eof, status, &
+                timeout_ms=100)
+            if (eof .or. status /= MCP_READ_TIMEOUT) &
+                error stop 'partial body is not retained across timeout'
+            write(*, '(a)') 'body'
+            flush(output_unit)
+        end if
+        ! Existing blocking callers use the same buffered transport without a timeout.
+        call mcp_read_message(message, len(message), framing, eof, status)
+        if (eof .or. status /= 0) error stop 'completed read failed'
+        if (framing /= expected_framing) error stop 'message framing changed'
+        if (framed) then
+            if (trim(message) /= '{"payload":"framed"}') &
+                error stop 'framed bytes changed'
+        else
+            if (trim(message) /= '{"payload":"bare"}') error stop 'bare bytes changed'
+        end if
+        write(*, '(a)') 'complete'
+        flush(output_unit)
+        call mcp_read_message(message, len(message), framing, eof, status, &
+            timeout_ms=3000)
+        if (.not. eof .or. status /= -1) error stop 'closed input is not EOF'
+    end subroutine timed_reader
+
+    subroutine run_timed_reader(framed)
+        logical, intent(in) :: framed
+        type(session_t) :: s
+        character(len=4096) :: self
+        character(len=32) :: length_text
+        character(:), allocatable :: stage, body, mode
+        integer :: spawn_error, code
+        logical :: timed_out
+
+        call get_command_argument(0, self)
+        mode = 'bare'
+        body = '{"payload":"bare"}'
+        if (framed) then
+            mode = 'framed'
+            body = '{"payload":"framed"}'
+        end if
+        call test_process_spawn_piped([character(len=4096) :: trim(self), &
+            '--timed-reader', mode], s%process, .false., spawn_error)
+        call check(spawn_error == 0, 'timed transport reader starts')
+        if (spawn_error /= 0) return
+        s%pending = ''
+        call take_until(s, achar(10), stage)
+        call check(stage == 'idle', 'empty open input times out without EOF')
+        if (framed) then
+            call send_raw(s, 'Content-Len')
+        else
+            call send_raw(s, '{"payload":')
+        end if
+        call take_until(s, achar(10), stage)
+        call check(stage == 'partial', 'partial bytes survive a timed read')
+        if (framed) then
+            write(length_text, '(i0)') len(body)
+            call send_raw(s, 'gth: '//trim(length_text)//achar(13)//achar(10)// &
+                achar(13)//achar(10)//'{"payload":')
+            call take_until(s, achar(10), stage)
+            call check(stage == 'body', 'partial framed body survives a timed read')
+            call send_raw(s, '"framed"}')
+        else
+            call send_raw(s, '"bare"}'//achar(10))
+        end if
+        call take_until(s, achar(10), stage)
+        call check(stage == 'complete', &
+            'blocking read recovers exact partial message bytes')
+        call test_process_close(s%process, 5000, code, timed_out)
+        call check(code == 0 .and. .not. timed_out, 'EOF is distinct from read timeout')
+    end subroutine run_timed_reader
+
     subroutine check(ok,label)
         logical,intent(in)::ok
         character(len=*),intent(in)::label
