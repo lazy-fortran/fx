@@ -8,8 +8,10 @@
 #include <bcrypt.h>
 #elif defined(__APPLE__)
 #include <dlfcn.h>
+#include <pthread.h>
 #else
 #include <dlfcn.h>
+#include <pthread.h>
 #endif
 
 static void hex_encode(const unsigned char in[32], char out[64]) {
@@ -102,16 +104,18 @@ fail:
 }
 #elif defined(__APPLE__)
 typedef unsigned char *(*cc_sha256_fn)(const void *, unsigned int, unsigned char *);
+static pthread_once_t cc_once = PTHREAD_ONCE_INIT;
+static cc_sha256_fn cc_digest = NULL;
+
+static void load_cc_sha256_once(void) {
+    void *handle = dlopen("/usr/lib/system/libcommonCrypto.dylib", RTLD_LAZY);
+    if (!handle) handle = dlopen("/usr/lib/libSystem.dylib", RTLD_LAZY);
+    if (handle) cc_digest = (cc_sha256_fn)dlsym(handle, "CC_SHA256");
+}
 
 static cc_sha256_fn load_cc_sha256(void) {
-    static void *handle = NULL;
-    static cc_sha256_fn fn = NULL;
-    if (fn) return fn;
-    handle = dlopen("/usr/lib/system/libcommonCrypto.dylib", RTLD_LAZY);
-    if (!handle) handle = dlopen("/usr/lib/libSystem.dylib", RTLD_LAZY);
-    if (!handle) return NULL;
-    fn = (cc_sha256_fn)dlsym(handle, "CC_SHA256");
-    return fn;
+    if (pthread_once(&cc_once, load_cc_sha256_once) != 0) return NULL;
+    return cc_digest;
 }
 
 int fx_c_sha256_available(void) {
@@ -129,19 +133,22 @@ int fx_c_sha256_digest(const unsigned char *data, int n, char *out_hex) {
 #else
 typedef unsigned char *(*openssl_sha256_fn)(const unsigned char *, size_t,
                                             unsigned char *);
+static pthread_once_t openssl_once = PTHREAD_ONCE_INIT;
+static openssl_sha256_fn openssl_digest = NULL;
 
-static openssl_sha256_fn load_openssl_sha256(void) {
-    static void *handle = NULL;
-    static openssl_sha256_fn fn = NULL;
+static void load_openssl_sha256_once(void) {
+    void *handle = NULL;
     const char *libs[] = {"libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so", NULL};
-    if (fn) return fn;
     for (int i = 0; libs[i]; ++i) {
         handle = dlopen(libs[i], RTLD_LAZY | RTLD_LOCAL);
         if (handle) break;
     }
-    if (!handle) return NULL;
-    fn = (openssl_sha256_fn)dlsym(handle, "SHA256");
-    return fn;
+    if (handle) openssl_digest = (openssl_sha256_fn)dlsym(handle, "SHA256");
+}
+
+static openssl_sha256_fn load_openssl_sha256(void) {
+    if (pthread_once(&openssl_once, load_openssl_sha256_once) != 0) return NULL;
+    return openssl_digest;
 }
 
 int fx_c_sha256_available(void) {

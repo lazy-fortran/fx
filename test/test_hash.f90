@@ -6,13 +6,15 @@ program test_hash
         test_assert, test_assert_equal_str, &
         test_assert_equal_int
     use fx_hash, only: fnv1a_string, fnv1a_file, xxhash64, xxhash64_file, &
-        sha256_bytes, sha256_string, sha256_file, &
+        sha256_bytes, sha256_string, sha256_file, HASH_SIZE_LIMIT, &
         sha256_init, sha256_update, sha256_final, &
         sha256_hardware_available, sha256_hardware_digest, &
         sha256_state_t, &
         hash_to_hex, hash_combine, &
         hash_state_init, hash_state_update, hash_state_final, &
         hash_state_t
+    use fx_immutable_store, only: immutable_store_hash_file, &
+        IMMUTABLE_OK, IMMUTABLE_IO_ERROR
     use fx_proc, only: proc_file_write, proc_pid
     use fx_test_fs, only: fx_test_temp_root, fx_test_mkdir_p, fx_test_remove_tree
     implicit none
@@ -23,11 +25,13 @@ program test_hash
 
     call test_suite_init(suite, 'fx_hash')
     call setup_fixture()
+    call test_parallel_store_hash(suite)
     call test_fnv1a_known_values(suite)
     call test_fnv1a_file(suite)
     call test_xxhash64(suite)
     call test_sha256(suite)
     call test_native_file_bytes(suite)
+    call test_store_file_hash(suite)
     call test_hash_combine(suite)
     call test_hash_to_hex(suite)
     call test_incremental_hash(suite)
@@ -86,6 +90,25 @@ contains
             'b80ec9b42c78d8643f12c5fd1ba347745'// &
             'ac34a46a09dae0f68c6834cf41bbd9f', digest, &
             'SHA256 matches independent NUL/high-byte/CRLF vector')
+        call sha256_file(path, digest, ierr, max_bytes=6)
+        call test_assert_equal_int(suite, 0, ierr, 'exact byte limit hashes the file')
+        call test_assert_equal_str(suite, &
+            'b80ec9b42c78d8643f12c5fd1ba347745'// &
+            'ac34a46a09dae0f68c6834cf41bbd9f', digest, 'bounded binary SHA256')
+        call sha256_file(path, digest, ierr, max_bytes=5)
+        call test_assert_equal_int(suite, HASH_SIZE_LIMIT, ierr, &
+            'oversize native file reports the allocation limit')
+        call test_assert(suite, len_trim(digest) == 0, &
+            'size limit yields no prefix hash')
+        call sha256_file(path, digest, ierr, max_bytes=-1)
+        call test_assert(suite, ierr /= 0 .and. len_trim(digest) == 0, &
+            'negative byte limit returns an error and no hash')
+        call immutable_store_hash_file(path, digest, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'store hash reads the complete native path')
+        call test_assert_equal_str(suite, &
+            'b80ec9b42c78d8643f12c5fd1ba347745'// &
+            'ac34a46a09dae0f68c6834cf41bbd9f', digest, 'store binary SHA256 vector')
         call fnv1a_file(path, hash, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'FNV reads native long path')
         call test_assert(suite, hash == fnv1a_string(payload), 'FNV preserves bytes')
@@ -105,6 +128,18 @@ contains
         call test_assert_equal_str(suite, &
             'e3b0c44298fc1c149afbf4c8996fb924'// &
             '27ae41e4649b934ca495991b7852b855', digest, 'empty native hash vector')
+        call sha256_file(path, digest, ierr, max_bytes=0)
+        call test_assert_equal_int(suite, 0, ierr, &
+            'zero-byte bound accepts an empty file')
+        call test_assert_equal_str(suite, &
+            'e3b0c44298fc1c149afbf4c8996fb924'// &
+            '27ae41e4649b934ca495991b7852b855', digest, 'bounded empty SHA256')
+        call immutable_store_hash_file(path, digest, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'store hashes an empty file')
+        call test_assert_equal_str(suite, &
+            'e3b0c44298fc1c149afbf4c8996fb924'// &
+            '27ae41e4649b934ca495991b7852b855', digest, 'store empty SHA256 vector')
         call sha256_file(directory, digest, ierr)
         call test_assert(suite, ierr /= 0 .and. len_trim(digest) == 0, &
             'directory is an error rather than an empty file')
@@ -112,6 +147,76 @@ contains
         call test_assert(suite, ierr /= 0 .and. len_trim(digest) == 0, &
             'missing long path returns an error and empty digest')
     end subroutine test_native_file_bytes
+
+    subroutine test_parallel_store_hash(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=64) :: digests(8)
+        integer :: errors(8), ierr, i
+
+        call proc_file_write(root//'/parallel-store-hash', 'foo', 3, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'write concurrent hash input')
+        !$omp parallel do num_threads(4) private(i)
+        do i = 1, size(digests)
+            call immutable_store_hash_file(root//'/parallel-store-hash', &
+                digests(i), errors(i))
+        end do
+        !$omp end parallel do
+        do i = 1, size(digests)
+            call test_assert_equal_int(suite, IMMUTABLE_OK, errors(i), &
+                'concurrent cold file hash succeeds')
+            call test_assert_equal_str(suite, &
+                '2c26b46b68ffc68ff99b453c1d304134'// &
+                '13422d706483bfa0f98a5e886266e7ae', digests(i), &
+                'concurrent hashes match the independent literal vector')
+        end do
+    end subroutine test_parallel_store_hash
+
+    subroutine test_store_file_hash(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=64) :: digest
+        character(:), allocatable :: payload, path
+        integer :: ierr
+
+        path = root//'/fresh-store-hash'
+        call proc_file_write(path, 'foo', 3, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'write first image bytes')
+        call immutable_store_hash_file(path, digest, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'hash first image')
+        call test_assert_equal_str(suite, &
+            '2c26b46b68ffc68ff99b453c1d304134'// &
+            '13422d706483bfa0f98a5e886266e7ae', digest, 'first literal image vector')
+        call proc_file_write(path, 'bar', 3, ierr)
+        call test_assert_equal_int(suite, 0, ierr, &
+            'replace with same-length image bytes')
+        call immutable_store_hash_file(path, digest, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'rehash current image')
+        call test_assert_equal_str(suite, &
+            'fcde2b2edba56bf408601fb721fe9b5c'// &
+            '338d10ee429ea04fae5511b68fbf8fb9', digest, 'fresh replacement vector')
+        call immutable_store_hash_file(root, digest, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_IO_ERROR, ierr, &
+            'store directory hash is an IO error')
+        call test_assert(suite, len_trim(digest) == 0, 'directory yields no digest')
+        call immutable_store_hash_file(root//'/missing', digest, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_IO_ERROR, ierr, &
+            'store missing file maps to IO error')
+        call test_assert(suite, len_trim(digest) == 0, 'missing file yields no digest')
+
+        ! GNU sha256sum of 16 MiB + 1 NUL bytes fixes the expected digest
+        ! independently of both fx hash implementations and their dispatch.
+        payload = repeat(achar(0), 16 * 1024 * 1024 + 1)
+        path = root//'/large-store-hash'
+        call proc_file_write(path, payload, len(payload), ierr)
+        deallocate(payload)
+        call test_assert_equal_int(suite, 0, ierr, &
+            'write larger-than-bulk binary image')
+        call immutable_store_hash_file(path, digest, ierr)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'bounded streaming hashes the complete larger image')
+        call test_assert_equal_str(suite, &
+            '1003b1b5dc078189799a1216ce0f9fbc'// &
+            'ebb94e8b6b83c58c4b03345f07f94ced', digest, 'large native reference vector')
+    end subroutine test_store_file_hash
 
     subroutine test_fnv1a_known_values(suite)
         type(test_suite_t), intent(inout) :: suite

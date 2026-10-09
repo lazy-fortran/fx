@@ -3,7 +3,8 @@ module fx_immutable_store
         c_null_char, c_ptr, c_associated
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_path, only: path_normalize
-    use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t
+    use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t, &
+        sha256_file, sha256_hardware_available, HASH_SIZE_LIMIT
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_close, owned_begin_path, owned_dispose, owned_materialize_blob, &
         owned_begin_path_ephemeral, owned_materialize_blob_ephemeral, &
@@ -23,6 +24,7 @@ module fx_immutable_store
     integer, parameter :: PATH_LIMIT = 4096
     integer, parameter :: HASH_LEN = 64
     integer, parameter :: HASH_BLOCK = 65536
+    integer, parameter :: HASH_ACCELERATED_LIMIT = 16 * 1024 * 1024
     integer, parameter :: DEFAULT_DIR_MODE = 493
 
     type, public :: immutable_store_t
@@ -629,8 +631,20 @@ contains
         integer :: unit, ios, chunk
 
         digest = ''
-        inquire(file=path, size=remaining, iostat=ios)
         ierr = IMMUTABLE_IO_ERROR
+        ! The shared native reader checks the bound before allocating, including
+        ! when the path was replaced after an earlier caller's size probe. Its
+        ! input plus accelerator copy use at most 32 MiB; larger files retain
+        ! the existing fixed-block streaming path and no mandatory native library.
+        if (sha256_hardware_available()) then
+            call sha256_file(path, digest, ios, max_bytes=HASH_ACCELERATED_LIMIT)
+            if (ios == 0) then
+                ierr = IMMUTABLE_OK
+                return
+            end if
+            if (ios /= HASH_SIZE_LIMIT) return
+        end if
+        inquire(file=path, size=remaining, iostat=ios)
         if (ios /= 0 .or. remaining < 0_int64) return
         allocate(bytes(HASH_BLOCK))
         open(newunit=unit, file=path, status='old', access='stream', &

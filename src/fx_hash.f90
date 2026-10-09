@@ -6,6 +6,7 @@ module fx_hash
 
     integer(int64), parameter :: FNV_OFFSET = -3750763034362895579_int64
     integer(int64), parameter :: FNV_PRIME = 1099511628211_int64
+    integer, parameter, public :: HASH_SIZE_LIMIT = 2
 
     integer(int64), parameter :: XXH_PRIME64_1 = -7046029288634856825_int64
     integer(int64), parameter :: XXH_PRIME64_2 = -4417276706812531889_int64
@@ -253,15 +254,18 @@ contains
         hex = sha256_bytes(bytes, len(s))
     end function sha256_string
 
-    subroutine sha256_file(path, hex, ierr)
+    subroutine sha256_file(path, hex, ierr, max_bytes)
+        !! max_bytes bounds bulk allocation; HASH_SIZE_LIMIT permits a caller
+        !! to choose a bounded streaming path for a larger native file.
         character(len=*), intent(in) :: path
         character(len=64), intent(out) :: hex
         integer, intent(out) :: ierr
+        integer, intent(in), optional :: max_bytes
 
         character(len=1), allocatable :: bytes(:)
         integer :: n_bytes
 
-        call load_file_bytes(path, bytes, n_bytes, ierr)
+        call load_file_bytes(path, bytes, n_bytes, ierr, max_bytes)
         if (ierr /= 0) then
             hex = ''
             return
@@ -619,11 +623,12 @@ contains
         end do
     end function xxh64_read_u32
 
-    subroutine load_file_bytes(path, bytes, n_bytes, ierr)
+    subroutine load_file_bytes(path, bytes, n_bytes, ierr, max_bytes)
         character(len=*), intent(in) :: path
         character(len=1), allocatable, intent(out) :: bytes(:)
         integer, intent(out) :: n_bytes
         integer, intent(out) :: ierr
+        integer, intent(in), optional :: max_bytes
         character(kind=c_char, len=:), allocatable :: c_path
         integer(c_long_long) :: file_size, mtime
         integer(c_int) :: status, count
@@ -640,12 +645,26 @@ contains
             allocate (bytes(0))
             return
         end if
-        if (file_size < 0_c_long_long .or. &
-            file_size > int(huge(count), c_long_long)) then
+        if (file_size < 0_c_long_long) then
             allocate (bytes(0))
             return
         end if
         if (c_path_is_dir(c_path) /= 0_c_int) then
+            allocate (bytes(0))
+            return
+        end if
+        if (present(max_bytes)) then
+            if (max_bytes < 0) then
+                allocate (bytes(0))
+                return
+            end if
+            if (file_size > int(max_bytes, c_long_long)) then
+                allocate (bytes(0))
+                ierr = HASH_SIZE_LIMIT
+                return
+            end if
+        end if
+        if (file_size > int(huge(count), c_long_long)) then
             allocate (bytes(0))
             return
         end if
