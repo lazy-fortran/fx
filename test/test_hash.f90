@@ -1,10 +1,11 @@
 program test_hash
+    use, intrinsic :: iso_c_binding, only: c_char, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_test, only: test_suite_t, test_suite_init, &
         test_suite_summary, test_suite_exit, &
         test_assert, test_assert_equal_str, &
         test_assert_equal_int
-    use fx_hash, only: fnv1a_string, fnv1a_file, xxhash64, &
+    use fx_hash, only: fnv1a_string, fnv1a_file, xxhash64, xxhash64_file, &
         sha256_bytes, sha256_string, sha256_file, &
         sha256_init, sha256_update, sha256_final, &
         sha256_hardware_available, sha256_hardware_digest, &
@@ -12,22 +13,105 @@ program test_hash
         hash_to_hex, hash_combine, &
         hash_state_init, hash_state_update, hash_state_final, &
         hash_state_t
+    use fx_proc, only: proc_file_write, proc_pid
+    use fx_test_fs, only: fx_test_temp_root, fx_test_mkdir_p, fx_test_remove_tree
     implicit none
 
     type(test_suite_t) :: suite
+    character(:), allocatable :: root
+    integer :: cleanup_status
 
     call test_suite_init(suite, 'fx_hash')
+    call setup_fixture()
     call test_fnv1a_known_values(suite)
     call test_fnv1a_file(suite)
     call test_xxhash64(suite)
     call test_sha256(suite)
+    call test_native_file_bytes(suite)
     call test_hash_combine(suite)
     call test_hash_to_hex(suite)
     call test_incremental_hash(suite)
+    cleanup_status = fx_test_remove_tree(root)
+    call test_assert_equal_int(suite, 0, cleanup_status, 'remove owned hash fixture')
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
 contains
+
+    subroutine setup_fixture()
+        character(kind=c_char) :: native_temporary(4096)
+        character(len=4096) :: temporary
+        character(len=32) :: pid
+        integer :: ierr, i
+
+        call get_environment_variable('TMPDIR', temporary, status=ierr)
+        if (ierr /= 0 .or. len_trim(temporary) == 0) then
+            ierr = fx_test_temp_root(native_temporary, size(native_temporary))
+            call test_assert_equal_int(suite, 0, ierr, 'resolve native temporary root')
+            if (ierr /= 0) call test_suite_exit(suite)
+            temporary = ''
+            do i = 1, size(native_temporary)
+                if (native_temporary(i) == c_null_char) exit
+                temporary(i:i) = native_temporary(i)
+            end do
+        end if
+        write (pid, '(i0)') proc_pid()
+        root = trim(temporary)//'/fx-hash-'//trim(pid)
+        ierr = fx_test_mkdir_p(root)
+        call test_assert_equal_int(suite, 0, ierr, 'create owned hash fixture')
+        if (ierr /= 0) call test_suite_exit(suite)
+    end subroutine setup_fixture
+
+    subroutine test_native_file_bytes(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(:), allocatable :: directory, path, payload
+        character(len=64) :: digest
+        character :: bytes(6)
+        integer(int64) :: hash
+        integer :: ierr, i
+
+        directory = root//'/café-試驗'
+        do while (len(directory) < 530)
+            directory = directory//'/'//repeat('d', 48)
+        end do
+        ierr = fx_test_mkdir_p(directory)
+        call test_assert_equal_int(suite, 0, ierr, 'create long Unicode hash path')
+        path = directory//'/binary'
+        payload = 'f'//achar(0)//'o'//achar(255)//achar(13)//achar(10)
+        call proc_file_write(path, payload, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'write exact native binary bytes')
+        call sha256_file(path, digest, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'hash complete long Unicode path')
+        call test_assert_equal_str(suite, &
+            'b80ec9b42c78d8643f12c5fd1ba347745'// &
+            'ac34a46a09dae0f68c6834cf41bbd9f', digest, &
+            'SHA256 matches independent NUL/high-byte/CRLF vector')
+        call fnv1a_file(path, hash, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'FNV reads native long path')
+        call test_assert(suite, hash == fnv1a_string(payload), 'FNV preserves bytes')
+        do i = 1, size(bytes)
+            bytes(i) = payload(i:i)
+        end do
+        call xxhash64_file(path, hash, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'XXH reads native long path')
+        call test_assert(suite, hash == xxhash64(bytes, size(bytes), 0_int64), &
+            'XXH preserves bytes')
+
+        path = directory//'/empty'
+        call proc_file_write(path, '', ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'write native empty file')
+        call sha256_file(path, digest, ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'hash native empty file')
+        call test_assert_equal_str(suite, &
+            'e3b0c44298fc1c149afbf4c8996fb924'// &
+            '27ae41e4649b934ca495991b7852b855', digest, 'empty native hash vector')
+        call sha256_file(directory, digest, ierr)
+        call test_assert(suite, ierr /= 0 .and. len_trim(digest) == 0, &
+            'directory is an error rather than an empty file')
+        call sha256_file(directory//'/missing', digest, ierr)
+        call test_assert(suite, ierr /= 0 .and. len_trim(digest) == 0, &
+            'missing long path returns an error and empty digest')
+    end subroutine test_native_file_bytes
 
     subroutine test_fnv1a_known_values(suite)
         type(test_suite_t), intent(inout) :: suite
@@ -54,21 +138,19 @@ contains
     subroutine test_fnv1a_file(suite)
         type(test_suite_t), intent(inout) :: suite
         integer(int64) :: h_file, h_str
-        integer :: ierr, unit
+        integer :: ierr
 
         ! Write known content to a temp file
-        open (newunit=unit, file='/tmp/fx_test_hash_fnv1a.bin', &
-            access='stream', form='unformatted', status='replace')
-        write (unit) 'foobar'
-        close (unit)
+        call proc_file_write(root//'/fnv1a.bin', 'foobar', ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'write FNV fixture')
 
-        call fnv1a_file('/tmp/fx_test_hash_fnv1a.bin', h_file, ierr)
+        call fnv1a_file(root//'/fnv1a.bin', h_file, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'fnv1a_file: no error')
         h_str = fnv1a_string('foobar')
         call test_assert(suite, h_file == h_str, 'fnv1a_file: matches string hash')
 
         ! Non-existent file returns error
-        call fnv1a_file('/tmp/fx_nonexistent_xyz.bin', h_file, ierr)
+        call fnv1a_file(root//'/missing-fnv.bin', h_file, ierr)
         call test_assert(suite, ierr /= 0, 'fnv1a_file: error on missing file')
     end subroutine test_fnv1a_file
 
@@ -119,7 +201,7 @@ contains
         character(len=64) :: h_hw
         type(sha256_state_t) :: state
         character(len=1) :: chunk(3)
-        integer :: ierr, unit, i
+        integer :: ierr, i
 
         allocate (data(0))
         h_empty = sha256_bytes(data, 0)
@@ -150,11 +232,9 @@ contains
         call test_assert_equal_str(suite, h_foo, h_stream, &
             'sha256: streaming chunks match one-shot')
 
-        open (newunit=unit, file='/tmp/fx_test_hash_wide.bin', &
-            access='stream', form='unformatted', status='replace')
-        write (unit) 'foo'
-        close (unit)
-        call sha256_file('/tmp/fx_test_hash_wide.bin', h_file, ierr)
+        call proc_file_write(root//'/wide.bin', 'foo', ierr)
+        call test_assert_equal_int(suite, 0, ierr, 'write SHA fixture')
+        call sha256_file(root//'/wide.bin', h_file, ierr)
         call test_assert_equal_int(suite, 0, ierr, 'sha256_file: no error')
         call test_assert_equal_str(suite, h_foo, h_file, &
             'sha256_file: matches string hash')
@@ -168,7 +248,7 @@ contains
                 'sha256: lowercase hex chars')
         end do
 
-        call sha256_file('/tmp/fx_missing_wide_hash.bin', h_file, ierr)
+        call sha256_file(root//'/missing-sha.bin', h_file, ierr)
         call test_assert(suite, ierr /= 0, 'sha256_file: missing file errors')
         chunk(1) = 'f'; chunk(2) = 'o'; chunk(3) = 'o'
         if (sha256_hardware_available()) then

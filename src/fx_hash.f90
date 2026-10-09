@@ -1,5 +1,5 @@
 module fx_hash
-    use, intrinsic :: iso_c_binding, only: c_char, c_int
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     private
@@ -41,6 +41,27 @@ module fx_hash
     public :: hash_state_init, hash_state_update, hash_state_final
 
     interface
+        integer(c_int) function c_file_stat(path, size_bytes, mtime) &
+                bind(C, name='fx_c_file_stat')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: size_bytes, mtime
+        end function c_file_stat
+
+        integer(c_int) function c_file_read(path, bytes, n) &
+                bind(C, name='fx_c_file_read')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: bytes(*)
+            integer(c_int), intent(inout) :: n
+        end function c_file_read
+
+        integer(c_int) function c_path_is_dir(path) &
+                bind(C, name='fx_c_path_is_dir')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function c_path_is_dir
+
         integer(c_int) function fx_c_sha256_available() bind(C)
             import :: c_int
         end function fx_c_sha256_available
@@ -603,50 +624,41 @@ contains
         character(len=1), allocatable, intent(out) :: bytes(:)
         integer, intent(out) :: n_bytes
         integer, intent(out) :: ierr
-        integer :: unit
-        integer :: ios
-        logical :: exists
+        character(kind=c_char, len=:), allocatable :: c_path
+        integer(c_long_long) :: file_size, mtime
+        integer(c_int) :: status, count
 
-        inquire (file=trim(path), exist=exists)
-        if (.not. exists) then
-            ierr = 1
-            n_bytes = 0
+        ierr = 1
+        n_bytes = 0
+        if (index(path, c_null_char) /= 0) then
             allocate (bytes(0))
             return
         end if
-
-        inquire (file=trim(path), size=n_bytes)
-        if (n_bytes < 0) then
-            ierr = 1
+        c_path = trim(path)//c_null_char
+        status = c_file_stat(c_path, file_size, mtime)
+        if (status /= 0_c_int) then
             allocate (bytes(0))
-            n_bytes = 0
             return
         end if
-
-        allocate (bytes(max(n_bytes, 0)))
-        open (newunit=unit, file=trim(path), access='stream', &
-            form='unformatted', status='old', action='read', &
-            iostat=ios)
-        if (ios /= 0) then
-            ierr = 1
-            if (allocated(bytes)) deallocate (bytes)
+        if (file_size < 0_c_long_long .or. &
+            file_size > int(huge(count), c_long_long)) then
             allocate (bytes(0))
-            n_bytes = 0
             return
         end if
-
-        if (n_bytes > 0) then
-            read (unit, iostat=ios) bytes(1:n_bytes)
+        if (c_path_is_dir(c_path) /= 0_c_int) then
+            allocate (bytes(0))
+            return
         end if
-        close (unit)
-        if (ios /= 0) then
-            ierr = 1
-            if (allocated(bytes)) deallocate (bytes)
+        count = int(file_size, c_int)
+        n_bytes = int(count)
+        allocate (bytes(n_bytes))
+        status = c_file_read(c_path, bytes, count)
+        if (status /= 0_c_int .or. int(count) /= n_bytes) then
+            deallocate (bytes)
             allocate (bytes(0))
             n_bytes = 0
             return
         end if
-
         ierr = 0
     end subroutine load_file_bytes
 
