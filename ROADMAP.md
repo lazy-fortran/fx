@@ -38,6 +38,16 @@ their actual unresolved goals, not instructions to recreate finished work.
 
 ## Delivery
 
+2026-10-09 final Fo delivery: `4b92f1e` exposes actual dated CAS pressure
+samples (two owning cases pass). `7282d45` accelerates bounded immutable file
+hashing through the existing native authority, with thread-safe initialization
+and a streaming fallback. Three owning cases and an explicit OpenMP hash case
+pass; the original three Fo check/impact/receipt cases pass at their unchanged
+limits. Impact completes in 13.85 seconds wall within its 10-second CPU budget.
+Darwin's giant compile-time fixture constant is replaced by identical runtime
+allocation in `9ec49fb`; the original OpenMP hash case passes. These are focused
+repairs, not complete #57/storage-policy qualification or code-reduction claims.
+
 The 2026-10-08 LSP increment replaces save/change callbacks with one document
 diagnostic callback and migrates Fo in the same delivery. The shared reader
 debounces per URI/version, drains queued edits before publication and clears
