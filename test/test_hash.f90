@@ -175,7 +175,7 @@ contains
         type(test_suite_t), intent(inout) :: suite
         character(len=64) :: digest
         character(:), allocatable :: payload, path
-        integer :: ierr
+        integer :: ierr, byte_index
 
         path = root//'/fresh-store-hash'
         call proc_file_write(path, 'foo', 3, ierr)
@@ -204,7 +204,10 @@ contains
 
         ! GNU sha256sum of 16 MiB + 1 NUL bytes fixes the expected digest
         ! independently of both fx hash implementations and their dispatch.
-        payload = repeat(achar(0), 16 * 1024 * 1024 + 1)
+        allocate(character(len=16 * 1024 * 1024 + 1) :: payload)
+        do byte_index = 1, len(payload)
+            payload(byte_index:byte_index) = achar(0)
+        end do
         path = root//'/large-store-hash'
         call proc_file_write(path, payload, len(payload), ierr)
         deallocate(payload)
