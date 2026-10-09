@@ -54,6 +54,21 @@ module fx_action_result_store
         logical :: active = .false.
     end type action_result_read_t
 
+    !! A sample exists only when this tick actually attempts CAS collection.
+    !! Allocated bytes precede deletion; reclaimed bytes belong to that pass.
+    !! CAS block counts exclude materializations and can include shared extents.
+    type, public :: action_result_pressure_t
+        logical :: sampled = .false.
+        logical :: complete = .false.
+        integer(int64) :: sampled_at = 0_int64
+        integer :: status = IMMUTABLE_OK
+        integer :: objects = 0
+        integer(int64) :: allocated_bytes = 0_int64
+        integer(int64) :: reclaimed_bytes = 0_int64
+        integer(int64) :: pressure_bytes = 8589934592_int64
+        integer :: pressure_objects = 100000
+    end type action_result_pressure_t
+
     public :: action_result_store_init, action_result_put_blob
     public :: action_result_publish, action_result_publish_files
     public :: action_result_lookup, action_result_conflicts
@@ -535,7 +550,7 @@ contains
 
     subroutine action_result_maintenance_tick(store, scanned, retired, deleted, &
             ierr, max_scan, min_age_seconds, pressure_bytes, pressure_objects, &
-            max_delete, gc_interval_seconds)
+            max_delete, gc_interval_seconds, pressure)
         !! Run a persistent sweep. max_scan caps action directory entries and
         !! shard steps; GC separately inventories up to one million CAS objects.
         !! A busy owner skips without waiting. Fo calls this at owner start/stop.
@@ -544,6 +559,7 @@ contains
         integer, intent(in), optional :: max_scan, pressure_objects, max_delete
         integer(int64), intent(in), optional :: min_age_seconds, &
             pressure_bytes, gc_interval_seconds
+        type(action_result_pressure_t), intent(out), optional :: pressure
         integer(c_int) :: owner, shard, budget, status, end_status
         integer(c_long_long) :: offset, last_scan, last_gc, now
         character(kind=c_char) :: key_bytes(65)
@@ -558,6 +574,7 @@ contains
         retired = 0
         deleted = 0
         ierr = ACTION_RESULT_INVALID
+        if (present(pressure)) pressure = action_result_pressure_t()
         if (.not. store%initialized) return
         scan_cap = 64
         if (present(max_scan)) scan_cap = max_scan
@@ -571,6 +588,10 @@ contains
         if (present(pressure_bytes)) byte_cap = pressure_bytes
         gc_interval = 3600_int64
         if (present(gc_interval_seconds)) gc_interval = gc_interval_seconds
+        if (present(pressure)) then
+            pressure%pressure_bytes = byte_cap
+            pressure%pressure_objects = object_cap
+        end if
         if (scan_cap < 1 .or. scan_cap > 4096 .or. delete_cap < 0 .or. &
             delete_cap > 4096 .or. object_cap < 0 .or. age_floor < 0 .or. &
             byte_cap < 0 .or. gc_interval < 0 .or. &
@@ -615,6 +636,15 @@ contains
             call immutable_store_collect(store%objects, 1000000, delete_cap, &
                 age_floor, byte_cap, object_cap, objects_scanned, &
                 allocated_bytes, deleted, reclaimed_bytes, collected_status)
+            if (present(pressure)) then
+                pressure%sampled = .true.
+                pressure%complete = collected_status == IMMUTABLE_OK
+                pressure%sampled_at = int(now, int64)
+                pressure%status = collected_status
+                pressure%objects = objects_scanned
+                pressure%allocated_bytes = allocated_bytes
+                pressure%reclaimed_bytes = reclaimed_bytes
+            end if
             if (collected_status == IMMUTABLE_GC_CHANGED) then
                 ierr = ACTION_RESULT_OK
                 goto 900

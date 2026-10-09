@@ -16,19 +16,20 @@ program test_action_result_store
     use fx_immutable_store, only: immutable_tree_entry_t, immutable_lease_t, &
         immutable_store_blob_path, immutable_store_root_set, &
         immutable_store_reason_release, &
-        immutable_store_publication_lease_acquire, immutable_store_lease_release
+        immutable_store_publication_lease_acquire, immutable_store_lease_release, &
+        immutable_store_read_lease_acquire
     use fx_immutable_tree, only: immutable_store_verify_tree
-    use fx_immutable_constants, only: IMMUTABLE_OK
+    use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_IO_ERROR
     use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_publish_files, &
         action_result_lookup, action_result_conflicts, &
-        action_result_maintenance_tick, &
+        action_result_maintenance_tick, action_result_pressure_t, &
         action_result_retire, action_result_retire_key, action_result_read_t, &
         action_result_read_acquire, action_result_read_release, &
         action_result_put_blob, action_result_publish, &
         action_result_materialize_blob, ACTION_RESULT_OK, &
         ACTION_RESULT_CONFLICT, ACTION_RESULT_QUARANTINED, &
-        ACTION_RESULT_MISSING, ACTION_RESULT_CORRUPT, &
+        ACTION_RESULT_MISSING, ACTION_RESULT_CORRUPT, ACTION_RESULT_IO_ERROR, &
         action_result_action_key, action_result_action_key_parts, &
         action_result_compile_action_key
     implicit none
@@ -133,19 +134,21 @@ contains
 
     subroutine test_automatic_maintenance()
         type(action_result_store_t) :: maintained, reopened
-        type(immutable_lease_t) :: pending_lease
+        type(immutable_lease_t) :: pending_lease, reading_lease
+        type(action_result_pressure_t) :: pressure
         type(publication_probe_t) :: publisher_probe
         type(immutable_tree_entry_t) :: entry(1)
         type(immutable_tree_entry_t), allocatable :: found_entries(:)
-        character(len=512) :: source(1), path
+        character(len=512) :: source(1), path, reader_ready, reader_release
+        character(len=512) :: invalid_entry
         character(len=64) :: result_id, found_id, cold_key, hot_key, crash_key
-        character(len=64) :: rooted_blob, orphan_blob, pending_blob, ids(1)
+        character(len=64) :: rooted_blob, orphan_blob, pending_blob, read_blob, ids(1)
         character(len=64) :: observed_pending
         character(len=4) :: kinds(1)
         character(len=:), allocatable :: marker
-        integer :: status, scanned, retired, deleted, total_retired, i
+        integer :: status, scanned, retired, deleted, total_retired, i, unit
         integer :: hot_shard
-        integer(c_int) :: owner, child, child_status, waited
+        integer(c_int) :: owner, child, child_status, waited, reader_child
         logical :: exists
 
         call action_result_store_init(maintained, &
@@ -183,11 +186,15 @@ contains
         owner = maintenance_begin(trim(maintained%root_dir)//c_null_char)
         call test_assert(suite, owner >= 0_c_int, 'first owner admits')
         call action_result_maintenance_tick(maintained, scanned, retired, &
-            deleted, status, max_scan=2, gc_interval_seconds=huge(0_c_long_long))
+            deleted, status, max_scan=2, gc_interval_seconds=huge(0_c_long_long), &
+            pressure=pressure)
         call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
             'second owner skips busy maintenance')
         call test_assert_equal_int(suite, 0, scanned, &
             'busy owner does not scan')
+        call test_assert(suite, .not. pressure%sampled .and. &
+            .not. pressure%complete .and. pressure%sampled_at == 0_c_long_long, &
+            'busy owner reports no invented CAS sample')
         if (owner >= 0_c_int) then
             status = maintenance_end(owner)
             call test_assert_equal_int(suite, 0, status, 'first owner releases')
@@ -296,7 +303,7 @@ contains
         call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
             'locked action remains readable')
 
-        call write_text(trim(source(1)), 'rooted maintenance bytes')
+        call write_text(trim(source(1)), repeat('r', 65536))
         call action_result_put_blob(reopened, trim(source(1)), rooted_blob, &
             status)
         call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
@@ -309,7 +316,7 @@ contains
             'build', kinds, ids, status)
         call test_assert_equal_int(suite, IMMUTABLE_OK, status, &
             'two worktree versions retain blob')
-        call write_text(trim(source(1)), 'pending maintenance bytes')
+        call write_text(trim(source(1)), repeat('p', 65536))
         call action_result_put_blob(reopened, trim(source(1)), pending_blob, &
             status)
         ids(1) = pending_blob
@@ -317,15 +324,47 @@ contains
             'publisher', 'v1', 'pending', kinds, ids, pending_lease, status)
         call test_assert_equal_int(suite, IMMUTABLE_OK, status, &
             'pending publication leases blob')
+        call write_text(trim(source(1)), repeat('d', 65536))
+        call action_result_put_blob(reopened, trim(source(1)), read_blob, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'independent reader blob publishes')
+        reader_ready = trim(root)//'/pressure-reader-ready'
+        reader_release = trim(root)//'/pressure-reader-release'
+        reader_child = fork_process()
+        call test_assert(suite, reader_child >= 0_c_int, &
+            'independent pressure reader forks')
+        if (reader_child == 0_c_int) then
+            call immutable_store_read_lease_acquire(reopened%objects, &
+                'pressure-reader', 'v1', 'materialize', 'blob', read_blob, &
+                reading_lease, status)
+            if (status /= IMMUTABLE_OK) call exit_child(61_c_int)
+            call write_text(trim(reader_ready), 'leased')
+            call wait_for_file(trim(reader_release))
+            call immutable_store_lease_release(reopened%objects, &
+                reading_lease, status)
+            if (status /= IMMUTABLE_OK) call exit_child(62_c_int)
+            call exit_child(0_c_int)
+        end if
+        if (reader_child > 0_c_int) call wait_for_file(trim(reader_ready))
         call write_text(trim(source(1)), 'orphan maintenance bytes')
         call action_result_put_blob(reopened, trim(source(1)), orphan_blob, &
             status)
         call action_result_maintenance_tick(reopened, scanned, retired, &
             deleted, status, max_scan=1, max_delete=100, &
-            min_age_seconds=0_c_long_long, pressure_bytes=0_c_long_long, &
-            pressure_objects=0, gc_interval_seconds=0_c_long_long)
+            min_age_seconds=0_c_long_long, pressure_bytes=1_c_long_long, &
+            pressure_objects=0, gc_interval_seconds=0_c_long_long, pressure=pressure)
         call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
             'pressure tick collects through lease-aware GC')
+        call test_assert(suite, pressure%sampled .and. pressure%complete .and. &
+            pressure%sampled_at > 0_c_long_long .and. pressure%objects >= 4, &
+            'actual collection reports a dated complete inventory')
+        call test_assert_equal_int(suite, IMMUTABLE_OK, pressure%status, &
+            'complete pressure sample records collector success')
+        call test_assert(suite, pressure%reclaimed_bytes > 0_c_long_long .and. &
+            pressure%allocated_bytes - pressure%reclaimed_bytes > &
+            pressure%pressure_bytes .and. pressure%pressure_bytes == 1_c_long_long &
+            .and. pressure%pressure_objects == 0, &
+            'rooted and leased bytes remain visibly above the configured budget')
         path = immutable_store_blob_path(reopened%objects, orphan_blob)
         inquire(file=trim(path), exist=exists)
         call test_assert(suite, .not. exists, 'unrooted blob is reclaimed')
@@ -335,6 +374,43 @@ contains
         path = immutable_store_blob_path(reopened%objects, pending_blob)
         inquire(file=trim(path), exist=exists)
         call test_assert(suite, exists, 'active publication protects blob')
+        path = immutable_store_blob_path(reopened%objects, read_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, exists, 'independent live read lease protects blob')
+
+        ! A reopened non-due tick must let its caller retain the prior sample.
+        ! An invalid CAS entry independently detects an accidental extra scan.
+        path = immutable_store_blob_path(reopened%objects, rooted_blob)
+        invalid_entry = path(:len_trim(path) - 64)//'invalid-pressure-entry'
+        call write_text(trim(invalid_entry), 'invalid CAS inventory fixture')
+        call action_result_store_init(maintained, reopened%root_dir, status)
+        call action_result_maintenance_tick(maintained, scanned, retired, &
+            deleted, status, max_scan=1, pressure_bytes=1_c_long_long, &
+            pressure_objects=0, gc_interval_seconds=huge(0_c_long_long), &
+            pressure=pressure)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'reopened warm maintenance succeeds without another collection')
+        call test_assert(suite, .not. pressure%sampled .and. &
+            .not. pressure%complete .and. pressure%sampled_at == 0_c_long_long, &
+            'warm skipped collection never presents a current valid zero')
+
+        call action_result_maintenance_tick(reopened, scanned, retired, &
+            deleted, status, max_scan=1, max_delete=100, &
+            min_age_seconds=0_c_long_long, pressure_bytes=1_c_long_long, &
+            pressure_objects=0, gc_interval_seconds=0_c_long_long, pressure=pressure)
+        call test_assert_equal_int(suite, ACTION_RESULT_IO_ERROR, status, &
+            'incomplete CAS inventory reports maintenance failure')
+        call test_assert(suite, pressure%sampled .and. .not. pressure%complete &
+            .and. pressure%sampled_at > 0_c_long_long, &
+            'failed inventory is an explicit dated incomplete attempt')
+        call test_assert_equal_int(suite, IMMUTABLE_IO_ERROR, pressure%status, &
+            'incomplete attempt exposes the actual collector error')
+        call test_assert_equal_int(suite, 0, deleted, &
+            'incomplete pressure inventory deletes nothing')
+        open(newunit=unit, file=trim(invalid_entry), status='old', iostat=status)
+        if (status == 0) close(unit, status='delete', iostat=status)
+        call test_assert_equal_int(suite, 0, status, &
+            'owned malformed inventory fixture is removed')
         call immutable_store_reason_release(reopened%objects, 'worktree', &
             'v1', 'build', status)
         call action_result_maintenance_tick(reopened, scanned, retired, &
@@ -348,10 +424,18 @@ contains
             'v2', 'build', status)
         call immutable_store_lease_release(reopened%objects, pending_lease, &
             status)
+        call write_text(trim(reader_release), 'release')
+        if (reader_child > 0_c_int) then
+            call bounded_child_wait(reader_child, child_status, waited)
+            call test_assert_equal_int(suite, int(reader_child), int(waited), &
+                'independent pressure reader is reaped')
+            call test_assert_equal_int(suite, 0, int(child_status), &
+                'independent pressure reader releases its lease')
+        end if
         call action_result_maintenance_tick(reopened, scanned, retired, &
             deleted, status, max_scan=1, max_delete=100, &
             min_age_seconds=0_c_long_long, pressure_bytes=0_c_long_long, &
-            pressure_objects=0, gc_interval_seconds=0_c_long_long)
+            pressure_objects=0, gc_interval_seconds=0_c_long_long, pressure=pressure)
         path = immutable_store_blob_path(reopened%objects, rooted_blob)
         inquire(file=trim(path), exist=exists)
         call test_assert(suite, .not. exists, &
@@ -360,10 +444,24 @@ contains
         inquire(file=trim(path), exist=exists)
         call test_assert(suite, .not. exists, &
             'released publication blob becomes reclaimable')
+        path = immutable_store_blob_path(reopened%objects, read_blob)
+        inquire(file=trim(path), exist=exists)
+        call test_assert(suite, .not. exists, &
+            'released independent reader blob becomes reclaimable')
+        call test_assert(suite, pressure%sampled .and. pressure%complete .and. &
+            pressure%reclaimed_bytes > 0_c_long_long, &
+            'release collection reports independently observed reclamation')
 
         path = trim(reopened%root_dir)// &
             '/.fx-metadata/action-maintenance.cursor'
         call write_text(trim(path), 'invalid maintenance cursor')
+        call action_result_maintenance_tick(reopened, scanned, retired, &
+            deleted, status, pressure=pressure)
+        call test_assert_equal_int(suite, ACTION_RESULT_IO_ERROR, status, &
+            'invalid maintenance cursor is a visible current error')
+        call test_assert(suite, .not. pressure%sampled .and. &
+            .not. pressure%complete .and. pressure%sampled_at == 0_c_long_long, &
+            'cursor failure never fabricates a CAS sample')
         status = set_mtime(trim(path)//c_null_char, &
             unix_time() - 120_c_long_long)
         call test_assert_equal_int(suite, 0, status, &
