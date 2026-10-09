@@ -3,7 +3,7 @@ module fx_immutable_root_compact
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_size_t, c_null_char
     use fx_hash, only: sha256_string
     use fx_immutable_manifest, only: immutable_tree_entry_t, &
-        immutable_entries_canonical, immutable_manifest_serialize, IMMUTABLE_BLOB
+        immutable_entries_canonical, immutable_manifest_encode, IMMUTABLE_BLOB
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
         immutable_store_publication_lease_acquire, &
         immutable_store_lease_release, IMMUTABLE_OK, IMMUTABLE_IO_ERROR, &
@@ -101,7 +101,7 @@ contains
                 deallocate (entries, ids, kinds)
                 cycle
             end if
-            manifest = immutable_manifest_serialize(canonical)
+            call immutable_manifest_encode(canonical, manifest)
             tree_id = sha256_string(manifest)
             ids(count + 1) = tree_id
             kinds(:count) = 'blob'

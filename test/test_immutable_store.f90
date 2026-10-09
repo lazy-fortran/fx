@@ -16,7 +16,7 @@ program test_immutable_store
         immutable_store_materialize_blob, immutable_store_file_info
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_verify_tree, immutable_store_materialize_tree
-    use fx_immutable_manifest, only: immutable_manifest_serialize
+    use fx_immutable_manifest, only: immutable_manifest_serialize, immutable_manifest_parse
     use fx_proc, only: proc_pid, proc_exec_silent, &
         proc_watch_init, proc_watch_add, proc_watch_poll, proc_watch_close
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
@@ -99,6 +99,7 @@ program test_immutable_store
     call test_concurrent_publish(suite, store, root)
     call test_mkdir_race_sync(suite, root)
     call test_manifest_encoding(suite, object_id)
+    call test_concurrent_manifest_parse(suite)
     call test_role_and_tree_manifests(suite, store, object_id, tree_id, sub_id)
     call test_materialization(suite, store, root, object_id, tree_id)
     call test_materialization_modes(suite, store, root, object_id)
@@ -480,6 +481,47 @@ contains
         call test_assert(s, immutable_manifest_serialize(entry) /= encoded, &
             'entry type participates in tree identity')
     end subroutine test_manifest_encoding
+
+    subroutine test_concurrent_manifest_parse(s)
+        type(test_suite_t), intent(inout) :: s
+        character(len=4096) :: messages(8)
+        character(len=1), parameter :: nl = achar(10), tab = achar(9)
+        type(immutable_tree_entry_t), allocatable :: entries(:)
+        integer :: i, variant, status, failures
+
+        ! Independently encoded manifests vary the result lengths at one call site.
+        do i = 1, size(messages)
+            messages(i) = 'FXTREE1'//nl//'B'//tab//'644'//tab// &
+                repeat('r', i*17)//tab//'a'//repeat('p', i*13)//tab// &
+                repeat('a', 64)//nl//'B'//tab//'644'//tab// &
+                repeat('r', i*17)//tab//'z'//repeat('q', i*29)//tab// &
+                repeat('b', 64)//nl
+        end do
+        failures = 0
+        !$omp parallel do num_threads(8) private(variant, status, entries) &
+        !$omp reduction(+:failures)
+        do i = 1, 20000
+            variant = 1 + mod(i, size(messages))
+            call immutable_manifest_parse(trim(messages(variant)), entries, status)
+            if (status /= IMMUTABLE_OK) then
+                failures = failures + 1
+                cycle
+            end if
+            if (size(entries) /= 2) then
+                failures = failures + 1
+                cycle
+            end if
+            if (entries(1)%path /= 'a'//repeat('p', variant*13)) failures = failures + 1
+            if (entries(2)%path /= 'z'//repeat('q', variant*29)) failures = failures + 1
+            if (entries(1)%role /= repeat('r', variant*17)) failures = failures + 1
+            if (entries(2)%role /= repeat('r', variant*17)) failures = failures + 1
+            if (entries(1)%object_id /= repeat('a', 64)) failures = failures + 1
+            if (entries(2)%object_id /= repeat('b', 64)) failures = failures + 1
+        end do
+        !$omp end parallel do
+        call test_assert_equal_int(s, 0, failures, &
+            'concurrent manifest parsing preserves independent varied-length entries')
+    end subroutine test_concurrent_manifest_parse
 
     subroutine test_role_and_tree_manifests(s, cache, blob_id, root_id, sub_id)
         type(test_suite_t), intent(inout) :: s

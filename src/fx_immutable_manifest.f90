@@ -23,6 +23,7 @@ module fx_immutable_manifest
     end type immutable_tree_entry_t
 
     public :: immutable_entries_canonical, immutable_manifest_serialize
+    public :: immutable_manifest_encode
     public :: immutable_manifest_parse, immutable_id_valid
 
     interface
@@ -97,10 +98,18 @@ contains
     function immutable_manifest_serialize(entries) result(text)
         type(immutable_tree_entry_t), intent(in) :: entries(:)
         character(len=:), allocatable :: text
+
+        call immutable_manifest_encode(entries, text)
+    end function immutable_manifest_serialize
+
+    subroutine immutable_manifest_encode(entries, text)
+        type(immutable_tree_entry_t), intent(in) :: entries(:)
+        character(len=:), allocatable, intent(out) :: text
         character(len=3) :: mode_text
         character(len=1) :: kind_text
         integer :: i, n, pos
 
+        ! Caller-owned length metadata stays private during concurrent encoding.
         n = len(TREE_HEADER)
         do i = 1, size(entries)
             n = n + 73 + len(entries(i)%role) + len(entries(i)%path)
@@ -123,13 +132,14 @@ contains
             call append_text(text, pos, entries(i)%object_id)
             call append_text(text, pos, achar(10))
         end do
-    end function immutable_manifest_serialize
+    end subroutine immutable_manifest_encode
 
     subroutine immutable_manifest_parse(text, entries, ierr)
         character(len=*), intent(in) :: text
         type(immutable_tree_entry_t), allocatable, intent(out) :: entries(:)
         integer, intent(out) :: ierr
         type(immutable_tree_entry_t), allocatable :: parsed(:), sorted(:)
+        character(len=:), allocatable :: canonical
         character(len=:), allocatable :: field(:)
         integer :: n, i, start, stop, line_end, mode
 
@@ -186,7 +196,8 @@ contains
             ierr = IMMUTABLE_CORRUPT
             return
         end if
-        if (immutable_manifest_serialize(sorted) /= text) then
+        call immutable_manifest_encode(sorted, canonical)
+        if (canonical /= text) then
             ierr = IMMUTABLE_CORRUPT
             return
         end if

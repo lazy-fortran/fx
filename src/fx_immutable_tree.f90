@@ -17,7 +17,7 @@ module fx_immutable_tree
         owned_write, owned_hash_fd, owned_publish, owned_reject
     use fx_immutable_manifest, only: immutable_tree_entry_t, IMMUTABLE_BLOB, &
         IMMUTABLE_TREE, immutable_entries_canonical, &
-        immutable_manifest_serialize, immutable_manifest_parse, &
+        immutable_manifest_encode, immutable_manifest_parse, &
         immutable_id_valid
     implicit none
     private
@@ -49,7 +49,7 @@ contains
         if (.not. store%initialized) return
         call immutable_entries_canonical(entries, sorted, ierr)
         if (ierr /= IMMUTABLE_OK) return
-        manifest = immutable_manifest_serialize(sorted)
+        call immutable_manifest_encode(sorted, manifest)
         anticipated_id = sha256_string(manifest)
         ! Protect children even while the new parent tree is still absent.
         allocate(kinds(size(sorted) + 1), ids(size(sorted) + 1))
