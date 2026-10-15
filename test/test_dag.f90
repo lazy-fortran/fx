@@ -18,6 +18,7 @@ program test_dag
     call test_dag_affected_set(suite)
     call test_dag_to_dot(suite)
     call test_dag_levels(suite)
+    call test_dag_growth_and_long_labels(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -310,5 +311,46 @@ contains
         call test_assert_equal_int(suite, 0, levels(pb), 'levels diamond: level(r2)=0')
         call test_assert_equal_int(suite, 1, levels(pc), 'levels diamond: level(top)=1')
     end subroutine test_dag_levels
+
+    ! The graph grows past its initial capacity and keeps labels longer than
+    ! 256 characters distinct.
+    subroutine test_dag_growth_and_long_labels(suite)
+        type(test_suite_t), intent(inout) :: suite
+        integer, parameter :: n = 3 * MAX_NODES
+        type(dag_t) :: d
+        character(len=:), allocatable :: prefix
+        character(len=16) :: suffix
+        integer :: ids(n), order(n), affected(n), levels(n)
+        integer :: i, n_order, n_affected, n_levels
+        logical :: has_cycle, distinct
+
+        prefix = repeat('p', 300)
+        call dag_init(d, 4)
+        do i = 1, n
+            write (suffix, '(i0)') i
+            ids(i) = dag_add_node(d, prefix//trim(suffix))
+        end do
+        distinct = .true.
+        do i = 1, n
+            if (ids(i) /= i) distinct = .false.
+        end do
+        call test_assert(suite, distinct .and. d%n_nodes == n, &
+            'growth: every long label gets its own node')
+        call test_assert_equal_int(suite, dag_find_node(d, prefix//'2'), 2, &
+            'growth: long labels are found exactly')
+        do i = 2, n
+            call dag_add_edge(d, ids(i), ids(i - 1))
+        end do
+        call dag_topo_sort(d, order, n_order, has_cycle)
+        call test_assert(suite, .not. has_cycle .and. n_order == n &
+            .and. order(1) == 1 .and. order(n) == n, &
+            'growth: topological order covers every node')
+        call dag_reverse_deps(d, 1, affected, n_affected)
+        call test_assert_equal_int(suite, n_affected, n, &
+            'growth: reverse dependencies reach every node')
+        call dag_levels(d, order, n_order, levels, n_levels)
+        call test_assert_equal_int(suite, n_levels, n, &
+            'growth: levels follow the whole chain')
+    end subroutine test_dag_growth_and_long_labels
 
 end program test_dag

@@ -2,10 +2,11 @@ module fx_dag
     implicit none
     private
 
+    ! Initial capacity hint for callers; the graph grows beyond it.
     integer, parameter, public :: MAX_NODES = 2048
 
     type, public :: dag_node_t
-        character(len=256) :: label = ' '
+        character(len=:), allocatable :: label
         integer, allocatable :: edges(:)
         integer :: n_edges = 0
     end type dag_node_t
@@ -26,8 +27,8 @@ contains
         type(dag_t), intent(out) :: d
         integer, intent(in) :: max_nodes
         d%n_nodes = 0
-        d%max_nodes = max_nodes
-        allocate(d%nodes(max_nodes))
+        d%max_nodes = max(1, max_nodes)
+        allocate(d%nodes(d%max_nodes))
     end subroutine dag_init
 
     ! Add node with given label. Returns existing id if label already present.
@@ -42,10 +43,7 @@ contains
             return
         end if
 
-        if (d%n_nodes >= d%max_nodes) then
-            dag_add_node = 0
-            return
-        end if
+        if (d%n_nodes >= d%max_nodes) call grow_nodes(d)
 
         d%n_nodes = d%n_nodes + 1
         d%nodes(d%n_nodes)%label = label
@@ -53,6 +51,21 @@ contains
         allocate(d%nodes(d%n_nodes)%edges(4))
         dag_add_node = d%n_nodes
     end function dag_add_node
+
+    subroutine grow_nodes(d)
+        type(dag_t), intent(inout) :: d
+        type(dag_node_t), allocatable :: tmp(:)
+        integer :: i
+
+        allocate(tmp(2 * d%max_nodes))
+        do i = 1, d%n_nodes
+            call move_alloc(d%nodes(i)%label, tmp(i)%label)
+            call move_alloc(d%nodes(i)%edges, tmp(i)%edges)
+            tmp(i)%n_edges = d%nodes(i)%n_edges
+        end do
+        call move_alloc(tmp, d%nodes)
+        d%max_nodes = 2 * d%max_nodes
+    end subroutine grow_nodes
 
     ! Linear scan by label. Returns 0 if not found.
     integer function dag_find_node(d, label)
@@ -62,7 +75,7 @@ contains
 
         dag_find_node = 0
         do i = 1, d%n_nodes
-            if (trim(d%nodes(i)%label) == trim(label)) then
+            if (d%nodes(i)%label == trim(label)) then
                 dag_find_node = i
                 return
             end if
@@ -106,8 +119,8 @@ contains
         integer, intent(out) :: n_order
         logical, intent(out) :: has_cycle
 
-        integer :: in_deg(MAX_NODES)
-        integer :: queue(MAX_NODES)
+        integer :: in_deg(d%n_nodes)
+        integer :: queue(d%n_nodes)
         integer :: qhead, qtail, node, i, j
 
         n_order = 0
@@ -159,8 +172,8 @@ contains
         integer, intent(out) :: affected(:)
         integer, intent(out) :: n_affected
 
-        logical :: visited(MAX_NODES)
-        integer :: queue(MAX_NODES)
+        logical :: visited(d%n_nodes)
+        integer :: queue(d%n_nodes)
         integer :: qhead, qtail, current, i, j
 
         n_affected = 0
@@ -203,8 +216,8 @@ contains
         integer, intent(out) :: affected(:)
         integer, intent(out) :: n_affected
 
-        logical :: visited(MAX_NODES)
-        integer :: queue(MAX_NODES)
+        logical :: visited(d%n_nodes)
+        integer :: queue(d%n_nodes)
         integer :: qhead, qtail, current, i, j, k
 
         n_affected = 0
@@ -275,7 +288,7 @@ contains
         integer, intent(out) :: levels(:)
         integer, intent(out) :: n_levels
 
-        integer :: node_level(MAX_NODES)
+        integer :: node_level(d%n_nodes)
         integer :: i, j, node, dep, lv
 
         node_level = 0
