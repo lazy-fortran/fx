@@ -470,11 +470,13 @@ contains
         integer :: mode, init_status
 
         call init_result_store(c, store, init_status)
-        ierr = 1
+        ! A nonzero ierr is the failing store status (at least 1), so callers
+        ! can report which store step failed.
+        ierr = max(init_status, 1)
         if (init_status /= 0) return
         call action_result_file_mode(bin_path, mode, ierr)
         if (ierr /= ACTION_RESULT_OK) then
-            ierr = 1
+            ierr = max(ierr, 1)
             return
         end if
         entry(1) = result_entry('program', 'executable', mode)
@@ -482,11 +484,6 @@ contains
         sources(1) = bin_path
         call action_result_publish_files(store, action_id, sources, entry, &
             result_id, ierr)
-        if (ierr == ACTION_RESULT_OK) then
-            ierr = 0
-        else
-            ierr = 1
-        end if
     end subroutine cache_store_binary
 
     subroutine cache_binary_matches(c, action_id, bin_path, matches)
