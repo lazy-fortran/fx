@@ -213,6 +213,46 @@ int fx_owned_fill(void *handle, int input, int strategy, int *cloned)
     }
     return 0;
 }
+/* Filesystems such as AFS refuse a hard link between directories (EXDEV or
+ * EPERM). Publish a private copy through a same-directory link instead, which
+ * keeps the exclusive, atomic name creation. FX_STORE_FORCE_NO_LINK=1 forces
+ * this path so it can be tested on any filesystem. */
+static int link_unsupported(int error)
+{
+    return error == EXDEV || error == EPERM || error == EMLINK ||
+        error == ENOSYS || error == EINVAL || error == ENOTSUP ||
+        error == EOPNOTSUPP;
+}
+static int publish_by_copy(owned_t *t)
+{
+    struct stat st;
+    char temp[96];
+    int copy = -1, rc, saved;
+    if (fstat(t->fd, &st) != 0) return -1;
+    for (int i = 0; i < 128 && copy < 0; ++i) {
+        unsigned long number = atomic_fetch_add(&serial, 1);
+        snprintf(temp, sizeof(temp), ".fx-copy-%ld-%lu", (long)getpid(), number);
+        copy = openat(t->parent, temp, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        if (copy < 0 && errno != EEXIST) return -1;
+    }
+    if (copy < 0) return -1;
+    rc = copy_fd(t->fd, copy);
+    if (rc == 0) rc = fchmod(copy, st.st_mode & 07777);
+    if (rc == 0) rc = fsync(copy);
+    if (rc == 0) rc = linkat(t->parent, temp, t->parent, t->name, 0);
+    saved = errno;
+    (void)unlinkat(t->parent, temp, 0);
+    if (rc != 0) { close(copy); errno = saved; return -1; }
+    /* Later identity checks bind the published inode, not the staged one. */
+    close(t->fd);
+    t->fd = copy;
+    return 0;
+}
+static int link_or_copy(owned_t *t, int forced)
+{
+    if (forced) errno = EXDEV;
+    return link_unsupported(errno) ? publish_by_copy(t) : -1;
+}
 static int publish_owned_file(owned_t *t, int cas)
 {
 #ifdef __linux__
@@ -220,13 +260,21 @@ static int publish_owned_file(owned_t *t, int cas)
     /* /proc's fd link binds the held inode even for an unprivileged caller. */
     char source[64];
     snprintf(source, sizeof(source), "/proc/self/fd/%d", t->fd);
-    return linkat(AT_FDCWD, source, t->parent, t->name, AT_SYMLINK_FOLLOW);
+    int forced = getenv("FX_STORE_FORCE_NO_LINK") != NULL;
+    if (!forced && linkat(AT_FDCWD, source, t->parent, t->name,
+                          AT_SYMLINK_FOLLOW) == 0) return 0;
+    return link_or_copy(t, forced);
 #elif defined(__APPLE__)
+    int forced = getenv("FX_STORE_FORCE_NO_LINK") != NULL;
     if (cas) {
         /* Atomic exclusive clone from the verified descriptor, never its name. */
-        return fclonefileat(t->fd, t->parent, t->name, CLONE_NOOWNERCOPY);
+        if (!forced && fclonefileat(t->fd, t->parent, t->name,
+                                    CLONE_NOOWNERCOPY) == 0) return 0;
+    } else if (!forced &&
+               linkat(t->staging, "payload", t->parent, t->name, 0) == 0) {
+        return 0;
     }
-    return linkat(t->staging, "payload", t->parent, t->name, 0);
+    return link_or_copy(t, forced);
 #elif defined(_WIN32)
     (void)cas;
     return fx_win_link_fd(t->fd, t->parent, t->name);
