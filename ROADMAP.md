@@ -38,6 +38,20 @@ their actual unresolved goals, not instructions to recreate finished work.
 
 ## Delivery
 
+2026-10-17 branch integration ports the deferred graph verification from
+`0f60c9f` onto the current complete-interface cache API. A manifest-only preview
+checks local outputs before traversing the immutable graph; every accepted hit
+still verifies the graph and confirms the binding. The existing validated
+preview keeps its stronger contract. Focused Darwin checks pass action-cache
+corruption/mismatch controls, read-lease races and immutable collection (3/3).
+The broader action-result store case retains a pre-existing failure: its
+automatic-maintenance scanner does not remove a retirement marker. The same
+failure reproduces on unchanged published `6d48605`; it is not a green full
+store qualification. The scanner persists `telldir` cookies across closing and
+reopening a directory stream, which Darwin does not support. A separate repair
+must preserve both restart-safe progress and the declared scan-work bound;
+uncharged ordinal rescanning is not an adequate replacement.
+
 2026-10-09 final Fo delivery: `4b92f1e` exposes actual dated CAS pressure
 samples (two owning cases pass). `7282d45` accelerates bounded immutable file
 hashing through the existing native authority, with thread-safe initialization

@@ -8,9 +8,9 @@ program test_action_cache
     use fx_cache, only: cache_init
     use fx_cache_key, only: cache_file_content_key, cache_digest, cache_key_for
     use fx_proc, only: proc_exec, proc_result_t
-        use fx_action_result_store, only: action_result_store_t, &
+    use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_preview, action_result_file_mode, &
-        ACTION_RESULT_OK
+        action_result_manifest_preview, ACTION_RESULT_OK, ACTION_RESULT_CORRUPT
     use fx_immutable_manifest, only: immutable_tree_entry_t
     use fx_immutable_store, only: immutable_store_blob_path
     use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, fx_test_chmod
@@ -284,11 +284,30 @@ contains
         cleanup = fx_test_chmod(blob_path, 292)
         call test_assert_equal_int(suite, 0, cleanup, &
             'test restores immutable payload permissions')
+        call action_result_manifest_preview(result_store, 'warm-result', entries, &
+            result_id, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, ierr, &
+            'manifest-only preview does not accept or inspect payload bytes')
+        call action_result_preview(result_store, 'warm-result', entries, &
+            result_id, ierr)
+        call test_assert_equal_int(suite, ACTION_RESULT_CORRUPT, ierr, &
+            'validated preview rejects a corrupt payload graph')
+        call test_assert_equal_str(suite, '', trim(result_id), &
+            'validated corrupt preview exposes no reusable result identity')
+        call test_assert(suite, .not. allocated(entries), &
+            'validated corrupt preview exposes no reusable entries')
         call cache_restore_action(c, 'warm-result', object_file, root, restored)
         call test_assert(suite, .not. restored, &
             'corrupt immutable object cannot produce a warm result hit')
         call test_assert(suite, file_has_bytes(object_file, 'WARM OBJECT BYTES'), &
             'corrupt immutable object does not replace the local output')
+        call write_file(object_file, 'DIFFERENT LOCAL OBJECT')
+        call cache_restore_action(c, 'warm-result', object_file, root, restored)
+        call test_assert(suite, .not. restored, &
+            'local mismatch still rejects a corrupt graph during leased restore')
+        call test_assert(suite, file_has_bytes(object_file, 'DIFFERENT LOCAL OBJECT'), &
+            'rejected corrupt graph preserves the mismatching local output')
+        call write_file(object_file, 'WARM OBJECT BYTES')
 
         cleanup = fx_test_remove_tree(blob_path)
         call test_assert(suite, cleanup == 0, 'test removes the immutable object')
