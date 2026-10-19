@@ -134,6 +134,7 @@ program test_immutable_leases
     call assert_metadata_has(suite, trim(root)//'/.fx-metadata/leases', &
         'R||owner_b|start_2|result|blob|'//trim(object_id), &
         'owner B root remains after A release')
+    call test_legacy_rows_dropped()
 
     call immutable_store_publication_lease_acquire(store, 'owner_c', 'start_3', &
         'publish', kinds, ids, publication, ierr, epoch1)
@@ -793,6 +794,67 @@ contains
             call test_process_sleep_ms(5)
         end do
     end subroutine wait_for_child
+
+    subroutine test_legacy_rows_dropped()
+        !! Rows of the retired lease-based action store pin nothing; the next
+        !! snapshot rewrite drops them and keeps every current row.
+        character(len=:), allocatable :: snapshot, legacy_id
+        integer :: unit, local_err, k
+
+        snapshot = trim(root)//'/.fx-metadata/leases'
+        legacy_id = repeat('ab', 32)
+        open(newunit=unit, file=snapshot, status='old', position='append', &
+            action='write', iostat=local_err)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'legacy lease fixture opens')
+        if (local_err /= 0) return
+        write(unit, '(A)') 'R||legacy_key|fx-action-v1|bound|tree|'//legacy_id
+        write(unit, '(A)') 'L|L1|fx-publisher|legacy_start|publish|blob|'// &
+            legacy_id
+        ! A compact group needs at least eight members.
+        write(unit, '(A)') 'G|R||fx-action-files|legacy_start|bound|blob'
+        do k = 1, 8
+            write(unit, '(A,I2.2,A)') 'O|', k, repeat('cd', 31)
+        end do
+        close(unit)
+        call immutable_store_root_set(store, 'owner_b', 'start_2', 'result', &
+            kinds, ids, ierr, epoch2)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
+            'unchanged roots over legacy rows succeed')
+        call test_assert(suite, .not. metadata_contains(snapshot, 'fx-action-v1'), &
+            'legacy action rows are dropped on rewrite')
+        call test_assert(suite, .not. metadata_contains(snapshot, 'fx-publisher'), &
+            'legacy publisher rows are dropped on rewrite')
+        call test_assert(suite, &
+            .not. metadata_contains(snapshot, 'fx-action-files'), &
+            'legacy compact groups are dropped on rewrite')
+        call test_assert(suite, .not. metadata_contains(snapshot, repeat('cd', 31)), &
+            'legacy compact group objects are dropped on rewrite')
+        call assert_metadata_has(suite, snapshot, &
+            'R||owner_b|start_2|result|blob|'//trim(object_id), &
+            'current roots survive the legacy row cleanup')
+        call immutable_store_root_set(store, 'owner_b', 'start_2', 'result', &
+            kinds, ids, ierr, epoch3)
+        call test_assert(suite, epoch3 == epoch2, &
+            'a clean snapshot is not rewritten for equal roots')
+    end subroutine test_legacy_rows_dropped
+
+    logical function metadata_contains(path, needle) result(found)
+        character(len=*), intent(in) :: path, needle
+        character(len=2048) :: line
+        integer :: unit, local_err
+
+        found = .false.
+        open(newunit=unit, file=path, status='old', action='read', &
+            iostat=local_err)
+        if (local_err /= 0) return
+        do
+            read(unit, '(A)', iostat=local_err) line
+            if (local_err /= 0) exit
+            if (index(line, needle) > 0) found = .true.
+        end do
+        close(unit)
+    end function metadata_contains
 
     subroutine assert_metadata_has(s, path, needle, label)
         type(test_suite_t), intent(inout) :: s

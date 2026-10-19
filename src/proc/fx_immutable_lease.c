@@ -756,6 +756,17 @@ static int same_root(const char *row, const lease_row_info_t *info,
            row_field_equal(row, info, 4, reason);
 }
 
+/* Rows of the retired lease-based action store (start "fx-action-v1", owners
+ * fx-publisher/fx-action-files) no longer pin anything: action records are the
+ * GC roots and eviction ignores these rows. Every rewrite drops them, so an
+ * old snapshot shrinks on its next update without a manual clean. */
+static int legacy_action_row(const char *row, const lease_row_info_t *info)
+{
+    return row_field_equal(row, info, 3, "fx-action-v1") ||
+           row_field_equal(row, info, 2, "fx-publisher") ||
+           row_field_equal(row, info, 2, "fx-action-files");
+}
+
 static int append_next_row(char **rows, lease_row_info_t *info, size_t *count,
                            const char *line, const lease_row_info_t *source_info)
 {
@@ -778,7 +789,7 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
 {
     char dir[PATH_MAX], lock_path[PATH_MAX];
     int lock = -1, n, result = -1, changed = 0, publication_found = 0;
-    int graph_found = 0;
+    int graph_found = 0, pruned = 0;
     size_t old_root_count = 0, new_root_count = 0;
     int root_changed = 1;
     uint64_t epoch = 0;
@@ -814,6 +825,10 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
     }
     for (size_t i = 0; i < nrow; ++i) {
         int remove = 0, root_remove = 0;
+        if (legacy_action_row(rows[i], &row_info[i])) {
+            pruned = 1;
+            continue;
+        }
         if ((op == 1 || op == 2 || op == 4 || op == 6 || op == 7) &&
             row_info[i].text_length >= ROW_TEXT_MAX) goto done;
         if (op == 1 || op == 2 || op == 6) {
@@ -958,7 +973,7 @@ int fx_immutable_lease_update(const char *root, int op, const char *owner,
         if (op == 1) changed = root_changed;
         else if (root_changed) changed = 1;
     }
-    if (changed) {
+    if (changed || pruned) {
         if (epoch >= (uint64_t)INT64_MAX) goto done;
         ++epoch;
         if (write_snapshot(dir, epoch, next, next_info, nnext) != 0) {

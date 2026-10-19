@@ -131,11 +131,6 @@ program test_immutable_gc
         'result', ierr)
     call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
         'second worktree version releases')
-    call immutable_store_reason_release(store, &
-        action_result_action_key('retained-action'), 'fx-action-v1', &
-        'bound', ierr)
-    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
-        'fixture removes durable action reason')
     call collect(100, 10, 0_int64, 0_int64)
     call exists_tree(bound_id, .true., 'action record retains result tree')
     call exists_blob(root_blob, .true., 'action record retains result blob')
@@ -169,10 +164,6 @@ program test_immutable_gc
     call test_assert_equal_int(suite, ACTION_RESULT_CONFLICT, ierr, &
         'second result records conflict')
     action_key = action_result_action_key('conflicting-action')
-    call immutable_store_reason_release(store, action_key, 'fx-action-v1', &
-        'conflict', ierr)
-    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
-        'fixture releases conflict reason')
     call collect(100, 10, 0_int64, 0_int64)
     call exists_tree(conflict_a, .true., 'conflict record retains first tree')
     call exists_tree(conflict_b, .true., 'conflict record retains second tree')

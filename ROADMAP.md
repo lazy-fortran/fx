@@ -219,3 +219,10 @@ Earlier detailed evidence remains at
 [the pre-revision roadmap](https://github.com/lazy-fortran/fx/blob/c8fb7efeb9b9d98cb9bbb06563b5f20c46d80483/ROADMAP.md).
 Fo's [PLAN](https://github.com/lazy-fortran/fo/blob/main/PLAN.md) orders the consumer
 program; Fx does not acquire compiler, agent or CI scheduling policy.
+
+2026-10-20: obsolete action-store lease rows are discarded on the next
+snapshot update, including compact groups; equal current roots remain
+write-free after retirement. Source base `6adc61a`, immutable Fo driver
+`0e072bacfcace7767bd1db2cdeb59a160f122a22fc3fdf3c6c9e0a1fc36cb240`:
+all 30 registered tests pass (`fo test --rerun --retries 0`), including
+lease retirement, immutable GC, store eviction and parallel restore.
