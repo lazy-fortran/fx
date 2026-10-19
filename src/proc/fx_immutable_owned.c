@@ -456,13 +456,16 @@ void fx_owned_dispose(void *handle)
 {
     owned_t *t = handle;
     if (!t) return;
+    /* Close the payload first: NFS clients silly-rename an unlinked file
+     * that is still open (.nfsXXXX), which would keep the staging
+     * directory non-empty and leak it until stale-temp cleanup. */
+    if (t->published_fd >= 0) close(t->published_fd);
+    if (t->fd >= 0 && t->fd != t->staging) close(t->fd);
     if (!t->tree || !t->published) {
         int removed = remove_contents_fd(t->staging);
         if (removed == 0 && fx_owned_same_entry(t->parent, t->temp, t->staging))
             (void)unlinkat(t->parent, t->temp, AT_REMOVEDIR);
     }
-    if (t->published_fd >= 0) close(t->published_fd);
-    close(t->fd);
     close(t->staging);
     close(t->parent);
     free(t);
