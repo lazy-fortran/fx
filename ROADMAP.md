@@ -226,3 +226,6 @@ write-free after retirement. Source base `6adc61a`, immutable Fo driver
 `0e072bacfcace7767bd1db2cdeb59a160f122a22fc3fdf3c6c9e0a1fc36cb240`:
 all 30 registered tests pass (`fo test --rerun --retries 0`), including
 lease retirement, immutable GC, store eviction and parallel restore.
+Supplementary slow materialization passes at source `c8d892e` with immutable
+Fo driver `16c66d34b6ba06cc42fd0548904e1276f2c1615157623a39c1d10e59b1f04fb0`
+(`fo test --all test_immutable_materialization_slow --rerun --retries 0`).
