@@ -60,8 +60,8 @@ program test_immutable_publication
     call immutable_store_file_info(store, blob_id, bytes_after, mtime_after, &
         inode_after, ierr)
     call test_assert(suite, bytes_before == bytes_after .and. &
-        mtime_before == mtime_after .and. inode_before == inode_after, &
-        'identical publication preserves the existing immutable payload')
+        mtime_before <= mtime_after .and. inode_before == inode_after, &
+        'identical publication keeps the payload and freshens its mtime')
 
     entry(1)%path = 'payload.bin'
     entry(1)%role = 'source'

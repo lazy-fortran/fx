@@ -64,6 +64,21 @@ int fx_owned_open_object(int root, int kind, const char *id)
     }
     return fd;
 }
+/* Refresh an existing object's mtime: a republished or deduplicated object
+ * restarts the collector's grace period. 0 ok, -2 missing, -1 error. */
+int fx_owned_freshen(int root, int kind, const char *id)
+{
+    int fd = fx_owned_open_object(root, kind, id);
+    if (fd == -2) return -2;
+    if (fd < 0) return -1;
+#ifdef _WIN32
+    int rc = 0;
+#else
+    int rc = futimens(fd, NULL);
+#endif
+    close(fd);
+    return rc == 0 ? 0 : -1;
+}
 int fx_owned_fd_size(int fd, long long *size)
 {
     struct stat st;
@@ -303,16 +318,12 @@ static int retain_publication(owned_t *t, int cas)
     if (!fx_owned_same_entry(t->parent, t->name, t->published_fd)) return -1;
     return 0;
 }
-static int lock_parent(owned_t *t)
-{
-    int rc;
-    do { rc = flock(t->parent, LOCK_EX); } while (rc != 0 && errno == EINTR);
-    return rc;
-}
 static int publish_boundary(owned_t *t, int cas, int sync)
 {
     int rc;
-    if (cas && lock_parent(t) != 0) return -1;
+    /* Exclusive link/rename is the only publication boundary: an existing
+     * name is retained (rc 1). No directory lock, since flock is host-local
+     * on shared filesystems such as BeeGFS. */
     if (t->tree) {
 #if defined(__linux__) && defined(SYS_renameat2)
         rc = fx_rename_dir_noreplace(t->parent, t->temp, t->parent, t->name);
@@ -341,7 +352,6 @@ static int publish_boundary(owned_t *t, int cas, int sync)
     }
     rc = sync ? fsync(t->parent) : 0;
 done:
-    if (cas && flock(t->parent, LOCK_UN) != 0) return -1;
     return rc;
 }
 static int finish_owned(owned_t *t, int mode, int cas, int sync)
@@ -373,13 +383,13 @@ int fx_owned_reject(void *handle)
     owned_t *t = handle;
     int rc = 0;
     if (!t->published) return 0;
-    if (lock_parent(t) != 0) return -1;
-    /* The held-directory lock excludes valid publishers across check/unlink. */
+    /* Without a cross-host lock a concurrent collector and publisher may
+     * replace the name between check and unlink; that loses a valid object
+     * (a later miss), never exposes wrong bytes, as readers verify hashes. */
     if (fx_owned_same_entry(t->parent, t->name, t->published_fd)) {
-        if (unlinkat(t->parent, t->name, 0) != 0) rc = -1;
+        if (unlinkat(t->parent, t->name, 0) != 0 && errno != ENOENT) rc = -1;
         else { t->published = 0; rc = fsync(t->parent); }
     }
-    if (flock(t->parent, LOCK_UN) != 0) rc = -1;
     return rc;
 }
 int fx_owned_write(void *handle, const char *text, int count)

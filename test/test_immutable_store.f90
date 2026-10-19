@@ -154,8 +154,8 @@ contains
             'identical payload reuses verified blob')
         call immutable_store_file_info(cache, id, bytes1, mtime1, ino1, &
             local_err)
-        call test_assert(s, bytes0 == bytes1 .and. mtime0 == mtime1 .and. &
-            ino0 == ino1, 'reuse preserves blob size, inode, and mtime')
+        call test_assert(s, bytes0 == bytes1 .and. mtime0 <= mtime1 .and. &
+            ino0 == ino1, 'reuse keeps blob size and inode and freshens mtime')
         if (fd >= 0) then
             write_event = .false.
             call proc_watch_poll(fd, watched_path, evt, 30, event_seen, poll_err)
@@ -176,16 +176,16 @@ contains
         type(immutable_store_t), intent(in) :: cache
         character(len=*), intent(in) :: base
         integer, parameter :: NWRITERS = 6, NBYTES = 262144
-        character(len=512) :: paths(NWRITERS), stage, final, parent_dir
+        character(len=512) :: paths(NWRITERS), final, parent_dir
         character(len=64) :: ref_id
         character(len=512) :: child_exe, child_path
         character(len=4096) :: worker_argv(4)
         character(len=1) :: bytes(NBYTES)
-        integer :: t, local_err, file_err, child_pid(NWRITERS), lock_fd
+        integer :: t, local_err, file_err, child_pid(NWRITERS)
         integer :: child_status, spawn_err, child_parent
         integer(int64) :: child_start, child_starts(NWRITERS)
         integer(c_int) :: c_status
-        logical :: staged, marker_exists
+        logical :: marker_exists
 
         do t = 1, size(bytes)
             bytes(t) = char(mod(t, 251))
@@ -203,10 +203,8 @@ contains
         call test_assert_equal_int(s, 0, int(c_status), &
             'immutable object shard exists before external admission')
         if (c_status /= 0_c_int) return
-        lock_fd = fx_test_lock_directory(trim(parent_dir))
-        call test_assert(s, lock_fd >= 0, &
-            'test holds the store’s real publication directory lock')
-        if (lock_fd < 0) return
+        ! Exclusive links are the only admission: identical publishers race
+        ! without any lock (flock is host-local on shared filesystems).
         call get_command_argument(0, child_exe)
         child_pid = 0
         do t = 1, NWRITERS
@@ -222,23 +220,12 @@ contains
             call assert_fortran_child(s, child_pid(t), child_start, &
                 child_parent, child_path)
             child_starts(t) = child_start
-            stage = trim(parent_dir)//'/.fx-owned-'//number(child_pid(t))// &
-                '-0/payload'
-            call wait_for_owned_stage(trim(stage), int(NBYTES, int64), staged)
-            call test_assert(s, staged, &
-                'publisher completes its private immutable payload before admission')
         end do
-        inquire(file=trim(final), exist=marker_exists)
-        call test_assert(s, .not. marker_exists, &
-            'canonical object stays missing while publishers wait on admission')
-        local_err = fx_test_unlock(lock_fd)
-        call test_assert_equal_int(s, 0, local_err, &
-            'external publication admission lock releases')
         do t = 1, NWRITERS
             if (child_pid(t) <= 0) cycle
             call wait_for_child(child_pid(t), 15000, child_status, marker_exists)
             call test_assert(s, marker_exists .and. child_status == 0, &
-                'identical publisher exits successfully after lock release')
+                'identical concurrent publisher exits successfully')
         end do
         call test_assert(s, all(child_starts > 0_int64), &
             'publisher identity includes a kernel process start token')

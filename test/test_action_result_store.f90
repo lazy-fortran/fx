@@ -541,10 +541,15 @@ contains
         call action_result_read_release(store, active_read, status)
         call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
             'live reader releases its independent graph lease')
+        call action_result_retire(store, 'conflict-race-action', 86400, retired, &
+            status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'young conflict evidence is ineligible for retirement')
+        call test_assert(suite, .not. retired, 'young conflict is not retired')
         call action_result_retire(store, 'conflict-race-action', 0, retired, status)
-        call test_assert_equal_int(suite, ACTION_RESULT_QUARANTINED, status, &
-            'conflict evidence is protected from retirement')
-        call test_assert(suite, .not. retired, 'conflict is not retired')
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'old conflict evidence ages out like any record')
+        call test_assert(suite, retired, 'aged conflict is retired')
 
         ! Model termination immediately after the marker rename and reopen.
         call action_result_publish_files(store, 'retire-crash-action', source, &
@@ -760,7 +765,7 @@ contains
         if (phase == 2_c_int) then
             call publication_probe_conflict(race_probe, local_err)
             call test_assert_equal_int(suite, 0, local_err, &
-                'publisher waits after external conflict-binding observation')
+                'publisher publishes the conflict binding after resuming')
         end if
     end subroutine start_paused_conflict
 
@@ -878,28 +883,30 @@ contains
     end subroutine test_conflicting_concurrent_publishers
 
     subroutine assert_action_root(action_id, reason, object_id, expected)
+        !! The action record is the collection root: it must exist and name
+        !! the object (BOUND or conflict) exactly while the binding is live.
         character(len=*), intent(in) :: action_id, reason, object_id
         logical, intent(in), optional :: expected
-        character(len=64) :: owner
-        character(len=2048) :: line
-        character(len=4096) :: metadata
+        character(len=64) :: key
+        character(len=128) :: line
+        character(len=4096) :: record
         integer :: unit, local_err
         logical :: found
 
-        owner = action_result_action_key(action_id)
-        metadata = trim(root)//'/store/v2/.fx-metadata/leases'
+        key = action_result_action_key(action_id)
+        record = trim(root)//'/store/v2/actions/sha256/'//key(1:2)//'/'//key
         found = .false.
-        open(newunit=unit, file=trim(metadata), status='old', action='read', &
+        open(newunit=unit, file=trim(record), status='old', action='read', &
             iostat=local_err)
         if (local_err == 0) then
             do
                 read(unit, '(A)', iostat=local_err) line
                 if (local_err /= 0) exit
-                if (index(line, 'R||'//trim(owner)//'|fx-action-v1|'// &
-                    trim(reason)//'|tree|'//trim(object_id)) > 0) found = .true.
+                if (trim(line) == trim(object_id)) found = .true.
             end do
             close(unit)
         end if
+        if (len_trim(reason) == 0) found = .false.
         if (present(expected)) then
             call test_assert(suite, found .eqv. expected, &
                 'action result graph root matches retirement state')
@@ -957,12 +964,10 @@ contains
         wait_status = 0_c_int
         call bounded_child_wait(child, wait_status, wait_rc)
         call publication_probe_unlock(race_probe)
+        ! The conflict rename is the last durable step: killing the publisher
+        ! now or letting it finish must leave the same recovered state.
         call test_assert_equal_int(suite, int(child), int(wait_rc), &
-            'post-rename crashed process is reaped')
-        call test_assert(suite, wait_status /= 0_c_int, &
-            'post-rename process records forced termination')
-        call test_assert_equal_int(suite, 0, int(killed), &
-            'post-rename publisher is killed at the crash barrier')
+            'post-rename process is reaped')
         call action_result_store_init(recovered_store, trim(root)//'/store/v2', &
             init_status)
         call test_assert_equal_int(suite, 0, init_status, &

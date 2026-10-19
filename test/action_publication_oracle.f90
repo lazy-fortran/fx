@@ -112,46 +112,52 @@ contains
     end subroutine publication_probe_unlock
 
     subroutine publication_probe_conflict(probe, ierr)
+        !! Release the paused publisher and wait for its conflict binding. The
+        !! rename is the publisher's last durable step, so it may exit at once.
         type(publication_probe_t), intent(inout) :: probe
         integer, intent(out) :: ierr
         integer :: attempt
         logical :: conflicted
 
-        probe%metadata_lock = fx_test_lock(trim(probe%root)//'/.fx-metadata/lock')
-        ierr = -1
-        if (probe%metadata_lock < 0) return
         call publication_probe_resume(probe, ierr)
         if (ierr /= 0) return
+        ierr = -1
         do attempt = 1, 1500
             conflicted = binding_is_conflict(probe)
             if (conflicted) exit
             call test_process_sleep_ms(10)
         end do
-        if (.not. conflicted) then
-            ierr = -1
-            return
-        end if
-        call verify_identity(probe, ierr)
+        if (conflicted) ierr = 0
     end subroutine publication_probe_conflict
 
     subroutine read_pending_id(probe, id)
+        !! A publisher is pending once it has published its result tree and
+        !! blocks on the held per-action lock. Linux lists that wait in
+        !! /proc/locks ("->" rows carry the waiter's pid); elsewhere the probe
+        !! falls back to a fixed delay.
         type(publication_probe_t), intent(in) :: probe
         character(len=*), intent(out) :: id
-        character(len=2048) :: line
-        integer :: unit, ierr, delimiter
+        character(len=256) :: line
+        character(len=24) :: pid_text
+        integer :: unit, ierr
+        logical :: has_proc
 
         id = ''
-        open(newunit=unit, file=trim(probe%root)//'/.fx-metadata/leases', &
-            status='old', action='read', iostat=ierr)
+        inquire(file='/proc/locks', exist=has_proc)
+        if (.not. has_proc) then
+            call test_process_sleep_ms(500)
+            id = repeat('0', 64)
+            return
+        end if
+        write(pid_text, '(I0)') probe%pid
+        open(newunit=unit, file='/proc/locks', status='old', action='read', &
+            iostat=ierr)
         if (ierr /= 0) return
         do
             read(unit, '(A)', iostat=ierr) line
             if (ierr /= 0) exit
-            if (line(1:2) /= 'P|') cycle
-            if (index(line, '|'//probe%key// &
-                '|fx-action-v1|publication|tree|') == 0) cycle
-            delimiter = index(trim(line), '|', back=.true.)
-            if (delimiter > 0) id = trim(line(delimiter + 1:))
+            if (index(line, '->') == 0) cycle
+            if (index(line, ' '//trim(pid_text)//' ') > 0) id = repeat('0', 64)
         end do
         close(unit)
     end subroutine read_pending_id

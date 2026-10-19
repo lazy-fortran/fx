@@ -11,10 +11,6 @@ module fx_action_result_store
         immutable_entries_canonical, immutable_manifest_serialize
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
         immutable_store_put_blob, immutable_store_hash_file, &
-        immutable_lease_t, immutable_store_publication_lease_acquire, &
-        immutable_store_publication_commit, immutable_store_lease_release, &
-        immutable_store_reason_release, &
-        immutable_store_graph_read_lease_acquire, &
         immutable_store_materialize_blob, IMMUTABLE_MATERIALIZE_AUTO
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_verify_tree
@@ -44,11 +40,9 @@ module fx_action_result_store
         logical :: initialized = .false.
     end type action_result_store_t
 
-    !! Read handles keep the action's current and pending result graph leased.
-    !! Release only after every restored output has been atomically replaced.
+    !! A read handle names one action; it holds no lease or lock.
     type, public :: action_result_read_t
         private
-        type(immutable_lease_t) :: graph_lease
         character(len=:), allocatable :: action_key
         character(len=:), allocatable :: store_root
         logical :: active = .false.
@@ -81,8 +75,45 @@ module fx_action_result_store
     public :: action_result_file_mode
     public :: action_result_retire, action_result_retire_key
     public :: action_result_maintenance_tick
+    public :: action_result_store_policy, action_result_evict
+    public :: action_result_evict_stats_t
+
+    !! Eviction outcome; bytes are allocated object bytes (blobs and trees).
+    type :: action_result_evict_stats_t
+        integer(int64) :: bytes_before = 0_int64
+        integer(int64) :: bytes_after = 0_int64
+        integer(int64) :: actions = 0_int64
+        integer(int64) :: actions_retired = 0_int64
+        integer(int64) :: objects_deleted = 0_int64
+        integer(int64) :: temps_removed = 0_int64
+        logical :: over_cap = .false.
+    end type action_result_evict_stats_t
+
+    ! Size policy applied after publications (see action_result_store_policy).
+    integer(int64), save :: policy_max_bytes = 10_int64 * 1024_int64**3
+    integer(int64), save :: policy_grace = 3600_int64
+    integer(int64), save :: policy_interval = 300_int64
+    integer(int64), save :: policy_temp_age = 86400_int64
 
     interface
+        integer(c_int) function c_store_evict(root, max_bytes, low_bytes, grace, &
+                temp_age, stats) bind(C, name='fx_store_evict')
+            import :: c_int, c_char, c_long_long
+            character(kind=c_char), intent(in) :: root(*)
+            integer(c_long_long), value :: max_bytes, low_bytes, grace, temp_age
+            integer(c_long_long), intent(out) :: stats(7)
+        end function c_store_evict
+        integer(c_int) function c_store_evict_due(root, interval) &
+                bind(C, name='fx_store_evict_due')
+            import :: c_int, c_char, c_long_long
+            character(kind=c_char), intent(in) :: root(*)
+            integer(c_long_long), value :: interval
+        end function c_store_evict_due
+        subroutine c_set_touch_interval(seconds) &
+                bind(C, name='fx_action_result_set_touch_interval')
+            import :: c_long_long
+            integer(c_long_long), value :: seconds
+        end subroutine c_set_touch_interval
         integer(c_int) function c_action_lock(root, action_id) &
                 bind(C, name='fx_action_result_lock')
             import c_char, c_int
@@ -216,18 +247,17 @@ contains
         store%initialized = .true.
     end subroutine action_result_store_init
 
-    subroutine action_result_put_blob(store, source_path, blob_id, ierr, protected_by)
+    subroutine action_result_put_blob(store, source_path, blob_id, ierr)
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: source_path
         character(len=HASH_LEN), intent(out) :: blob_id
         integer, intent(out) :: ierr
-        type(immutable_lease_t), intent(in), optional :: protected_by
 
         blob_id = ''
         ierr = ACTION_RESULT_INVALID
         if (.not. store%initialized) return
         call immutable_store_put_blob(store%objects, trim(source_path), blob_id, &
-            ierr, protected_by)
+            ierr)
         if (ierr /= IMMUTABLE_OK) then
             if (ierr == IMMUTABLE_CORRUPT) then
                 ierr = ACTION_RESULT_CORRUPT
@@ -254,6 +284,11 @@ contains
     end subroutine action_result_file_mode
 
     subroutine action_result_publish(store, action_id, entries, result_id, ierr)
+        !! Bind the action to its result tree. Objects are freshened by
+        !! put_tree/put_blob, so a collector honouring its grace period keeps
+        !! them until this binding is visible. The record is replaced by
+        !! rename; the per-action lock only narrows same-host conflict races
+        !! (flock is host-local on BeeGFS), and correctness never depends on it.
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: action_id
         type(immutable_tree_entry_t), intent(in) :: entries(:)
@@ -261,15 +296,12 @@ contains
         integer, intent(out) :: ierr
 
         character(len=HASH_LEN) :: key, current, ids(2), temporary_id
-        character(len=HASH_LEN) :: root_ids(2)
-        character(len=4) :: root_kinds(2)
         character(len=:), allocatable :: record, manifest
         type(immutable_tree_entry_t), allocatable :: sorted_entries(:)
-        type(immutable_lease_t) :: publication_lease
-        character(kind=c_char), allocatable :: c_root(:), c_key(:), c_record(:)
+        character(kind=c_char), allocatable :: c_root(:), c_key(:)
         character(kind=c_char) :: existing(RECORD_LIMIT)
         integer(c_int) :: lock, count, rc, unlock_rc
-        integer :: verify_status, parse_status, root_status
+        integer :: verify_status, parse_status
 
         result_id = ''
         ierr = ACTION_RESULT_INVALID
@@ -284,20 +316,9 @@ contains
         end if
         manifest = immutable_manifest_serialize(sorted_entries)
         result_id = sha256_string(manifest)
-        root_kinds = 'tree'
-        root_ids(1) = result_id
-        call immutable_store_publication_lease_acquire(store%objects, key, &
-            'fx-action-v1', 'publication', root_kinds(1:1), root_ids(1:1), &
-            publication_lease, root_status)
-        if (root_status /= IMMUTABLE_OK) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
         call immutable_store_put_tree(store%objects, sorted_entries, result_id, &
             verify_status)
         if (verify_status /= IMMUTABLE_OK) then
-            call immutable_store_lease_release(store%objects, publication_lease, &
-                root_status)
             ierr = ACTION_RESULT_CORRUPT
             return
         end if
@@ -306,130 +327,105 @@ contains
         call to_c_text(key, c_key)
         lock = c_action_lock(c_root, c_key)
         if (lock < 0_c_int) then
-            call immutable_store_lease_release(store%objects, publication_lease, &
-                root_status)
             ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         rc = c_action_read(c_root, c_key, existing, RECORD_LIMIT, count)
+        if (rc == 0_c_int) then
+            if (record_retired(existing, int(count), key)) rc = 1_c_int
+        end if
         if (rc == 1_c_int) then
             record = action_result_bound_record(key, result_id)
             call write_record(c_root, c_key, record, ierr)
-            if (ierr == ACTION_RESULT_OK) then
-                call immutable_store_publication_commit(store%objects, &
-                    publication_lease, 'bound', root_kinds(1:1), &
-                    root_ids(1:1), root_status)
-                if (root_status /= IMMUTABLE_OK) ierr = ACTION_RESULT_IO_ERROR
-            else
-                call immutable_store_lease_release(store%objects, &
-                    publication_lease, root_status)
-            end if
-            unlock_rc = c_action_unlock(lock)
-            if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
-            if (ierr == ACTION_RESULT_OK) call maybe_maintain_after_publish(store)
-            return
-        end if
-        if (rc /= 0_c_int) then
-            unlock_rc = c_action_unlock(lock)
-            call immutable_store_lease_release(store%objects, publication_lease, &
-                root_status)
+        else if (rc /= 0_c_int) then
             ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
-
-        call action_result_record_parse(existing, int(count), key, current, ids, &
-            parse_status)
-        if (parse_status == ACTION_RECORD_CONFLICT) then
-            root_ids = ids
-            call immutable_store_publication_commit(store%objects, &
-                publication_lease, 'conflict', root_kinds, root_ids, root_status)
-            unlock_rc = c_action_unlock(lock)
-            ierr = ACTION_RESULT_QUARANTINED
-            if (root_status /= IMMUTABLE_OK .or. unlock_rc /= 0_c_int) &
-                ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
-        if (record_retired(existing, int(count), key)) then
-            call immutable_store_reason_release(store%objects, key, &
-                'fx-action-v1', 'bound', root_status)
-            if (root_status == IMMUTABLE_OK) then
-                record = action_result_bound_record(key, result_id)
-                call write_record(c_root, c_key, record, ierr)
-                if (ierr == ACTION_RESULT_OK) then
-                    call immutable_store_publication_commit(store%objects, &
-                        publication_lease, 'bound', root_kinds(1:1), &
-                        root_ids(1:1), root_status)
-                    if (root_status /= IMMUTABLE_OK) ierr = ACTION_RESULT_IO_ERROR
-                end if
-            else
-                ierr = ACTION_RESULT_IO_ERROR
-            end if
-            if (publication_lease%active) &
-                call immutable_store_lease_release(store%objects, &
-                    publication_lease, root_status)
-            unlock_rc = c_action_unlock(lock)
-            if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
-            if (ierr == ACTION_RESULT_OK) call maybe_maintain_after_publish(store)
-            return
-        end if
-        if (parse_status /= ACTION_RECORD_BOUND) then
-            unlock_rc = c_action_unlock(lock)
-            call immutable_store_lease_release(store%objects, publication_lease, &
-                root_status)
-            ierr = ACTION_RESULT_CORRUPT
-            return
-        end if
-        if (current == result_id) then
-            call immutable_store_publication_commit(store%objects, &
-                publication_lease, 'bound', root_kinds(1:1), root_ids(1:1), &
-                root_status)
-            unlock_rc = c_action_unlock(lock)
-            ierr = ACTION_RESULT_OK
-            if (unlock_rc /= 0_c_int .or. root_status /= IMMUTABLE_OK) &
-                ierr = ACTION_RESULT_IO_ERROR
-            if (ierr == ACTION_RESULT_OK) call maybe_maintain_after_publish(store)
-            return
-        end if
-
-        ids(1) = current
-        ids(2) = result_id
-        if (ids(1) > ids(2)) then
-            temporary_id = ids(1)
-            ids(1) = ids(2)
-            ids(2) = temporary_id
-        end if
-        record = action_result_conflict_record(key, ids)
-        call write_record(c_root, c_key, record, ierr)
-        root_ids = ids
-        if (ierr == ACTION_RESULT_OK) then
-            call immutable_store_publication_commit(store%objects, &
-                publication_lease, 'conflict', root_kinds, root_ids, root_status)
-            if (root_status == IMMUTABLE_OK) then
-                call immutable_store_reason_release(store%objects, key, &
-                    'fx-action-v1', 'bound', root_status)
-            else
-                ierr = ACTION_RESULT_IO_ERROR
-            end if
         else
-            call immutable_store_lease_release(store%objects, publication_lease, &
-                root_status)
+            call action_result_record_parse(existing, int(count), key, current, &
+                ids, parse_status)
+            if (parse_status == ACTION_RECORD_CONFLICT) then
+                ierr = ACTION_RESULT_QUARANTINED
+            else if (parse_status /= ACTION_RECORD_BOUND) then
+                ierr = ACTION_RESULT_CORRUPT
+            else if (current == result_id) then
+                ierr = ACTION_RESULT_OK
+            else
+                ids(1) = current
+                ids(2) = result_id
+                if (ids(1) > ids(2)) then
+                    temporary_id = ids(1)
+                    ids(1) = ids(2)
+                    ids(2) = temporary_id
+                end if
+                record = action_result_conflict_record(key, ids)
+                call write_record(c_root, c_key, record, ierr)
+                if (ierr == ACTION_RESULT_OK) ierr = ACTION_RESULT_CONFLICT
+            end if
         end if
         unlock_rc = c_action_unlock(lock)
-        if (ierr == ACTION_RESULT_OK .and. unlock_rc == 0_c_int) &
-            ierr = ACTION_RESULT_CONFLICT
         if (unlock_rc /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
+        if (ierr == ACTION_RESULT_OK) call maybe_maintain_after_publish(store)
     end subroutine action_result_publish
 
-    subroutine maybe_maintain_after_publish(store)
-        type(action_result_store_t), intent(in) :: store
-        integer(c_int) :: due
-        integer :: scanned, retired, deleted, maintenance_status
+    subroutine action_result_store_policy(max_bytes, grace_seconds, &
+            interval_seconds, temp_age_seconds)
+        !! Set the size policy for this process. max_bytes 0 disables the cap.
+        !! Entries used or published within grace_seconds are never evicted,
+        !! so the cap is soft while that much data is in active use. Reads
+        !! refresh a record's last-use stamp at a quarter of the grace period
+        !! (at most every 300 s), which keeps used entries out of eviction.
+        integer(int64), intent(in), optional :: max_bytes, grace_seconds, &
+            interval_seconds, temp_age_seconds
 
-        due = c_maintenance_due(store%root_dir//c_null_char, 60_c_long_long)
-        if (due /= 1_c_int) return
-        call action_result_maintenance_tick(store, scanned, retired, deleted, &
-            maintenance_status)
-        ! Housekeeping status is independent of the durable publish result.
+        if (present(max_bytes)) policy_max_bytes = max(0_int64, max_bytes)
+        if (present(grace_seconds)) policy_grace = max(4_int64, grace_seconds)
+        if (present(interval_seconds)) &
+            policy_interval = max(0_int64, interval_seconds)
+        if (present(temp_age_seconds)) &
+            policy_temp_age = max(policy_grace, temp_age_seconds)
+        call c_set_touch_interval(int(min(300_int64, policy_grace / 4_int64), &
+            c_long_long))
+    end subroutine action_result_store_policy
+
+    subroutine action_result_evict(store, stats, ierr, max_bytes)
+        !! Enforce the size cap now: retire least recently used records and
+        !! delete unreachable objects down to 80 % of the cap, sparing
+        !! everything used within the grace period; remove stale staging files.
+        type(action_result_store_t), intent(in) :: store
+        type(action_result_evict_stats_t), intent(out) :: stats
+        integer, intent(out) :: ierr
+        integer(int64), intent(in), optional :: max_bytes
+        integer(c_long_long) :: raw(7), cap
+        integer(c_int) :: rc
+
+        ierr = ACTION_RESULT_INVALID
+        if (.not. store%initialized) return
+        cap = int(policy_max_bytes, c_long_long)
+        if (present(max_bytes)) cap = int(max(0_int64, max_bytes), c_long_long)
+        if (cap == 0_c_long_long) cap = huge(cap)
+        rc = c_store_evict(store%root_dir//c_null_char, cap, &
+            cap - cap / 5_c_long_long, int(policy_grace, c_long_long), &
+            int(policy_temp_age, c_long_long), raw)
+        stats%bytes_before = raw(1)
+        stats%bytes_after = raw(2)
+        stats%actions = raw(3)
+        stats%actions_retired = raw(4)
+        stats%objects_deleted = raw(5)
+        stats%temps_removed = raw(6)
+        stats%over_cap = raw(7) /= 0_c_long_long
+        ierr = ACTION_RESULT_IO_ERROR
+        if (rc == 0_c_int) ierr = ACTION_RESULT_OK
+    end subroutine action_result_evict
+
+    subroutine maybe_maintain_after_publish(store)
+        !! Size housekeeping at most once per policy interval per store; its
+        !! status never affects the durable publish result.
+        type(action_result_store_t), intent(in) :: store
+        type(action_result_evict_stats_t) :: stats
+        integer :: status
+
+        if (c_store_evict_due(store%root_dir//c_null_char, &
+            int(policy_interval, c_long_long)) /= 1_c_int) return
+        call action_result_evict(store, stats, status)
     end subroutine maybe_maintain_after_publish
 
     subroutine action_result_retire(store, action_id, min_age_seconds, retired, ierr)
@@ -458,10 +454,10 @@ contains
 
     subroutine retire_key_impl(store, key, min_age_seconds, retired, &
             ierr, nonblocking)
-        !! Retire one old bound record. A durable marker closes the crash gap
-        !! between hiding the binding and releasing its root. Retry this call
-        !! on a marker to finish interrupted cleanup, regardless of its age.
-        !! The key is the exact 64-hex action filename for bounded scanners.
+        !! Retire one record unused for at least min_age_seconds (its mtime is
+        !! the last-use stamp). Conflict records age out the same way; legacy
+        !! RETIRED markers are removed regardless of age. The key is the exact
+        !! 64-hex action filename for bounded scanners.
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: key
         integer, intent(in) :: min_age_seconds
@@ -469,11 +465,10 @@ contains
         integer, intent(out) :: ierr
         logical, intent(in) :: nonblocking
         character(len=HASH_LEN) :: bound, ids(2)
-        character(len=:), allocatable :: marker
         character(kind=c_char), allocatable :: c_root(:), c_key(:)
         character(kind=c_char) :: bytes(RECORD_LIMIT)
         integer(c_int) :: lock, count, rc, age, unlock_rc
-        integer :: parse_status, root_status
+        integer :: parse_status
 
         retired = .false.
         ierr = ACTION_RESULT_INVALID
@@ -499,49 +494,31 @@ contains
             ierr = ACTION_RESULT_MISSING
         else if (rc /= 0_c_int) then
             ierr = ACTION_RESULT_CORRUPT
-        else if (record_retired(bytes, int(count), key)) then
-            call immutable_store_reason_release(store%objects, key, &
-                'fx-action-v1', 'bound', root_status)
-            ierr = ACTION_RESULT_IO_ERROR
-            if (root_status == IMMUTABLE_OK) then
+        else
+            age = 0_c_int
+            if (.not. record_retired(bytes, int(count), key)) then
+                call action_result_record_parse(bytes, int(count), key, bound, &
+                    ids, parse_status)
+                if (parse_status /= ACTION_RECORD_CONFLICT .and. &
+                    parse_status /= ACTION_RECORD_BOUND) then
+                    age = -1_c_int
+                else
+                    age = c_action_age(c_root, c_key, &
+                        int(min_age_seconds, c_long_long))
+                end if
+            end if
+            if (age == 2_c_int) then
+                ierr = ACTION_RESULT_OK
+            else if (age == 1_c_int) then
+                ierr = ACTION_RESULT_MISSING
+            else if (age /= 0_c_int) then
+                ierr = ACTION_RESULT_CORRUPT
+            else
+                ierr = ACTION_RESULT_IO_ERROR
                 rc = c_action_remove(c_root, c_key)
                 if (rc == 0_c_int) then
                     retired = .true.
                     ierr = ACTION_RESULT_OK
-                end if
-            end if
-        else
-            call action_result_record_parse(bytes, int(count), key, bound, &
-                ids, parse_status)
-            if (parse_status == ACTION_RECORD_CONFLICT) then
-                ierr = ACTION_RESULT_QUARANTINED
-            else if (parse_status /= ACTION_RECORD_BOUND) then
-                ierr = ACTION_RESULT_CORRUPT
-            else
-                age = c_action_age(c_root, c_key, int(min_age_seconds, c_long_long))
-                if (age == 2_c_int) then
-                    ierr = ACTION_RESULT_OK
-                else if (age == 1_c_int) then
-                    ierr = ACTION_RESULT_MISSING
-                else if (age /= 0_c_int) then
-                    ierr = ACTION_RESULT_IO_ERROR
-                else
-                    marker = retired_record(key)
-                    call write_record(c_root, c_key, marker, ierr)
-                    if (ierr == ACTION_RESULT_OK) then
-                        call immutable_store_reason_release(store%objects, &
-                            key, 'fx-action-v1', 'bound', root_status)
-                        if (root_status /= IMMUTABLE_OK) then
-                            ierr = ACTION_RESULT_IO_ERROR
-                        else
-                            rc = c_action_remove(c_root, c_key)
-                            if (rc /= 0_c_int) then
-                                ierr = ACTION_RESULT_IO_ERROR
-                            else
-                                retired = .true.
-                            end if
-                        end if
-                    end if
                 end if
             end if
         end if
@@ -692,72 +669,37 @@ contains
         type(immutable_tree_entry_t), intent(inout) :: entries(:)
         character(len=HASH_LEN), intent(out) :: result_id
         integer, intent(out) :: ierr
-        type(immutable_lease_t) :: outputs_lease
-        character(len=4), allocatable :: kinds(:)
-        character(len=HASH_LEN), allocatable :: ids(:)
-        integer :: i, lease_status
+        integer :: i
 
         result_id = ''
         ierr = ACTION_RESULT_INVALID
         if (size(source_paths) /= size(entries)) return
-        if (size(entries) == 0) then
-            call action_result_publish(store, action_id, entries, result_id, ierr)
-            return
-        end if
-        allocate(kinds(size(entries)), ids(size(entries)))
-        kinds = 'blob'
-        ! Keep every output protected until the action graph is committed.
-        do i = 1, size(entries)
-            call immutable_store_hash_file(trim(source_paths(i)), ids(i), ierr)
-            if (ierr /= IMMUTABLE_OK) then
-                ierr = ACTION_RESULT_IO_ERROR
-                return
-            end if
-        end do
-        call immutable_store_publication_lease_acquire(store%objects, &
-            'fx-action-files', store%objects%writer_start, 'outputs', kinds, &
-            ids, outputs_lease, lease_status)
-        if (lease_status /= IMMUTABLE_OK) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
+        ierr = ACTION_RESULT_OK
         do i = 1, size(entries)
             call action_result_put_blob(store, trim(source_paths(i)), &
-                entries(i)%object_id, ierr, outputs_lease)
-            if (ierr /= ACTION_RESULT_OK) exit
+                entries(i)%object_id, ierr)
+            if (ierr /= ACTION_RESULT_OK) return
         end do
-        if (ierr == ACTION_RESULT_OK) &
-            call action_result_publish(store, action_id, entries, result_id, ierr)
-        call immutable_store_lease_release(store%objects, outputs_lease, &
-            lease_status)
-        if (ierr == ACTION_RESULT_OK .and. lease_status /= IMMUTABLE_OK) &
-            ierr = ACTION_RESULT_IO_ERROR
+        call action_result_publish(store, action_id, entries, result_id, ierr)
     end subroutine action_result_publish_files
 
     subroutine action_result_read_acquire(store, action_id, read, ierr)
-        !! Acquire before checking or reading the action binding record.
+        !! Open a read handle. Reads take no lease and no lock: the binding
+        !! read refreshes the record's last-use stamp, collectors spare
+        !! entries used within their grace period, and every object is
+        !! hash-verified, so a concurrent eviction yields a miss, never bytes
+        !! of another action.
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: action_id
         type(action_result_read_t), intent(out) :: read
         integer, intent(out) :: ierr
         character(len=HASH_LEN) :: key
-        integer :: lease_status
 
         read%active = .false.
         ierr = ACTION_RESULT_INVALID
         if (.not. store%initialized) return
         key = action_result_action_key(action_id)
         if (.not. immutable_id_valid(key)) return
-        call immutable_store_graph_read_lease_acquire(store%objects, key, &
-            'fx-action-v1', 'action-read', read%graph_lease, lease_status)
-        if (lease_status == IMMUTABLE_MISSING) then
-            ierr = ACTION_RESULT_MISSING
-            return
-        end if
-        if (lease_status /= IMMUTABLE_OK) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
         read%action_key = key
         read%store_root = store%root_dir
         read%active = .true.
@@ -765,26 +707,17 @@ contains
     end subroutine action_result_read_acquire
 
     subroutine action_result_read_release(store, read, ierr)
-        !! Release only this handle's token after all graph consumers are done.
         type(action_result_store_t), intent(in) :: store
         type(action_result_read_t), intent(inout) :: read
         integer, intent(out) :: ierr
-        integer :: lease_status
 
         ierr = ACTION_RESULT_INVALID
         if (.not. read%active) return
         if (.not. store%initialized) return
         if (.not. allocated(read%store_root)) return
         if (read%store_root /= store%root_dir) return
-        call immutable_store_lease_release(store%objects, read%graph_lease, &
-            lease_status)
-        if (lease_status == IMMUTABLE_OK .or. &
-            lease_status == IMMUTABLE_MISSING) then
-            read%active = .false.
-            ierr = ACTION_RESULT_OK
-        else
-            ierr = ACTION_RESULT_IO_ERROR
-        end if
+        read%active = .false.
+        ierr = ACTION_RESULT_OK
     end subroutine action_result_read_release
 
     subroutine action_result_lookup(store, action_id, entries, result_id, ierr)
@@ -847,7 +780,7 @@ contains
         key = action_result_action_key(action_id)
         if (.not. immutable_id_valid(key)) return
         call action_result_record_snapshot(store, key, snapshot, &
-            .true., ACTION_RESULT_MISSING, ierr)
+            ACTION_RESULT_MISSING, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         call read_result_tree(store, snapshot, entries, ierr)
         if (ierr /= ACTION_RESULT_OK) return
@@ -867,21 +800,20 @@ contains
         if (.not. immutable_id_valid(key)) return
         if (.not. immutable_id_valid(result_id)) return
         call action_result_record_confirm(store, key, result_id, &
-            .true., ACTION_RESULT_MISSING, ierr)
+            ACTION_RESULT_MISSING, ierr)
     end subroutine action_result_preview_confirm
 
     subroutine action_result_record_snapshot(store, key, result_id, &
-            check_exists, missing_status, ierr)
+            missing_status, ierr)
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: key
         character(len=HASH_LEN), intent(out) :: result_id
-        logical, intent(in) :: check_exists
         integer, intent(in) :: missing_status
         integer, intent(out) :: ierr
         character(kind=c_char), allocatable :: c_root(:), c_key(:)
         character(kind=c_char) :: record_bytes(RECORD_LIMIT)
         character(len=HASH_LEN) :: current, ids(2)
-        integer(c_int) :: exists_status, lock, count, rc, unlock_status
+        integer(c_int) :: count, rc
         integer :: parse_status
 
         result_id = ''
@@ -890,52 +822,24 @@ contains
         if (.not. immutable_id_valid(key)) return
         call to_c_text(store%root_dir, c_root)
         call to_c_text(key, c_key)
-        if (check_exists) then
-            exists_status = c_action_exists(c_root, c_key)
-            if (exists_status == 1_c_int) then
-                ierr = missing_status
-                return
-            end if
-            if (exists_status /= 0_c_int) then
-                ierr = ACTION_RESULT_CORRUPT
-                return
-            end if
-        end if
-        lock = c_action_lock(c_root, c_key)
-        if (lock < 0_c_int) then
-            ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
         rc = c_action_read_touch(c_root, c_key, record_bytes, RECORD_LIMIT, count)
         if (rc /= 0_c_int) then
-            unlock_status = c_action_unlock(lock)
             ierr = missing_status
             if (rc /= 1_c_int) ierr = ACTION_RESULT_CORRUPT
             return
         end if
         if (record_retired(record_bytes, int(count), key)) then
-            unlock_status = c_action_unlock(lock)
             ierr = ACTION_RESULT_MISSING
-            if (unlock_status /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         call action_result_record_parse(record_bytes, int(count), key, current, &
             ids, parse_status)
         if (parse_status == ACTION_RECORD_CONFLICT) then
-            unlock_status = c_action_unlock(lock)
             ierr = ACTION_RESULT_QUARANTINED
-            if (unlock_status /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         if (parse_status /= ACTION_RECORD_BOUND) then
-            unlock_status = c_action_unlock(lock)
             ierr = ACTION_RESULT_CORRUPT
-            if (unlock_status /= 0_c_int) ierr = ACTION_RESULT_IO_ERROR
-            return
-        end if
-        unlock_status = c_action_unlock(lock)
-        if (unlock_status /= 0_c_int) then
-            ierr = ACTION_RESULT_IO_ERROR
             return
         end if
         result_id = current
@@ -943,15 +847,14 @@ contains
     end subroutine action_result_record_snapshot
 
     subroutine action_result_record_confirm(store, key, expected_id, &
-            check_exists, missing_status, ierr)
+            missing_status, ierr)
         type(action_result_store_t), intent(in) :: store
         character(len=*), intent(in) :: key, expected_id
-        logical, intent(in) :: check_exists
         integer, intent(in) :: missing_status
         integer, intent(out) :: ierr
         character(len=HASH_LEN) :: current
 
-        call action_result_record_snapshot(store, key, current, check_exists, &
+        call action_result_record_snapshot(store, key, current, &
             missing_status, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         if (current /= expected_id) ierr = ACTION_RESULT_MISSING
@@ -978,7 +881,7 @@ contains
         key = read%action_key
         if (.not. immutable_id_valid(key)) return
         call action_result_record_snapshot(store, key, snapshot, &
-            .true., ACTION_RESULT_MISSING, ierr)
+            ACTION_RESULT_MISSING, ierr)
         if (ierr /= ACTION_RESULT_OK) return
 
         ! Result verification and manifest loading can hash an arbitrarily
@@ -993,7 +896,7 @@ contains
 
         ! A second lock check provides the linearization point; conflicts win.
         call action_result_record_confirm(store, key, snapshot, &
-            .false., ACTION_RESULT_CORRUPT, ierr)
+            ACTION_RESULT_CORRUPT, ierr)
         if (ierr /= ACTION_RESULT_OK) return
         result_id = snapshot
         ierr = ACTION_RESULT_OK

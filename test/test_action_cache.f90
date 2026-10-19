@@ -267,16 +267,16 @@ contains
             entries(1)%object_id)
 
         epoch_before = read_lease_epoch(root//'/cache/store/v2')
-        call test_assert(suite, epoch_before >= 0, &
-            'warm fixture has readable lease metadata')
+        call test_assert(suite, epoch_before < 0, &
+            'action publication writes no shared lease metadata')
         call cache_restore_action(c, 'warm-result', object_file, root, restored)
         call test_assert(suite, restored, &
             'matching local object validates against the action result')
         call test_assert(suite, file_has_bytes(object_file, 'WARM OBJECT BYTES'), &
             'warm validation preserves the actual local object')
         epoch_after = read_lease_epoch(root//'/cache/store/v2')
-        call test_assert(suite, epoch_after == epoch_before, &
-            'warm local validation does not mutate graph lease metadata')
+        call test_assert(suite, epoch_after < 0, &
+            'warm local validation writes no shared lease metadata')
 
         cleanup = fx_test_chmod(blob_path, 420)
         call test_assert_equal_int(suite, 0, cleanup, &
@@ -305,7 +305,7 @@ contains
         call write_file(object_file, 'DIFFERENT LOCAL OBJECT')
         call cache_restore_action(c, 'warm-result', object_file, root, restored)
         call test_assert(suite, .not. restored, &
-            'local mismatch still rejects a corrupt graph during leased restore')
+            'local mismatch still rejects a corrupt graph during restore')
         call test_assert(suite, file_has_bytes(object_file, 'DIFFERENT LOCAL OBJECT'), &
             'rejected corrupt graph preserves the mismatching local output')
         call write_file(object_file, 'WARM OBJECT BYTES')

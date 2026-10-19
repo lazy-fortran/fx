@@ -15,7 +15,7 @@ module fx_immutable_owned
     public :: owned_sync
     public :: owned_open_verified, owned_hash_fd, owned_read_manifest
     public :: owned_materialize_blob, owned_materialize_blob_ephemeral
-    public :: owned_file_info
+    public :: owned_file_info, owned_freshen
     public :: owned_copy_source, owned_write, owned_publish, owned_reject
     integer, parameter :: HASH_BLOCK = 65536
     interface
@@ -86,6 +86,12 @@ module fx_immutable_owned
             import :: c_ptr
             type(c_ptr), value :: handle
         end subroutine owned_dispose
+        integer(c_int) function owned_freshen(root, kind, id) &
+                bind(C, name='fx_owned_freshen')
+            import :: c_int, c_char
+            integer(c_int), value :: root, kind
+            character(kind=c_char), intent(in) :: id(*)
+        end function owned_freshen
         integer(c_int) function owned_close(fd) bind(C, name='fx_owned_close')
             import :: c_int
             integer(c_int), value :: fd

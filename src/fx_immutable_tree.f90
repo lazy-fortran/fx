@@ -8,8 +8,7 @@ module fx_immutable_tree
         IMMUTABLE_MATERIALIZE_AUTO, IMMUTABLE_MATERIALIZE_COPY, &
         IMMUTABLE_MATERIALIZE_CLONE, &
         immutable_store_tree_path, immutable_store_verify_blob, &
-        immutable_lease_t, &
-        immutable_store_publication_lease_acquire, &
+        immutable_lease_t, immutable_store_freshen, &
         immutable_store_read_lease_acquire, immutable_store_lease_release
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_read_manifest, owned_begin_path, owned_begin_at, owned_fd, &
@@ -37,12 +36,9 @@ contains
         character(len=HASH_LEN), intent(out) :: tree_id
         integer, intent(out) :: ierr
         type(immutable_tree_entry_t), allocatable :: sorted(:)
-        type(immutable_lease_t) :: publication
-        character(len=4), allocatable :: kinds(:)
-        character(len=HASH_LEN), allocatable :: ids(:)
         character(len=HASH_LEN) :: anticipated_id
         character(len=:), allocatable :: manifest
-        integer :: i, status, lease_status
+        integer :: i, status
 
         tree_id = ''
         ierr = IMMUTABLE_INVALID
@@ -51,50 +47,28 @@ contains
         if (ierr /= IMMUTABLE_OK) return
         call immutable_manifest_encode(sorted, manifest)
         anticipated_id = sha256_string(manifest)
-        ! Protect children even while the new parent tree is still absent.
-        allocate(kinds(size(sorted) + 1), ids(size(sorted) + 1))
-        kinds(1) = 'tree'
-        ids(1) = anticipated_id
-        do i = 1, size(sorted)
-            if (sorted(i)%kind == IMMUTABLE_BLOB) then
-                kinds(i + 1) = 'blob'
-            else
-                kinds(i + 1) = 'tree'
-            end if
-            ids(i + 1) = sorted(i)%object_id
-        end do
-        call immutable_store_publication_lease_acquire(store, 'fx-publisher', &
-            store%writer_start, 'tree', kinds, ids, publication, lease_status)
-        if (lease_status /= IMMUTABLE_OK) then
-            ierr = lease_status
-            return
-        end if
+        ! No lease: children were verified (and freshened by put_blob); an
+        ! existing tree is freshened to restart its collection grace period.
         do i = 1, size(sorted)
             if (sorted(i)%kind == IMMUTABLE_BLOB) then
                 call immutable_store_verify_blob(store, sorted(i)%object_id, ierr)
             else
                 call verify_tree_depth(store, sorted(i)%object_id, 0, ierr)
             end if
-            if (ierr /= IMMUTABLE_OK) then
-                call immutable_store_lease_release(store, publication, lease_status)
-                return
-            end if
+            if (ierr /= IMMUTABLE_OK) return
         end do
         tree_id = anticipated_id
         call immutable_store_verify_tree(store, tree_id, status)
         if (status == IMMUTABLE_OK) then
-            call immutable_store_lease_release(store, publication, ierr)
-            return
+            call immutable_store_freshen(store, 2, tree_id, status)
+            ierr = status
+            if (status /= IMMUTABLE_MISSING) return
         end if
         if (status /= IMMUTABLE_MISSING) then
-            call immutable_store_lease_release(store, publication, lease_status)
             ierr = status
             return
         end if
         call publish_tree_capture(store, tree_id, manifest, ierr)
-        call immutable_store_lease_release(store, publication, lease_status)
-        if (ierr == IMMUTABLE_OK .and. lease_status /= IMMUTABLE_OK) &
-            ierr = IMMUTABLE_IO_ERROR
     end subroutine immutable_store_put_tree
 
     subroutine publish_tree_capture(store, id, manifest, ierr)

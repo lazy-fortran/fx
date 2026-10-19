@@ -74,9 +74,9 @@ source-dir = "test"
 main = "test_immutable_leases.f90"
 
 [[test]]
-name = "test_action_result_read_lease"
+name = "test_action_result_evict"
 source-dir = "test"
-main = "test_action_result_read_lease.f90"
+main = "test_action_result_evict.f90"
 
 [[test]]
 name = "test_immutable_gc"

@@ -8,7 +8,7 @@ module fx_immutable_store
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
         owned_close, owned_begin_path, owned_dispose, owned_materialize_blob, &
         owned_begin_path_ephemeral, owned_materialize_blob_ephemeral, &
-        owned_file_info, owned_fd, owned_hash_fd, &
+        owned_file_info, owned_fd, owned_hash_fd, owned_freshen, &
         owned_copy_source, owned_publish, owned_reject
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_IO_ERROR, &
         IMMUTABLE_INVALID, IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, &
@@ -77,7 +77,7 @@ module fx_immutable_store
 
     public :: immutable_store_init, immutable_store_blob_path
     public :: immutable_store_tree_path, immutable_store_put_blob
-    public :: immutable_store_verify_blob
+    public :: immutable_store_verify_blob, immutable_store_freshen
     public :: immutable_store_materialize_blob
     public :: immutable_store_materialize_blob_ephemeral
     public :: immutable_store_root_set
@@ -157,9 +157,6 @@ contains
         integer, intent(out) :: ierr
         type(immutable_lease_t), intent(in), optional :: protected_by
         integer :: status
-        type(immutable_lease_t) :: publication
-        character(len=4) :: kinds(1) = ['blob']
-        character(len=HASH_LEN) :: ids(1)
 
         object_id = ''
         ierr = IMMUTABLE_INVALID
@@ -171,41 +168,40 @@ contains
                 ierr = IMMUTABLE_INVALID
                 return
             end if
-            call immutable_store_verify_blob(store, object_id, status)
-            if (status == IMMUTABLE_OK) then
-                ierr = IMMUTABLE_OK
-                return
-            end if
-            if (status /= IMMUTABLE_MISSING) then
-                ierr = status
-                return
-            end if
-            call publish_blob_capture(store, source_path, object_id, ierr)
-            return
         end if
 
-        ids(1) = object_id
-        call immutable_store_publication_lease_acquire(store, 'fx-publisher', &
-            store%writer_start, 'blob', kinds, ids, publication, status)
-        if (status /= IMMUTABLE_OK) then
-            ierr = status
-            return
-        end if
+        ! No lease: an existing object is freshened instead, which restarts
+        ! the collector's grace period for it on every host.
         call immutable_store_verify_blob(store, object_id, status)
         if (status == IMMUTABLE_OK) then
-            call immutable_store_lease_release(store, publication, ierr)
-            return
+            call immutable_store_freshen(store, 1, object_id, status)
+            ierr = status
+            if (status /= IMMUTABLE_MISSING) return
         end if
         if (status /= IMMUTABLE_MISSING) then
-            call immutable_store_lease_release(store, publication, ierr)
             ierr = status
             return
         end if
         call publish_blob_capture(store, source_path, object_id, ierr)
-        call immutable_store_lease_release(store, publication, status)
-        if (ierr == IMMUTABLE_OK .and. status /= IMMUTABLE_OK) &
-            ierr = IMMUTABLE_IO_ERROR
     end subroutine immutable_store_put_blob
+
+    subroutine immutable_store_freshen(store, kind, object_id, ierr)
+        !! Restart an object's collection grace period (kind 1 blob, 2 tree).
+        !! A vanished object is reported missing so the caller republishes.
+        type(immutable_store_t), intent(in) :: store
+        integer, intent(in) :: kind
+        character(len=*), intent(in) :: object_id
+        integer, intent(out) :: ierr
+        integer(c_int) :: root, rc, cleanup
+
+        ierr = IMMUTABLE_IO_ERROR
+        root = owned_open_store(store%root_dir//c_null_char)
+        if (root < 0) return
+        rc = owned_freshen(root, int(kind, c_int), trim(object_id)//c_null_char)
+        cleanup = owned_close(root)
+        if (rc == 0_c_int) ierr = IMMUTABLE_OK
+        if (rc == -2_c_int) ierr = IMMUTABLE_MISSING
+    end subroutine immutable_store_freshen
 
     subroutine publish_blob_capture(store, source, id, ierr)
         type(immutable_store_t), intent(in) :: store

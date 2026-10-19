@@ -149,41 +149,75 @@ static int action_record(const char *root, const char *id, char *dir,
     return n < 0 || (size_t)n >= name_cap ? -1 : 0;
 }
 
-static int action_result_read(const char *root, const char *id, char *bytes,
-                              int capacity, int *count, int refresh_age)
+/* Last-use stamp interval: a read refreshes a record's mtime when it is
+ * older than this, so record mtimes order actions by recent use (LRU) at
+ * this granularity. Collectors only retire records older than their grace
+ * period, which callers keep well above this interval. */
+static long long touch_interval = 300;
+
+void fx_action_result_set_touch_interval(long long seconds)
 {
-    char dir[PATH_MAX], name[80], path[PATH_MAX];
-    *count = 0;
-    if (action_record(root, id, dir, sizeof(dir), name, sizeof(name)) != 0)
-        return -1;
-    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
-    if (n < 0 || (size_t)n >= sizeof(path)) return -1;
+    touch_interval = seconds < 1 ? 1 : seconds;
+}
+
+static int action_path(const char *root, const char *id, char *out, size_t cap)
+{
+    if (!valid_id(id)) return -1;
+    int n = snprintf(out, cap, "%s/actions/sha256/%.2s/%s", root, id, id);
+    return n < 0 || (size_t)n >= cap ? -1 : 0;
+}
+
+static int read_record_once(const char *path, char *bytes, int capacity,
+                            int *count, int refresh_age)
+{
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return errno == ENOENT ? 1 : -1;
+    if (fd < 0) return errno == ENOENT ? 1 : (errno == ESTALE ? -2 : -1);
     struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size < 0 || st.st_size > capacity) { close(fd); return -1; }
+    if (fstat(fd, &st) != 0) {
+        int stale = errno == ESTALE;
+        close(fd);
+        return stale ? -2 : -1;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > capacity) {
+        close(fd);
+        return -1;
+    }
     int total = 0;
     while (total < st.st_size) {
         ssize_t got = read(fd, bytes + total, (size_t)(st.st_size - total));
         if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) { close(fd); return -1; }
+        if (got <= 0) {
+            int stale = got < 0 && errno == ESTALE;
+            close(fd);
+            return stale ? -2 : -1;
+        }
         total += (int)got;
     }
     if (refresh_age) {
         time_t now = time(NULL);
-        if (now == (time_t)-1) { close(fd); return -1; }
-        if (st.st_mtime <= now - 86400) {
+        if (now != (time_t)-1 && st.st_mtime <= now - touch_interval) {
+            /* Best effort, not synced: a lost stamp only ages the entry. */
             struct timespec times[2] = {{0, UTIME_OMIT}, {0, UTIME_NOW}};
-            if (futimens(fd, times) != 0 || fsync(fd) != 0) {
-                close(fd);
-                return -1;
-            }
+            (void)futimens(fd, times);
         }
     }
     close(fd);
     *count = total;
     return 0;
+}
+
+/* Records are replaced by rename. A reader can then see ENOENT (BeeGFS) or
+ * ESTALE (NFSv3) for a short time; ESTALE is retried, ENOENT is a miss. */
+static int action_result_read(const char *root, const char *id, char *bytes,
+                              int capacity, int *count, int refresh_age)
+{
+    char path[PATH_MAX];
+    *count = 0;
+    if (action_path(root, id, path, sizeof(path)) != 0) return -1;
+    int rc = -2;
+    for (int attempt = 0; attempt < 4 && rc == -2; ++attempt)
+        rc = read_record_once(path, bytes, capacity, count, refresh_age);
+    return rc == -2 ? -1 : rc;
 }
 
 int fx_action_result_read(const char *root, const char *id, char *bytes,
@@ -192,8 +226,7 @@ int fx_action_result_read(const char *root, const char *id, char *bytes,
     return action_result_read(root, id, bytes, capacity, count, 0);
 }
 
-/* Called with the per-action lock held; the read's fstat avoids a hot-path
- * reopen, while an old mtime is durably refreshed at most once daily. */
+/* Refreshes the record's last-use stamp at most once per touch interval. */
 int fx_action_result_read_touch(const char *root, const char *id, char *bytes,
                                 int capacity, int *count)
 {
@@ -210,7 +243,12 @@ int fx_action_result_write(const char *root, const char *id,
     int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (dfd < 0) return -1;
     unsigned long ticket = __sync_add_and_fetch(&sequence, 1);
-    int n = snprintf(temp, sizeof(temp), ".tmp.%ld.%lu", (long)getpid(), ticket);
+    char host[64] = "";
+    if (gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
+    for (char *c = host; *c; ++c)
+        if (*c == '/' || *c == '.') { *c = '\0'; break; }
+    int n = snprintf(temp, sizeof(temp), ".tmp.%s.%ld.%lu", host,
+                     (long)getpid(), ticket);
     if (n < 0 || (size_t)n >= sizeof(temp)) { close(dfd); return -1; }
     int fd = openat(dfd, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
                     O_NOFOLLOW, 0600);
