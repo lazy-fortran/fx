@@ -34,6 +34,7 @@ program test_action_cache
     call test_v2_only(suite)
     call test_file_hash_hook(suite)
     call test_include_search_dirs(suite)
+    call test_key_completeness(suite)
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 
@@ -685,6 +686,89 @@ contains
         call reference_include_program(suite, source, directories, executable, '33')
         call cleanup_tree(root)
     end subroutine test_include_search_dirs
+
+    subroutine test_key_completeness(suite)
+        !! Keys cover every dependency key, full flag text and angle-bracket
+        !! includes; an unkeyable include or an empty key never hits.
+        type(test_suite_t), intent(inout) :: suite
+        type(cache_t) :: cache
+        character(:), allocatable :: root, source, executable, restored, flags
+        character(len=512) :: directories(1)
+        character(len=HASH_LEN) :: deps(200), key_a, key_b
+        integer :: i, ierr
+        logical :: hit
+        character(len=1), parameter :: nl = new_line('a')
+
+        root = temp_root('key-completeness')
+        call cleanup_tree(root)
+        call make_dir(root//'/src')
+        call make_dir(root//'/inc')
+        source = root//'/src/main.f90'
+        executable = root//'/reference'
+        restored = root//'/restored'
+        directories(1) = root//'/inc'
+        call write_file(source, 'program p'//nl//'#include <value.inc>'//nl// &
+            'end program p'//nl)
+        call write_file(root//'/src/value.inc', "print '(i0)', 5"//nl)
+        call write_file(root//'/inc/value.inc', "print '(i0)', 6"//nl)
+
+        do i = 1, size(deps)
+            deps(i) = repeat('0', HASH_LEN - 3)//char(48 + mod(i, 10))//'00'
+        end do
+        key_a = cache_key_for(source, 'c', '-cpp', deps, size(deps), &
+            include_dirs=directories)
+        deps(150)(1:1) = 'f'
+        key_b = cache_key_for(source, 'c', '-cpp', deps, size(deps), &
+            include_dirs=directories)
+        call test_assert(suite, len_trim(key_a) == HASH_LEN .and. key_a /= key_b, &
+            'dependency key 150 of 200 changes the action key')
+
+        flags = repeat('-O2 ', 150)
+        key_a = cache_key_for(source, 'c', flags//'-DA', deps, 0, &
+            include_dirs=directories)
+        key_b = cache_key_for(source, 'c', flags//'-DB', deps, 0, &
+            include_dirs=directories)
+        call test_assert(suite, key_a /= key_b, 'flag text past 512 bytes is keyed')
+
+        ! The compiler resolves <value.inc> in the include directory only.
+        call reference_angle_program(suite, source, directories(1), executable, '6')
+        key_a = cache_key_for(source, 'c', '-cpp', deps, 0, include_dirs=directories)
+        call write_file(root//'/src/value.inc', "print '(i0)', 7"//nl)
+        key_b = cache_key_for(source, 'c', '-cpp', deps, 0, include_dirs=directories)
+        call test_assert(suite, key_a == key_b, &
+            'angle include ignores the including directory')
+        call write_file(root//'/inc/value.inc', "print '(i0)', 8"//nl)
+        key_b = cache_key_for(source, 'c', '-cpp', deps, 0, include_dirs=directories)
+        call test_assert(suite, key_a /= key_b, 'angle include content is keyed')
+
+        call write_file(source, 'program p'//nl//'#include VALUE_FILE'//nl// &
+            'end program p'//nl)
+        key_a = cache_key_for(source, 'c', '-cpp', deps, 0, include_dirs=directories)
+        call test_assert(suite, len_trim(key_a) == 0, &
+            'macro include makes the action unkeyable')
+        call cache_init(cache, root//'/cache')
+        call cache_store_binary(cache, key_a, executable, ierr)
+        call test_assert(suite, ierr /= 0, 'empty key is never stored')
+        call cache_restore_binary(cache, key_a, restored, hit)
+        call test_assert(suite, .not. hit, 'empty key never hits')
+        call test_assert(suite, .not. cache_lookup(cache, key_a), &
+            'empty key lookup misses')
+        call cleanup_tree(root)
+    end subroutine test_key_completeness
+
+    subroutine reference_angle_program(suite, source, directory, executable, wanted)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=*), intent(in) :: source, directory, executable, wanted
+        character(len=512) :: arguments(6)
+        type(proc_result_t) :: child
+
+        arguments = [character(len=512) :: 'gfortran', '-cpp', &
+            '-I'//trim(directory), source, '-o', executable]
+        call proc_exec(arguments, size(arguments), child)
+        call test_assert_equal_int(suite, 0, child%exit_code, &
+            'reference compiler builds angle include program')
+        call assert_program_output(suite, executable, wanted)
+    end subroutine reference_angle_program
 
     subroutine reference_include_program(suite, source, directories, executable, wanted)
         type(test_suite_t), intent(inout) :: suite

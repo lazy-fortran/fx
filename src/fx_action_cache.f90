@@ -96,6 +96,7 @@ contains
         integer :: ierr, init_status
 
         hit = .false.
+        if (len_trim(key) == 0) return
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
         call action_result_lookup(store, key, entries, result_id, ierr)
@@ -201,17 +202,29 @@ contains
     logical function result_has_artifacts(entries, names, role, prefix) result(found)
         type(immutable_tree_entry_t), intent(in) :: entries(:)
         character(len=*), intent(in) :: names(:), role, prefix
-        integer :: i, j
+        integer :: i, j, k, c, n
         logical :: matched
+        ! Lowercased in a local buffer: this runs on OpenMP workers, where
+        ! gfortran deferred-length function results are not thread safe.
+        character(len=512) :: lower
 
         found = .false.
         do i = 1, size(names)
             if (.not. valid_smod_name(names(i))) return
             if (role == 'module' .and. index(names(i), '@') > 0) return
+            n = len_trim(names(i))
+            if (n > len(lower)) return
+            lower = names(i)
+            do k = 1, n
+                c = iachar(lower(k:k))
+                if (c >= 65 .and. c <= 90) lower(k:k) = achar(c + 32)
+            end do
             matched = .false.
             do j = 1, size(entries)
                 if (entries(j)%role /= role) cycle
-                if (entries(j)%path == prefix//to_lower(trim(names(i)))) &
+                if (len(entries(j)%path) /= len(prefix) + n) cycle
+                if (entries(j)%path(:len(prefix)) /= prefix) cycle
+                if (entries(j)%path(len(prefix) + 1:) == lower(:n)) &
                     matched = .true.
             end do
             if (.not. matched) return
@@ -290,6 +303,7 @@ contains
         restored = .false.
         if (present(output_id)) output_id = ''
         if (.not. c%initialized) return
+        if (len_trim(action_id) == 0) return
 
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
@@ -386,6 +400,7 @@ contains
         output_id = ''
         ierr = 1
         if (.not. c%initialized) return
+        if (len_trim(action_id) == 0) return
         n_smod = 0
         if (present(smod_names)) n_smod = size(smod_names)
         allocate (sources(1 + size(module_names) + n_smod))
@@ -435,6 +450,7 @@ contains
         mod_key = ''
         found = .false.
         if (.not. c%initialized) return
+        if (len_trim(action_id) == 0) return
 
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
@@ -480,6 +496,7 @@ contains
         ! A nonzero ierr is the failing store status (at least 1), so callers
         ! can report which store step failed.
         ierr = max(init_status, 1)
+        if (len_trim(action_id) == 0) return
         if (init_status /= 0) return
         call action_result_file_mode(bin_path, mode, ierr)
         if (ierr /= ACTION_RESULT_OK) then
@@ -508,6 +525,7 @@ contains
         integer :: ierr, mode, init_status, release_status
 
         matches = .false.
+        if (len_trim(action_id) == 0) return
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
         call lookup_result_read(store, action_id, read, entries, &
@@ -543,6 +561,7 @@ contains
         integer :: ierr, init_status, release_status
 
         restored = .false.
+        if (len_trim(action_id) == 0) return
         call init_result_store(c, store, init_status)
         if (init_status /= 0) return
         call lookup_result_read(store, action_id, read, entries, &

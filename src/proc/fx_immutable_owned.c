@@ -223,6 +223,10 @@ static int link_unsupported(int error)
         error == ENOSYS || error == EINVAL || error == ENOTSUP ||
         error == EOPNOTSUPP;
 }
+#if defined(__linux__) && defined(SYS_renameat2)
+int fx_rename_dir_noreplace(int from_dir, const char *from, int to_dir,
+                            const char *to);
+#endif
 static int publish_by_copy(owned_t *t)
 {
     struct stat st;
@@ -311,8 +315,7 @@ static int publish_boundary(owned_t *t, int cas, int sync)
     if (cas && lock_parent(t) != 0) return -1;
     if (t->tree) {
 #if defined(__linux__) && defined(SYS_renameat2)
-        rc = (int)syscall(SYS_renameat2, t->parent, t->temp,
-            t->parent, t->name, RENAME_NOREPLACE);
+        rc = fx_rename_dir_noreplace(t->parent, t->temp, t->parent, t->name);
 #elif defined(__APPLE__)
         rc = renameatx_np(t->parent, t->temp, t->parent, t->name, RENAME_EXCL);
 #elif defined(_WIN32)

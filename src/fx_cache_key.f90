@@ -5,8 +5,9 @@ module fx_cache_key
     private
 
     integer, parameter, public :: HASH_LEN = 64
-    integer, parameter :: MAX_PARTS = 132
     integer, parameter :: MAX_INCLUDE_DEPTH = 16
+    integer, parameter :: INCLUDE_NONE = 0, INCLUDE_QUOTE = 1, &
+        INCLUDE_ANGLE = 2, INCLUDE_UNKNOWN = 3
 
     public :: cache_key_for, cache_source_tree_hash
     public :: cache_digest, cache_file_digest, hash_mod_file
@@ -53,6 +54,11 @@ contains
 
     function cache_key_for(filename, compiler, flags, dep_keys, &
             n_dep_keys, include_dirs) result(key)
+        !! Action key over the source tree content (the file and the files it
+        !! includes, never their names or locations), the compiler identity,
+        !! the flags text and every dependency key, each length-prefixed in
+        !! full. Empty when the key cannot be complete: callers must then
+        !! treat the action as uncacheable instead of using a partial key.
         character(len=*), intent(in) :: filename, compiler, flags
         character(len=HASH_LEN), intent(in) :: dep_keys(:)
         integer, intent(in) :: n_dep_keys
@@ -60,124 +66,197 @@ contains
         character(len=HASH_LEN) :: key
 
         character(len=HASH_LEN) :: file_hash
-        integer :: i, n_parts
-        character(len=512) :: parts(MAX_PARTS)
+        type(sha256_state_t) :: state
+        integer :: i
 
+        key = ''
+        if (n_dep_keys < 0 .or. n_dep_keys > size(dep_keys)) return
         call cache_source_tree_hash(filename, file_hash, include_dirs)
-
-        parts(1) = 'fx-cache-schema-1'
-        parts(2) = file_hash
-        parts(3) = trim(compiler)
-        parts(4) = trim(flags)
-        n_parts = 4
-        do i = 1, min(n_dep_keys, MAX_PARTS - 4)
-            n_parts = n_parts + 1
-            parts(n_parts) = dep_keys(i)
+        if (len_trim(file_hash) == 0) return
+        call sha256_init(state)
+        call feed(state, 'fx-cache-schema-2')
+        call feed(state, file_hash)
+        call feed(state, trim(compiler))
+        call feed(state, trim(flags))
+        do i = 1, n_dep_keys
+            call feed(state, dep_keys(i))
         end do
-        key = digest_parts(parts, n_parts)
+        key = sha256_final(state)
     end function cache_key_for
 
     subroutine cache_source_tree_hash(filename, hash, include_dirs)
-        !! Hash a source file together with every file it (recursively) pulls in
-        !! via Fortran `include` statements. Without this, editing an .inc file
-        !! leaves the including .f90's content hash unchanged, so the compile
-        !! cache serves a stale object and the edit silently never takes effect.
+        !! Digest of the content of filename and, recursively, of the files
+        !! its include lines resolve to (a missing include contributes its
+        !! name). Empty when the file is unreadable or includes nest deeper
+        !! than MAX_INCLUDE_DEPTH.
         character(len=*), intent(in) :: filename
         character(len=HASH_LEN), intent(out) :: hash
         character(len=*), intent(in), optional :: include_dirs(:)
 
-        character(len=512) :: parts(MAX_PARTS)
-        integer :: n_parts
+        type(sha256_state_t) :: state
+        logical :: ok
 
-        n_parts = 0
-        call accumulate_source_hashes(filename, parts, n_parts, 0, include_dirs)
-        if (n_parts == 0) then
-            hash = ''
-        else
-            hash = digest_parts(parts, n_parts)
-        end if
+        hash = ''
+        call sha256_init(state)
+        call feed(state, 'fx-source-tree-2')
+        ok = .true.
+        call accumulate_source_hashes(filename, state, 0, include_dirs, ok)
+        if (ok) hash = sha256_final(state)
     end subroutine cache_source_tree_hash
 
-    recursive subroutine accumulate_source_hashes(filename, parts, n_parts, depth, &
-            include_dirs)
+    recursive subroutine accumulate_source_hashes(filename, state, depth, &
+            include_dirs, ok)
+        !! Files are hashed by content; an include contributes the content of
+        !! the file it resolves to. An include whose target cannot be read
+        !! from the line (a macro name) makes the tree unkeyable.
         character(len=*), intent(in) :: filename
-        character(len=512), intent(inout) :: parts(:)
-        integer, intent(inout) :: n_parts
+        type(sha256_state_t), intent(inout) :: state
         integer, intent(in) :: depth
         character(len=*), intent(in), optional :: include_dirs(:)
+        logical, intent(inout) :: ok
 
         character(len=HASH_LEN) :: fh
-        character(len=512) :: line, incfile, resolved
-        integer :: u, ios, ierr
+        character(len=4096) :: line
+        character(len=512) :: incfile, resolved
+        integer :: u, ios, ierr, kind
+        logical :: exists
 
-        if (depth > MAX_INCLUDE_DEPTH .or. n_parts >= size(parts)) return
-
-        call hash_file(filename, fh, ierr)
-        if (ierr == 0) then
-            n_parts = n_parts + 1
-            parts(n_parts) = fh
+        if (.not. ok) return
+        if (depth > MAX_INCLUDE_DEPTH) then
+            ok = .false.
+            return
         end if
+        call hash_file(filename, fh, ierr)
+        if (ierr /= 0) then
+            if (depth == 0) then
+                ok = .false.
+                return
+            end if
+            call feed(state, 'missing')
+            call feed(state, trim(filename(index(filename, '/', back=.true.) + 1:)))
+            return
+        end if
+        call feed(state, fh)
 
         open (newunit=u, file=trim(filename), status='old', iostat=ios)
-        if (ios /= 0) return
+        if (ios /= 0) then
+            ok = .false.
+            return
+        end if
         do
             read (u, '(a)', iostat=ios) line
             if (ios /= 0) exit
-            call parse_include_path(line, incfile)
-            if (len_trim(incfile) == 0) cycle
-            call resolve_include(filename, incfile, include_dirs, resolved)
-            call accumulate_source_hashes(trim(resolved), parts, n_parts, depth + 1, &
-                include_dirs)
+            call parse_include_path(line, incfile, kind)
+            if (kind == INCLUDE_UNKNOWN) then
+                ok = .false.
+                exit
+            end if
+            if (kind == INCLUDE_NONE) cycle
+            call resolve_include(filename, incfile, include_dirs, resolved, &
+                kind == INCLUDE_ANGLE)
+            inquire (file=trim(resolved), exist=exists)
+            if (.not. exists) then
+                call feed(state, 'missing')
+                call feed(state, trim(incfile))
+                cycle
+            end if
+            call accumulate_source_hashes(trim(resolved), state, depth + 1, &
+                include_dirs, ok)
+            if (.not. ok) exit
         end do
         close (u)
     end subroutine accumulate_source_hashes
 
-    subroutine resolve_include(source, name, include_dirs, path)
+    subroutine feed(state, part)
+        !! One length-prefixed part of a streamed digest.
+        type(sha256_state_t), intent(inout) :: state
+        character(len=*), intent(in) :: part
+        character(len=32) :: len_text
+        integer :: ln
+
+        write (len_text, '(i0)') len(part)
+        ln = len_trim(len_text)
+        call sha256_update(state, len_text(:ln), ln)
+        call sha256_update(state, ':', 1)
+        if (len(part) > 0) call sha256_update(state, part, len(part))
+        call sha256_update(state, achar(10), 1)
+    end subroutine feed
+
+    subroutine resolve_include(source, name, include_dirs, path, angle)
+        !! The compiler's search: the including file's directory (not for an
+        !! angle-bracket include), then the include directories in order.
         character(len=*), intent(in) :: source, name
         character(len=*), intent(in), optional :: include_dirs(:)
         character(len=*), intent(out) :: path
+        logical, intent(in) :: angle
         integer :: i
         logical :: exists
 
         path = name
         if (name(1:1) == '/') return
-        path = trim(dirname_of(source))//trim(name)
-        inquire (file=trim(path), exist=exists)
-        if (exists) return
+        if (.not. angle) then
+            path = trim(dirname_of(source))//trim(name)
+            inquire (file=trim(path), exist=exists)
+            if (exists) return
+        end if
+        path = name
         if (.not. present(include_dirs)) return
         do i = 1, size(include_dirs)
             path = trim(include_dirs(i))//'/'//trim(name)
             inquire (file=trim(path), exist=exists)
             if (exists) return
         end do
+        path = name
     end subroutine resolve_include
 
-    subroutine parse_include_path(line, incfile)
+    subroutine parse_include_path(line, incfile, kind)
+        !! A Fortran `include 'x'` or preprocessor `#include "x"`/`<x>` line.
+        !! kind is INCLUDE_NONE for any other line and INCLUDE_UNKNOWN for a
+        !! preprocessor include whose file is not literal (a macro).
         character(len=*), intent(in) :: line
         character(len=*), intent(out) :: incfile
+        integer, intent(out) :: kind
 
-        character(len=512) :: t
+        character(len=len(line)) :: t
         character(len=7) :: head
         character(len=1) :: qc
         integer :: i, q1, q2
+        logical :: directive
 
         incfile = ''
+        kind = INCLUDE_NONE
         t = adjustl(line)
-        if (t(1:1) == '#') t = adjustl(t(2:))
-        if (len_trim(t) < 9) return
+        directive = t(1:1) == '#'
+        if (directive) t = adjustl(t(2:))
+        if (len_trim(t) < 7) return
         head = t(1:7)
         do i = 1, 7
             if (head(i:i) >= 'A' .and. head(i:i) <= 'Z') &
                 head(i:i) = achar(iachar(head(i:i)) + 32)
         end do
         if (head /= 'include') return
-        if (t(8:8) /= ' ' .and. t(8:8) /= '''' .and. t(8:8) /= '"') return
-        q1 = scan(t, '''"')
-        if (q1 == 0) return
+        if (len(t) > 7) then
+            if (t(8:8) /= ' ' .and. t(8:8) /= '''' .and. t(8:8) /= '"' .and. &
+                t(8:8) /= '<' .and. t(8:8) /= achar(9)) return
+        end if
+        q1 = scan(t, '''"<')
+        if (q1 == 0) then
+            if (directive) kind = INCLUDE_UNKNOWN
+            return
+        end if
         qc = t(q1:q1)
+        if (qc == '<') then
+            if (.not. directive) return
+            qc = '>'
+        end if
         q2 = index(t(q1 + 1:), qc)
-        if (q2 == 0) return
+        if (q2 == 0) then
+            if (directive) kind = INCLUDE_UNKNOWN
+            return
+        end if
         incfile = t(q1 + 1:q1 + q2 - 1)
+        kind = INCLUDE_QUOTE
+        if (qc == '>') kind = INCLUDE_ANGLE
     end subroutine parse_include_path
 
     function dirname_of(path) result(d)

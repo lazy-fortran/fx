@@ -447,6 +447,25 @@ int fx_immutable_remove_tree(const char *path)
     return remove_tree_rec(path);
 }
 
+#if defined(__linux__) && defined(SYS_renameat2)
+/* Publish directory `from` as `to` unless `to` exists. Filesystems without
+ * RENAME_NOREPLACE (BeeGFS and NFS answer EINVAL) use rename(2), which cannot
+ * replace a non-empty directory: ENOTEMPTY then means another publisher won.
+ * An empty destination may be replaced; published trees are content-named,
+ * so the replacement has the same meaning. */
+int fx_rename_dir_noreplace(int from_dir, const char *from, int to_dir,
+                            const char *to)
+{
+    int rc = (int)syscall(SYS_renameat2, from_dir, from, to_dir, to,
+                          RENAME_NOREPLACE);
+    if (rc == 0 || (errno != EINVAL && errno != ENOSYS && errno != ENOTSUP))
+        return rc;
+    rc = renameat(from_dir, from, to_dir, to);
+    if (rc != 0 && errno == ENOTEMPTY) errno = EEXIST;
+    return rc;
+}
+#endif
+
 int fx_immutable_publish_tree(const char *tmp, const char *dst)
 {
     char base_tmp[PATH_MAX], base_dst[PATH_MAX];
@@ -458,8 +477,7 @@ int fx_immutable_publish_tree(const char *tmp, const char *dst)
     if (fstatat(dirfd, base_tmp, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
         !S_ISDIR(st.st_mode)) { close(dirfd); return -1; }
 #if defined(__linux__) && defined(SYS_renameat2)
-    rc = (int)syscall(SYS_renameat2, dirfd, base_tmp, dirfd, base_dst,
-                      RENAME_NOREPLACE);
+    rc = fx_rename_dir_noreplace(dirfd, base_tmp, dirfd, base_dst);
 #elif defined(__APPLE__)
     rc = renameatx_np(dirfd, base_tmp, dirfd, base_dst, RENAME_EXCL);
 #elif defined(_WIN32)
