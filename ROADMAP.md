@@ -38,6 +38,22 @@ their actual unresolved goals, not instructions to recreate finished work.
 
 ## Delivery
 
+[V] 2026-10-21: concurrent store initialization now passes normalization through
+an explicit output and a fixed C buffer, avoiding GCC 12 shared hidden result
+lengths. aCluster 21817012 (GCC 12.2, COMPLETED 0:0) compares 1,024 pthread
+initializations: baseline Helgrind reports 2,300 errors from four contexts;
+patched reports zero, with exact canonical roots preserved. Native path,
+concurrent-init, action-cache and action-result-store checks pass (21817010).
+[V] Existing main CI's stale publication-lock oracles are repaired independently
+by #59 and #60; their changes are retained. The original focused run's
+immutable-store failure came from test/test_immutable_store.f90:699 against the
+lock-free producer at src/proc/fx_immutable_owned.c:325. Current-main race audit 21817024 (GCC 12.2, COMPLETED 0:0) repeats
+the result: baseline 2,298 errors/four contexts, patched zero. CI 39592466948 is green. A broader GCC 12.2 -O1/-fopenmp run
+passes 30 cases but exposes unchanged MCP cursor-alias defects at
+fx_mcp.f90:817,826,828,839 (test_mcp fails, test_mcp_system times out);
+those require a separate owning repair. The affected store/path/cache tests
+and root-initialization oracle pass; no full optimized-suite green is claimed.
+
 2026-10-17 branch integration ports the deferred graph verification from
 `0f60c9f` onto the current complete-interface cache API. A manifest-only preview
 checks local outputs before traversing the immutable graph; every accepted hit
