@@ -149,6 +149,15 @@ contains
         call test_assert_equal_str(suite, '', json_escape_string(''), &
             'escape: empty unchanged')
 
+        block
+            character(len=:), allocatable :: payload, escaped, expected
+            payload = repeat('safe"'//achar(92)//achar(9)//achar(0)//achar(10), 4096)
+            expected = repeat('safe\"\\\t\u0000\n', 4096)
+            escaped = json_escape_string(payload)
+            call test_assert(suite, escaped == expected, &
+                'escape: large individual value retains every quote and control byte')
+        end block
+
         ! Verify escaping in value context
         block
             type(json_builder_t) :: jb

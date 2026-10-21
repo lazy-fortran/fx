@@ -1,5 +1,5 @@
 module fx_json_build
-    use, intrinsic :: iso_fortran_env, only: real64
+    use, intrinsic :: iso_fortran_env, only: real64, int64
     use fx_string, only: builder_t, builder_new, builder_append, &
         builder_to_string, builder_reset
     implicit none
@@ -192,41 +192,52 @@ contains
         jb%in_object_stack = .false.
     end subroutine json_reset
 
-    function json_escape_string(s) result(res)
+    pure recursive function json_escape_string(s) result(res)
         character(len=*), intent(in) :: s
         character(len=:), allocatable :: res
-        integer :: i
-        character(len=1) :: c
+        integer(int64) :: i, n, pos
         integer :: code
 
-        res = ''
-        do i = 1, len(s)
-            c = s(i:i)
-            code = iachar(c)
+        ! Repeated concatenation copies every prefix and can accumulate large
+        ! compiler temporaries. Size the result once, then fill it in place.
+        n = len(s, kind=int64)
+        do i = 1, len(s, kind=int64)
+            select case (iachar(s(i:i)))
+            case (34, 92, 8, 12, 10, 13, 9)
+                n = n + 1
+            case (0:7, 11, 14:31)
+                n = n + 5
+            end select
+        end do
+        allocate(character(len=n) :: res)
+        pos = 1
+        do i = 1, len(s, kind=int64)
+            code = iachar(s(i:i))
             select case (code)
             case (34) ! "
-                res = res // '\"'
+                res(pos:pos + 1) = '\"'
             case (92) ! backslash
-                res = res // '\\'
+                res(pos:pos + 1) = '\\'
             case (8) ! backspace
-                res = res // '\b'
+                res(pos:pos + 1) = '\b'
             case (12) ! form feed
-                res = res // '\f'
+                res(pos:pos + 1) = '\f'
             case (10) ! newline
-                res = res // '\n'
+                res(pos:pos + 1) = '\n'
             case (13) ! carriage return
-                res = res // '\r'
+                res(pos:pos + 1) = '\r'
             case (9) ! tab
-                res = res // '\t'
+                res(pos:pos + 1) = '\t'
             case (0:7, 11, 14:31) ! other control chars
-                block
-                    character(len=6) :: hex
-                    write(hex, '(A,Z4.4)') '\u', code
-                    res = res // hex
-                end block
+                write(res(pos:pos + 5), '(A,Z4.4)') '\u', code
+                pos = pos + 6
+                cycle
             case default
-                res = res // c
+                res(pos:pos) = s(i:i)
+                pos = pos + 1
+                cycle
             end select
+            pos = pos + 2
         end do
     end function json_escape_string
 
