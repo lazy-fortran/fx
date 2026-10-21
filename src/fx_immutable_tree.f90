@@ -26,6 +26,7 @@ module fx_immutable_tree
     integer, parameter :: DEFAULT_DIR_MODE = 493
 
     public :: immutable_store_put_tree, immutable_store_verify_tree
+    public :: immutable_store_verify_entries
     public :: immutable_store_materialize_tree
 
 contains
@@ -133,8 +134,6 @@ contains
         integer, intent(out) :: ierr
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=:), allocatable :: raw
-        integer :: i
-        integer(c_int) :: fd, cleanup
 
         ierr = IMMUTABLE_INVALID
         if (depth > 128) return
@@ -142,16 +141,48 @@ contains
         if (ierr /= IMMUTABLE_OK) return
         call immutable_manifest_parse(raw, entries, ierr)
         if (ierr /= IMMUTABLE_OK) return
+        call verify_owned_entries(root, entries, depth, ierr)
+    end subroutine verify_owned_depth
+
+    subroutine immutable_store_verify_entries(store, entries, ierr)
+        !! Verify the complete graph referenced by an already authenticated
+        !! manifest. The caller remains responsible for authenticating its root.
+        type(immutable_store_t), intent(in) :: store
+        type(immutable_tree_entry_t), intent(in) :: entries(:)
+        integer, intent(out) :: ierr
+        integer(c_int) :: root, cleanup
+
+        ierr = IMMUTABLE_INVALID
+        if (.not. store%initialized) return
+        root = owned_open_store(store%root_dir//c_null_char)
+        ierr = IMMUTABLE_CORRUPT
+        if (root < 0) return
+        call verify_owned_entries(root, entries, 0, ierr)
+        cleanup = owned_close(root)
+    end subroutine immutable_store_verify_entries
+
+    recursive subroutine verify_owned_entries(root, entries, depth, ierr)
+        integer(c_int), intent(in) :: root
+        type(immutable_tree_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: depth
+        integer, intent(out) :: ierr
+        integer :: i
+        integer(c_int) :: fd, cleanup
+
+        ierr = IMMUTABLE_OK
         do i = 1, size(entries)
-            if (entries(i)%kind == IMMUTABLE_BLOB) then
+            select case (entries(i)%kind)
+            case (IMMUTABLE_BLOB)
                 call owned_open_verified(root, 1_c_int, entries(i)%object_id, fd, ierr)
                 if (fd >= 0) cleanup = owned_close(fd)
-            else
+            case (IMMUTABLE_TREE)
                 call verify_owned_depth(root, entries(i)%object_id, depth + 1, ierr)
-            end if
+            case default
+                ierr = IMMUTABLE_INVALID
+            end select
             if (ierr /= IMMUTABLE_OK) return
         end do
-    end subroutine verify_owned_depth
+    end subroutine verify_owned_entries
 
     subroutine immutable_store_materialize_tree(store, tree_id, dest_path, &
             strategy, used_clone, ierr)

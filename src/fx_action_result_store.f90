@@ -13,7 +13,7 @@ module fx_action_result_store
         immutable_store_put_blob, immutable_store_hash_file, &
         immutable_store_materialize_blob, IMMUTABLE_MATERIALIZE_AUTO
     use fx_immutable_tree, only: immutable_store_put_tree, &
-        immutable_store_verify_tree
+        immutable_store_verify_entries
     use fx_immutable_owned, only: owned_open_store, owned_read_manifest, &
         owned_close
     use fx_immutable_gc, only: immutable_store_collect, IMMUTABLE_GC_CHANGED
@@ -753,7 +753,7 @@ contains
         call action_result_manifest_preview(store, action_id, entries, &
             snapshot, ierr)
         if (ierr /= ACTION_RESULT_OK) return
-        call immutable_store_verify_tree(store%objects, snapshot, verify_status)
+        call immutable_store_verify_entries(store%objects, entries, verify_status)
         if (verify_status /= IMMUTABLE_OK) then
             if (allocated(entries)) deallocate(entries)
             ierr = ACTION_RESULT_CORRUPT
@@ -884,15 +884,16 @@ contains
             ACTION_RESULT_MISSING, ierr)
         if (ierr /= ACTION_RESULT_OK) return
 
-        ! Result verification and manifest loading can hash an arbitrarily
-        ! large tree. Do that outside the per-action publication lock.
-        call immutable_store_verify_tree(store%objects, snapshot, verify_status)
+        ! Authenticate and parse the root once, then verify its complete graph
+        ! outside the per-action publication lock.
+        call read_result_tree(store, snapshot, entries, ierr)
+        if (ierr /= ACTION_RESULT_OK) return
+        call immutable_store_verify_entries(store%objects, entries, verify_status)
         if (verify_status /= IMMUTABLE_OK) then
+            if (allocated(entries)) deallocate(entries)
             ierr = ACTION_RESULT_CORRUPT
             return
         end if
-        call read_result_tree(store, snapshot, entries, ierr)
-        if (ierr /= ACTION_RESULT_OK) return
 
         ! A second lock check provides the linearization point; conflicts win.
         call action_result_record_confirm(store, key, snapshot, &
