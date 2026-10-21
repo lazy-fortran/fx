@@ -2,7 +2,7 @@ module fx_immutable_store
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_size_t, &
         c_null_char, c_ptr, c_associated
     use, intrinsic :: iso_fortran_env, only: int64
-    use fx_path, only: path_normalize
+    use fx_path, only: path_normalize_into
     use fx_hash, only: sha256_init, sha256_update, sha256_final, sha256_state_t, &
         sha256_file, sha256_hardware_available, HASH_SIZE_LIMIT
     use fx_immutable_owned, only: owned_open_store, owned_open_verified, &
@@ -100,7 +100,7 @@ contains
         character(len=*), intent(in) :: root_dir
         integer, intent(out) :: ierr
         character(kind=c_char), allocatable :: c_root(:)
-        character(kind=c_char) :: c_resolved(PATH_LIMIT)
+        character(kind=c_char, len=PATH_LIMIT) :: c_resolved
         character(len=:), allocatable :: clean
         integer(int64) :: start_tick
         integer(c_int) :: pid
@@ -115,7 +115,10 @@ contains
             ierr = IMMUTABLE_IO_ERROR
             return
         end if
-        clean = path_normalize(from_c_text(c_resolved))
+        ! An explicit output avoids GCC 12's shared hidden deferred-result
+        ! length in concurrent store initialization.
+        call path_normalize_into( &
+            c_resolved(:index(c_resolved, c_null_char) - 1), clean)
         if (len(clean) == 0 .or. len(clean) >= PATH_LIMIT) return
         call to_c_text(clean, c_root)
         if (c_initialize(c_root) /= 0_c_int) then
