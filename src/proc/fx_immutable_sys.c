@@ -17,6 +17,7 @@
 #include <dirent.h>
 #ifdef __linux__
 #include <linux/fs.h>
+#include <sys/vfs.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #endif
@@ -93,6 +94,24 @@ static int open_existing_directory(const char *path)
         fd = next;
     }
     return fd;
+#endif
+}
+
+/* BeeGFS flock is host-local on supported cluster mounts. Until owner
+ * snapshots have cross-host serialization, deletion there must fail closed. */
+int fx_immutable_gc_supported(const char *root)
+{
+#ifdef __linux__
+    struct statfs fs;
+    int fd = open_existing_directory(root);
+    if (fd < 0) return -1;
+    int rc = fstatfs(fd, &fs);
+    close(fd);
+    if (rc != 0) return -1;
+    return (unsigned long)fs.f_type == 0x19830326UL ? 0 : 1;
+#else
+    (void)root;
+    return 1;
 #endif
 }
 

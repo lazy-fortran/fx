@@ -30,6 +30,7 @@ module fx_action_result_store
     integer, parameter, public :: ACTION_RESULT_INVALID = 4
     integer, parameter, public :: ACTION_RESULT_IO_ERROR = 5
     integer, parameter, public :: ACTION_RESULT_CORRUPT = 6
+    integer, parameter, public :: ACTION_RESULT_UNSUPPORTED = 7
 
     integer, parameter :: HASH_LEN = 64
     integer, parameter :: RECORD_LIMIT = 512
@@ -414,6 +415,7 @@ contains
         stats%over_cap = raw(7) /= 0_c_long_long
         ierr = ACTION_RESULT_IO_ERROR
         if (rc == 0_c_int) ierr = ACTION_RESULT_OK
+        if (rc == -3_c_int) ierr = ACTION_RESULT_UNSUPPORTED
     end subroutine action_result_evict
 
     subroutine maybe_maintain_after_publish(store)
