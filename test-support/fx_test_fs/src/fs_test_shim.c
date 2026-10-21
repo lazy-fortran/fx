@@ -115,7 +115,8 @@ int fx_test_fs_temp_root(char *out, int cap)
     if (!selected) return -1;
     char *path = realpath(selected, NULL); free(selected);
 #else
-    char *path = realpath("/var/tmp", NULL);
+    const char *selected = getenv("TMPDIR");
+    char *path = realpath(selected && *selected ? selected : "/var/tmp", NULL);
 #endif
     int length;
     if (!path) return -1;

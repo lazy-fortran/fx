@@ -1,6 +1,6 @@
 program test_immutable_store
     use, intrinsic :: iso_fortran_env, only: int64
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_ptr, c_associated
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
@@ -14,8 +14,6 @@ program test_immutable_store
         immutable_store_put_blob, immutable_store_verify_blob, &
         immutable_store_blob_path, immutable_store_tree_path, &
         immutable_store_materialize_blob, immutable_store_file_info
-    use fx_immutable_owned, only: owned_begin_path, owned_copy_source, &
-        owned_publish, owned_dispose
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_verify_tree, immutable_store_materialize_tree
     use fx_immutable_manifest, only: immutable_manifest_serialize, immutable_manifest_parse
@@ -23,8 +21,8 @@ program test_immutable_store
         proc_watch_init, proc_watch_add, proc_watch_poll, proc_watch_close
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_identity, test_process_clock_ms, &
-        test_process_sleep_ms
-    use fx_test_fs, only: fx_test_temp_root, fx_test_chmod, fx_test_remove_tree
+        test_process_sleep_ms, test_hold_fsync
+    use fx_test_fs, only: fx_test_temp_root, fx_test_remove_tree
     use fx_path, only: path_dirname
     implicit none
 
@@ -63,10 +61,6 @@ program test_immutable_store
     call get_command_argument(1, arg)
     if (trim(arg) == '--put-blob') then
         call run_worker_put()
-        stop 0
-    end if
-    if (trim(arg) == '--stage-blob') then
-        call run_worker_stage()
         stop 0
     end if
     if (trim(arg) == '--mkdir-race') then
@@ -654,7 +648,7 @@ contains
         character(len=*), intent(in) :: base
         character(len=512) :: path, parent_dir, stage_dir, stage_path, source_path
         character(len=512) :: child_exe, child_path, sentinel_release
-        character(len=4096) :: child_argv(4), sentinel_argv(3)
+        character(len=4096) :: child_argv(5), sentinel_argv(3)
         character(len=1) :: bytes(262144)
         character(len=64) :: missing_id
         integer :: local_err, child_status, file_err, i, writer_pid
@@ -690,13 +684,16 @@ contains
         call assert_fortran_child(s, sentinel_pid, sentinel_start, &
             child_parent, child_path)
 
-        child_argv(1:4) = [character(len=4096) :: trim(executable), &
-            '--stage-blob', trim(cache%root_dir), trim(source_path)]
-        call test_process_spawn(child_argv(1:4), writer_pid, spawn_err)
+        child_argv = [character(len=4096) :: trim(executable), &
+            '--put-blob', trim(cache%root_dir), trim(source_path), &
+            trim(source_path)//'.release']
+        call test_process_spawn(child_argv, writer_pid, spawn_err)
         call test_assert_equal_int(s, 0, spawn_err, &
             'native process API starts exact blob writer')
         stage_dir = trim(parent_dir)//'/.fx-owned-'//number(writer_pid)//'-0'
         stage_path = trim(stage_dir)//'/payload'
+        call wait_for_file(trim(source_path)//'.ready', 30000, staged)
+        call test_assert(s, staged, 'writer reaches post-validation fsync barrier')
         call wait_for_owned_stage(trim(stage_path), int(size(bytes), int64), staged)
         call test_assert(s, staged, &
             'writer prepares a complete immutable payload before publication')
@@ -704,7 +701,7 @@ contains
             child_path)
         inquire(file=trim(path), exist=exists)
         call test_assert(s, .not. exists, &
-            'canonical object is missing before the publication call')
+            'canonical object is missing while the writer waits for admission')
         call test_process_signal(writer_pid, 9, signal_err)
         call test_assert_equal_int(s, 0, signal_err, &
             'SIGKILL targets only the exact owned writer PID')
@@ -846,7 +843,7 @@ contains
     end subroutine test_corruption_is_reported
 
     subroutine run_worker_put()
-        character(len=4096) :: store_root, source_path
+        character(len=4096) :: store_root, source_path, release, stage
         type(immutable_store_t) :: worker_store
         character(len=64) :: id
         integer :: local_err
@@ -854,40 +851,20 @@ contains
         call get_command_argument(3, source_path)
         call immutable_store_init(worker_store, trim(store_root), local_err)
         if (local_err /= IMMUTABLE_OK) stop 10
+        call get_command_argument(4, release)
+        if (len_trim(release) > 0) then
+            call sha256_file(trim(source_path), id, local_err)
+            if (local_err /= 0) stop 15
+            stage = path_dirname(immutable_store_blob_path(worker_store, id))// &
+                '/.fx-owned-'//number(proc_pid())//'-0/payload'
+            local_err = test_hold_fsync(trim(stage), &
+                trim(source_path)//'.ready', trim(release))
+            if (local_err /= 0) stop 16
+        end if
         call immutable_store_put_blob(worker_store, trim(source_path), id, &
             local_err)
         if (local_err /= IMMUTABLE_OK) stop 11
     end subroutine run_worker_put
-
-    subroutine run_worker_stage()
-        character(len=4096) :: store_root, source_path
-        character(len=:), allocatable :: final, temp
-        type(immutable_store_t) :: worker_store
-        type(c_ptr) :: capture
-        character(len=64) :: id
-        integer :: local_err
-        logical :: released
-
-        call get_command_argument(2, store_root)
-        call get_command_argument(3, source_path)
-        call immutable_store_init(worker_store, trim(store_root), local_err)
-        if (local_err /= IMMUTABLE_OK) stop 15
-        ! Hash the synthetic source independently to choose its canonical slot.
-        call sha256_file(trim(source_path), id, local_err)
-        if (local_err /= 0) stop 20
-        final = immutable_store_blob_path(worker_store, id)
-        capture = owned_begin_path(final//c_null_char, 0_c_int)
-        if (.not. c_associated(capture)) stop 16
-        local_err = owned_copy_source(capture, trim(source_path)//c_null_char)
-        temp = path_dirname(final)//'/.fx-owned-'//number(proc_pid())//'-0/payload'
-        if (local_err == 0) local_err = fx_test_chmod(temp, 292)
-        if (local_err /= 0) stop 17
-        call wait_for_file(trim(source_path)//'.release', 30000, released)
-        if (.not. released) stop 18
-        local_err = owned_publish(capture)
-        call owned_dispose(capture)
-        if (local_err /= 0) stop 19
-    end subroutine run_worker_stage
 
     subroutine run_mkdir_worker()
         character(len=4096) :: path, ready, start
