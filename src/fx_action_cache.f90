@@ -9,7 +9,7 @@ module fx_action_cache
     use fx_immutable_store, only: immutable_store_hash_file, &
         immutable_store_blob_path
     use fx_immutable_constants, only: IMMUTABLE_OK
-    use fx_immutable_tree, only: immutable_store_verify_tree
+    use fx_immutable_tree, only: immutable_store_verify_entries
     use fx_action_result_store, only: action_result_store_t, &
         action_result_read_t, action_result_read_acquire, &
         action_result_read_lookup, action_result_read_release, &
@@ -324,7 +324,7 @@ contains
             preview_ok = local_result_matches(entries, obj_path, mod_dir)
         end if
         if (preview_ok) then
-            call immutable_store_verify_tree(store%objects, result_id, &
+            call immutable_store_verify_entries(store%objects, entries, &
                 verify_status)
             if (verify_status == IMMUTABLE_OK) then
                 call action_result_preview_confirm(store, action_id, result_id, &
