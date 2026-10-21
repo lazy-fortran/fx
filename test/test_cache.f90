@@ -6,10 +6,8 @@ program test_cache
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, &
         test_suite_summary, test_suite_exit
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
-        c_int64_t, c_null_char
-    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree, &
-        fx_test_sleep_ms
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
+    use fx_test_fs, only: fx_test_mkdir_p, fx_test_remove_tree
     implicit none
 
     interface
@@ -259,12 +257,12 @@ contains
 
         call cache_store_bytes(cache, oldest_key, payload, size(payload), ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_gc oldest store')
-        call wait_seconds(1, ierr)
-        call test_assert_equal_int(suite, 0, ierr, 'cache_gc wait oldest')
+        call touch_older(cache_entry_path(root, oldest_key), 3, ierr)
+        if (ierr /= 0) error stop 'cannot age oldest LRU fixture'
         call cache_store_bytes(cache, middle_key, payload, size(payload), ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_gc middle store')
-        call wait_seconds(1, ierr)
-        call test_assert_equal_int(suite, 0, ierr, 'cache_gc wait middle')
+        call touch_older(cache_entry_path(root, middle_key), 2, ierr)
+        if (ierr /= 0) error stop 'cannot age middle LRU fixture'
         call cache_store_bytes(cache, newest_key, payload, size(payload), ierr)
         call test_assert_equal_int(suite, 0, ierr, 'cache_gc newest store')
 
@@ -560,12 +558,6 @@ contains
 
         ok = verify(trim(text), '0123456789abcdef') == 0
     end function is_hex_string
-
-    subroutine wait_seconds(seconds, ierr)
-        integer, intent(in) :: seconds
-        integer, intent(out) :: ierr
-        ierr = fx_test_sleep_ms(int(seconds, c_int64_t) * 1000_c_int64_t)
-    end subroutine wait_seconds
 
     subroutine touch_older(path, hours, ierr)
         character(len=*), intent(in) :: path
