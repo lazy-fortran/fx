@@ -5,7 +5,7 @@ module fx_path
 
     public :: path_join, path_dirname, path_basename
     public :: path_extension, path_stem, path_strip_prefix
-    public :: path_normalize, path_is_absolute, path_relative
+    public :: path_normalize, path_normalize_into, path_is_absolute, path_relative
     public :: path_exists, path_is_dir, path_is_file
 
 contains
@@ -149,6 +149,13 @@ contains
     pure function path_normalize(p) result(res)
         character(len=*), intent(in) :: p
         character(len=:), allocatable :: res
+
+        call path_normalize_into(p, res)
+    end function path_normalize
+
+    pure recursive subroutine path_normalize_into(p, res)
+        character(len=*), intent(in) :: p
+        character(len=:), allocatable, intent(out) :: res
         character(len=256) :: stack(256)
         integer :: n_stack
         logical :: is_abs
@@ -218,7 +225,7 @@ contains
         do i = 2, n_stack
             res = res // '/' // trim(stack(i))
         end do
-    end function path_normalize
+    end subroutine path_normalize_into
 
     pure logical function path_is_absolute(p)
         character(len=*), intent(in) :: p
