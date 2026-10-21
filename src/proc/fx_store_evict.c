@@ -27,6 +27,8 @@
 #include <errno.h>
 #include <stdlib.h>
 
+int fx_immutable_gc_supported(const char *root);
+
 #ifdef _WIN32
 int fx_store_evict(const char *root, long long max_bytes, long long low_bytes,
                    long long grace, long long temp_age, long long *stats)
@@ -487,6 +489,8 @@ int fx_store_evict(const char *root, long long max_bytes, long long low_bytes,
     for (int i = 0; i < 7; ++i) stats[i] = 0;
     if (!root || max_bytes < 0 || low_bytes < 0 || low_bytes > max_bytes ||
         grace < 0 || temp_age < 0) return -2;
+    int supported = fx_immutable_gc_supported(root);
+    if (supported <= 0) return supported == 0 ? -3 : -1;
     g.root = root;
     g.now = time(NULL);
     g.grace = grace;
@@ -578,6 +582,8 @@ done:
  * run; concurrent evictors are safe, the stamp only limits the scan rate. */
 int fx_store_evict_due(const char *root, long long interval)
 {
+    int supported = fx_immutable_gc_supported(root);
+    if (supported <= 0) return supported == 0 ? 0 : -1;
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.fx-metadata/evict-stamp", root);
     if (n < 0 || (size_t)n >= sizeof(path)) return -1;

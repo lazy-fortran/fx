@@ -27,6 +27,7 @@
 #define RECORD_LIMIT 512
 
 int fx_immutable_store_validate(const char *root);
+int fx_immutable_gc_supported(const char *root);
 
 typedef struct {
     char id[65];
@@ -518,6 +519,10 @@ int fx_immutable_gc_collect(const char *root, int max_scan, int max_delete,
         pressure_objects < 0 || now == (time_t)-1)
         return -2;
     if (fx_immutable_store_validate(root) != 0) return -2;
+    if (max_delete > 0) {
+        int supported = fx_immutable_gc_supported(root);
+        if (supported <= 0) return supported == 0 ? -3 : -1;
+    }
     g.root = root;
     g.capacity = (size_t)max_scan;
     g.lock = -1;

@@ -223,7 +223,9 @@ contains
         end do
         if (n /= 4) return
         allocate(character(len=len(line)) :: fields(5))
-        fields = ''
+        ! Assign the section so blank initialization cannot reallocate the
+        ! deferred character length to that of the zero-length scalar.
+        fields(:) = ''
         start = 1
         do f = 1, 4
             if (tabs(f) <= start) return
