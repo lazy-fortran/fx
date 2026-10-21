@@ -25,6 +25,7 @@ program test_watch_lifecycle
     call test_suite_init(suite, 'watch lifecycle')
     call test_repeated_add()
     call test_repeated_start_stop()
+    call test_parallel_watchers()
     call test_replaced_tree()
     call test_file_directory_replacement()
     call test_registration_error()
@@ -108,6 +109,61 @@ contains
                 'repeated start and stop returns to descriptor baseline')
         end do
     end subroutine test_repeated_start_stop
+
+    subroutine test_parallel_watchers()
+        character(len=512) :: paths(4)
+        integer :: failures(4), before, i, fd
+
+        before = descriptor_count()
+        do i = 1, size(paths)
+            write(paths(i), '(a,a,i0)') trim(root), '/parallel-', i
+            call make_dir(trim(paths(i)))
+            open(newunit=fd, file=trim(paths(i))//'/before.f90', status='replace')
+            write(fd, '(a)') 'independent watcher fixture'
+            close(fd)
+        end do
+        failures = 0
+        !$omp parallel do num_threads(4)
+        do i = 1, size(paths)
+            call watch_thread_case(trim(paths(i)), failures(i))
+        end do
+        !$omp end parallel do
+        call test_assert_equal_int(suite, 0, sum(failures), &
+            'independent parallel watchers deliver their own real rename events')
+        call test_assert_equal_int(suite, before, descriptor_count(), &
+            'parallel watcher lifetimes restore the descriptor baseline')
+    end subroutine test_parallel_watchers
+
+    recursive subroutine watch_thread_case(path, failures)
+        character(len=*), intent(in) :: path
+        integer, intent(inout) :: failures
+        type(watcher_t) :: watch
+        character(len=4096) :: changed
+        integer :: k, j, ierr, kind, status
+        logical :: event, matched
+
+        do k = 1, 16
+            call watcher_init(watch, ierr)
+            if (ierr /= 0) failures = failures + 1
+            call watcher_add(watch, path, .false., ierr)
+            if (ierr /= 0) failures = failures + 1
+            status = fx_test_rename(path//'/before.f90', path//'/after.f90')
+            if (status /= 0) failures = failures + 1
+            matched = .false.
+            do j = 1, 8
+                call watcher_poll(watch, changed, kind, 100, event, ierr)
+                if (ierr /= 0) exit
+                if (event) then
+                    matched = trim(changed) == path//'/after.f90'
+                    if (matched) exit
+                end if
+            end do
+            if (.not. matched .or. ierr /= 0) failures = failures + 1
+            call watcher_close(watch)
+            status = fx_test_rename(path//'/after.f90', path//'/before.f90')
+            if (status /= 0) failures = failures + 1
+        end do
+    end subroutine watch_thread_case
 
     subroutine test_replaced_tree()
         type(watcher_t) :: watch

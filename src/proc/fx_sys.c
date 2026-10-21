@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #ifdef __linux__
 #include <sys/inotify.h>
+#include <pthread.h>
 #elif defined(__APPLE__)
 #include <sys/event.h>
 #endif
@@ -471,6 +472,7 @@ typedef struct watch_state {
 } watch_state_t;
 
 static watch_state_t *fx_watch_states = NULL;
+static pthread_mutex_t fx_watch_registry_guard = PTHREAD_MUTEX_INITIALIZER;
 #endif /* __linux__ */
 
 static void fx_trim_path(const char *path, char *out, size_t out_len)
@@ -641,14 +643,16 @@ int fx_c_set_mtime(const char *path, long long mtime)
 }
 
 #ifdef __linux__
+/* A watcher remains single-owner; this lock protects independent watchers'
+ * registry membership without serializing their event polling. */
 static watch_state_t *fx_watch_state_find(int fd)
 {
     watch_state_t *state;
-
-    for (state = fx_watch_states; state != NULL; state = state->next) {
-        if (state->fd == fd) return state;
-    }
-    return NULL;
+    pthread_mutex_lock(&fx_watch_registry_guard);
+    for (state = fx_watch_states; state != NULL; state = state->next)
+        if (state->fd == fd) break;
+    pthread_mutex_unlock(&fx_watch_registry_guard);
+    return state;
 }
 
 static watch_state_t *fx_watch_state_add(int fd)
@@ -658,8 +662,10 @@ static watch_state_t *fx_watch_state_add(int fd)
     state = (watch_state_t *)calloc(1, sizeof(*state));
     if (state == NULL) return NULL;
     state->fd = fd;
+    pthread_mutex_lock(&fx_watch_registry_guard);
     state->next = fx_watch_states;
     fx_watch_states = state;
+    pthread_mutex_unlock(&fx_watch_registry_guard);
     return state;
 }
 
@@ -690,6 +696,7 @@ static void fx_watch_state_remove_fd(int fd)
     watch_state_t *state;
     watch_state_t *prev;
 
+    pthread_mutex_lock(&fx_watch_registry_guard);
     prev = NULL;
     state = fx_watch_states;
     while (state != NULL) {
@@ -699,12 +706,14 @@ static void fx_watch_state_remove_fd(int fd)
             } else {
                 prev->next = state->next;
             }
+            pthread_mutex_unlock(&fx_watch_registry_guard);
             fx_watch_state_free(state);
             return;
         }
         prev = state;
         state = state->next;
     }
+    pthread_mutex_unlock(&fx_watch_registry_guard);
 }
 
 static watch_entry_t *fx_watch_state_find_wd(watch_state_t *state, int wd,

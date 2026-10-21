@@ -95,6 +95,18 @@ module fx_immutable_store
 
 contains
 
+    pure integer function object_path_length(store, class_name, object_id) result(n)
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: class_name, object_id
+
+        n = 0
+        if (.not. store%initialized) return
+        if (.not. allocated(store%root_dir)) return
+        if (.not. immutable_id_valid(object_id)) return
+        ! Separators, sha256 namespace and two-character shard add 12 bytes.
+        n = len_trim(store%root_dir) + len_trim(class_name) + HASH_LEN + 12
+    end function object_path_length
+
     subroutine immutable_store_init(store, root_dir, ierr)
         type(immutable_store_t), intent(out) :: store
         character(len=*), intent(in) :: root_dir
@@ -137,7 +149,7 @@ contains
     function immutable_store_blob_path(store, object_id) result(path)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: object_id
-        character(len=:), allocatable :: path
+        character(len=object_path_length(store, 'blobs', object_id)) :: path
 
         path = object_path(store, 'blobs', object_id)
     end function immutable_store_blob_path
@@ -145,7 +157,7 @@ contains
     function immutable_store_tree_path(store, object_id) result(path)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: object_id
-        character(len=:), allocatable :: path
+        character(len=object_path_length(store, 'trees', object_id)) :: path
 
         path = object_path(store, 'trees', object_id)
     end function immutable_store_tree_path
@@ -612,7 +624,7 @@ contains
     function object_path(store, class_name, object_id) result(path)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: class_name, object_id
-        character(len=:), allocatable :: path
+        character(len=object_path_length(store, class_name, object_id)) :: path
 
         path = ''
         if (.not. store%initialized .or. .not. immutable_id_valid(object_id)) return

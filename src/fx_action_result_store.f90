@@ -8,7 +8,7 @@ module fx_action_result_store
         IMMUTABLE_MISSING
     use fx_immutable_manifest, only: immutable_tree_entry_t, &
         immutable_id_valid, immutable_manifest_parse, &
-        immutable_entries_canonical, immutable_manifest_serialize
+        immutable_entries_canonical, immutable_manifest_encode
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
         immutable_store_put_blob, immutable_store_hash_file, &
         immutable_store_materialize_blob, IMMUTABLE_MATERIALIZE_AUTO
@@ -19,7 +19,7 @@ module fx_action_result_store
     use fx_immutable_gc, only: immutable_store_collect, IMMUTABLE_GC_CHANGED
     use fx_action_result_record, only: ACTION_RECORD_BOUND, &
         ACTION_RECORD_CONFLICT, action_result_bound_record, &
-        action_result_conflict_record, action_result_record_parse
+        action_result_conflict_encode, action_result_record_parse
     implicit none
     private
 
@@ -314,7 +314,7 @@ contains
             ierr = ACTION_RESULT_CORRUPT
             return
         end if
-        manifest = immutable_manifest_serialize(sorted_entries)
+        call immutable_manifest_encode(sorted_entries, manifest)
         result_id = sha256_string(manifest)
         call immutable_store_put_tree(store%objects, sorted_entries, result_id, &
             verify_status)
@@ -356,7 +356,7 @@ contains
                     ids(1) = ids(2)
                     ids(2) = temporary_id
                 end if
-                record = action_result_conflict_record(key, ids)
+                call action_result_conflict_encode(key, ids, record)
                 call write_record(c_root, c_key, record, ierr)
                 if (ierr == ACTION_RESULT_OK) ierr = ACTION_RESULT_CONFLICT
             end if
@@ -640,7 +640,7 @@ contains
 
     function retired_record(key) result(record)
         character(len=*), intent(in) :: key
-        character(len=:), allocatable :: record
+        character(len=19 + len_trim(key)) :: record
 
         record = 'FXACTION2'//achar(10)//trim(key)//achar(10)// &
             'RETIRED'//achar(10)

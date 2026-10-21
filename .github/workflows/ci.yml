@@ -52,3 +52,8 @@ jobs:
           fpm build --flag "-O2 -fopenmp"
           fpm test --flag "-O2 -fopenmp" --target test_mcp
           fpm test --flag "-O2 -fopenmp" --target test_mcp_system
+
+      - name: Concurrent cache and watcher clients
+        run: |
+          fpm test --target test_action_cache --flag "-O2 -fopenmp"
+          fpm test --target test_watch_lifecycle --flag "-O2 -fopenmp"

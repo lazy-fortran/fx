@@ -79,7 +79,7 @@ contains
 
     function to_lower(s) result(res)
         character(len=*), intent(in) :: s
-        character(len=:), allocatable :: res
+        character(len=len(s)) :: res
         integer :: i, c
         res = s
         do i = 1, len(s)

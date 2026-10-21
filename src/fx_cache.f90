@@ -8,7 +8,7 @@ module fx_cache
         cache_copy_file, cache_write_bytes_file, &
         cache_read_bytes_file
     use fx_hash, only: xxhash64, hash_to_hex
-    use fx_path, only: path_exists, path_normalize
+    use fx_path, only: path_exists, path_normalize_into
     implicit none
     private
 
@@ -32,7 +32,7 @@ contains
         c%initialized = .false.
         c%temp_seq = 0
 
-        normalized = path_normalize(trim(root_dir))
+        call path_normalize_into(trim(root_dir), normalized)
         if (len_trim(normalized) == 0) return
 
         c%root_dir = normalized

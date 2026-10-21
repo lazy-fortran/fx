@@ -605,7 +605,7 @@ contains
 
     function c_string_from_chars(chars) result(text)
         character(kind=c_char), intent(in) :: chars(:)
-        character(len=:), allocatable :: text
+        character(len=size(chars)) :: text
         integer :: n
         integer :: i
 
@@ -615,7 +615,7 @@ contains
             n = n + 1
         end do
 
-        allocate(character(len=n) :: text)
+        text = ''
         do i = 1, n
             text(i:i) = char(iachar(chars(i)))
         end do
