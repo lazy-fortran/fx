@@ -38,6 +38,14 @@ their actual unresolved goals, not instructions to recreate finished work.
 
 ## Delivery
 
+[V] 2026-10-21: optimized MCP extraction no longer passes one cursor as both
+INTENT(IN) and INTENT(OUT). Distinct next-position locals preserve the public
+API and complete/partial-field behavior. The existing extraction oracle fails
+on baseline at -O1 and passes after repair. aCluster 21817028 (GCC 12.2,
+-O1 -g -fopenmp, COMPLETED 0:0) builds the exact MCP server helper and passes
+all 31 native tests, including independent public-process framing/timeouts.
+CI also runs the two existing MCP oracles with optimization enabled.
+
 [V] 2026-10-21: concurrent store initialization now passes normalization through
 an explicit output and a fixed C buffer, avoiding GCC 12 shared hidden result
 lengths. aCluster 21817012 (GCC 12.2, COMPLETED 0:0) compares 1,024 pthread

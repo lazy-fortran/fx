@@ -151,7 +151,7 @@ contains
             '"method":"textDocument/didOpen",' // &
             '"params":{' // &
             '"textDocument":{"uri":"file:///tmp/open.txt",' // &
-            '"text":"print *, ''ok''"}}'
+            '"text":"print *, ''ok''"}}}'
 
         call lsp_parse_did_open(payload, uri, text)
 

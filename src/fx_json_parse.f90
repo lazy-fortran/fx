@@ -1,5 +1,6 @@
 module fx_json_parse
     use, intrinsic :: iso_fortran_env, only: int64, real64
+    use fx_string, only: string_t
     implicit none
     private
 
@@ -635,231 +636,113 @@ module fx_json_parse
         stack_index_is_valid = depth >= 1 .and. depth <= MAX_DEPTH
     end function stack_index_is_valid
 
-    ! Extract a string value at a dot/bracket path, e.g. "result.tools[1].name"
+    ! Extract only from a complete valid document. For duplicate members, retain
+    ! the first scalar of the requested type at the path, as existing clients do.
     subroutine json_extract_string(input, path, result, found)
-        character(len=*), intent(in) :: input
-        character(len=*), intent(in) :: path
+        character(len=*), intent(in) :: input, path
         character(len=:), allocatable, intent(out) :: result
         logical, intent(out) :: found
+        type(json_event_t) :: event
 
-        type(json_parser_t) :: p
-        type(json_event_t) :: ev
-        character(len=256) :: segments(64)
-        integer :: n_segs
-        character(len=256) :: key_stack(MAX_DEPTH)
-        integer :: arr_idx(MAX_DEPTH)
-        logical :: is_arr(MAX_DEPTH)
-        integer :: depth
-
-        found = .false.
         result = ''
-        call parse_path(path, segments, n_segs)
-        if (n_segs > size(segments)) return
-        call json_parser_init(p, input)
-        depth = 0
-        key_stack = ''
-        arr_idx = 0
-        is_arr = .false.
-
-        do
-            call json_parser_next(p, ev)
-            select case (ev%event_type)
-            case (JSON_END_OF_INPUT, JSON_ERROR)
-                return
-            case (JSON_OBJECT_START)
-                if (.not. stack_index_is_valid(depth + 1)) return
-                if (depth > 0) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                end if
-                depth = depth + 1
-                is_arr(depth) = .false.
-                key_stack(depth) = ''
-            case (JSON_ARRAY_START)
-                if (.not. stack_index_is_valid(depth + 1)) return
-                if (depth > 0) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                end if
-                depth = depth + 1
-                is_arr(depth) = .true.
-                arr_idx(depth) = 0
-            case (JSON_OBJECT_END, JSON_ARRAY_END)
-                if (.not. stack_index_is_valid(depth)) return
-                depth = depth - 1
-            case (JSON_KEY)
-                if (.not. stack_index_is_valid(depth)) return
-                if (allocated(ev%string_val)) key_stack(depth) = ev%string_val
-            case (JSON_STRING)
-                if (stack_index_is_valid(depth)) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                end if
-                if (path_matches(key_stack, arr_idx, is_arr, depth, &
-                    segments, n_segs)) then
-                    if (allocated(ev%string_val)) result = ev%string_val
-                    found = .true.
-                    return
-                end if
-                if (stack_index_is_valid(depth)) key_stack(depth) = ''
-            case (JSON_INTEGER, JSON_REAL, JSON_BOOL, JSON_NULL_VAL)
-                if (stack_index_is_valid(depth)) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                    key_stack(depth) = ''
-                end if
-            end select
-        end do
+        call json_extract_event(input, path, JSON_STRING, event, found)
+        if (found) result = event%string_val
     end subroutine json_extract_string
 
     subroutine json_extract_int(input, path, result, found)
-        character(len=*), intent(in) :: input
-        character(len=*), intent(in) :: path
+        character(len=*), intent(in) :: input, path
         integer, intent(out) :: result
         logical, intent(out) :: found
+        type(json_event_t) :: event
 
-        type(json_parser_t) :: p
-        type(json_event_t) :: ev
-        character(len=256) :: segments(64)
-        integer :: n_segs
-        character(len=256) :: key_stack(MAX_DEPTH)
-        integer :: arr_idx(MAX_DEPTH)
-        logical :: is_arr(MAX_DEPTH)
-        integer :: depth
-
-        found = .false.
         result = 0
-        call parse_path(path, segments, n_segs)
-        if (n_segs > size(segments)) return
-        call json_parser_init(p, input)
-        depth = 0
-        key_stack = ''
-        arr_idx = 0
-        is_arr = .false.
-
-        do
-            call json_parser_next(p, ev)
-            select case (ev%event_type)
-            case (JSON_END_OF_INPUT, JSON_ERROR)
-                return
-            case (JSON_OBJECT_START)
-                if (.not. stack_index_is_valid(depth + 1)) return
-                if (depth > 0) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                end if
-                depth = depth + 1
-                is_arr(depth) = .false.
-                key_stack(depth) = ''
-            case (JSON_ARRAY_START)
-                if (.not. stack_index_is_valid(depth + 1)) return
-                if (depth > 0) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                end if
-                depth = depth + 1
-                is_arr(depth) = .true.
-                arr_idx(depth) = 0
-            case (JSON_OBJECT_END, JSON_ARRAY_END)
-                if (.not. stack_index_is_valid(depth)) return
-                depth = depth - 1
-            case (JSON_KEY)
-                if (.not. stack_index_is_valid(depth)) return
-                if (allocated(ev%string_val)) key_stack(depth) = ev%string_val
-            case (JSON_INTEGER)
-                if (stack_index_is_valid(depth)) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                end if
-                if (path_matches(key_stack, arr_idx, is_arr, depth, &
-                    segments, n_segs)) then
-                    result = ev%int_val
-                    found = .true.
-                    return
-                end if
-                if (stack_index_is_valid(depth)) key_stack(depth) = ''
-            case (JSON_STRING, JSON_REAL, JSON_BOOL, JSON_NULL_VAL)
-                if (stack_index_is_valid(depth)) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                    key_stack(depth) = ''
-                end if
-            end select
-        end do
+        call json_extract_event(input, path, JSON_INTEGER, event, found)
+        if (.not. found) return
+        found = .false.
+        if (.not. event%int64_valid) return
+        if (event%int64_val < -int(huge(result), int64) - 1_int64 .or. &
+            event%int64_val > int(huge(result), int64)) return
+        result = int(event%int64_val)
+        found = .true.
     end subroutine json_extract_int
 
     subroutine json_extract_bool(input, path, result, found)
-        character(len=*), intent(in) :: input
-        character(len=*), intent(in) :: path
-        logical, intent(out) :: result
-        logical, intent(out) :: found
+        character(len=*), intent(in) :: input, path
+        logical, intent(out) :: result, found
+        type(json_event_t) :: event
 
+        result = .false.
+        call json_extract_event(input, path, JSON_BOOL, event, found)
+        if (found) result = event%bool_val
+    end subroutine json_extract_bool
+
+    subroutine json_extract_event(input, path, wanted, result, found)
+        character(len=*), intent(in) :: input, path
+        integer, intent(in) :: wanted
+        type(json_event_t), intent(out) :: result
+        logical, intent(out) :: found
         type(json_parser_t) :: p
-        type(json_event_t) :: ev
-        character(len=256) :: segments(64)
-        integer :: n_segs
-        character(len=256) :: key_stack(MAX_DEPTH)
+        type(json_event_t) :: event
+        type(string_t) :: segments(64), key_stack(MAX_DEPTH)
+        integer :: n_segs, depth
         integer :: arr_idx(MAX_DEPTH)
-        logical :: is_arr(MAX_DEPTH)
-        integer :: depth
+        logical :: is_arr(MAX_DEPTH), matched
 
         found = .false.
-        result = .false.
+        matched = .false.
         call parse_path(path, segments, n_segs)
         if (n_segs > size(segments)) return
-        call json_parser_init(p, input)
+        call json_parser_init_strict(p, input)
         depth = 0
-        key_stack = ''
         arr_idx = 0
         is_arr = .false.
-
         do
-            call json_parser_next(p, ev)
-            select case (ev%event_type)
-            case (JSON_END_OF_INPUT, JSON_ERROR)
+            call json_parser_next(p, event)
+            select case (event%event_type)
+            case (JSON_ERROR)
                 return
-            case (JSON_OBJECT_START)
+            case (JSON_END_OF_INPUT)
+                found = matched
+                return
+            case (JSON_OBJECT_START, JSON_ARRAY_START)
                 if (.not. stack_index_is_valid(depth + 1)) return
                 if (depth > 0) then
                     if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
                 end if
                 depth = depth + 1
-                is_arr(depth) = .false.
-                key_stack(depth) = ''
-            case (JSON_ARRAY_START)
-                if (.not. stack_index_is_valid(depth + 1)) return
-                if (depth > 0) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                end if
-                depth = depth + 1
-                is_arr(depth) = .true.
+                is_arr(depth) = event%event_type == JSON_ARRAY_START
                 arr_idx(depth) = 0
+                key_stack(depth)%s = ''
             case (JSON_OBJECT_END, JSON_ARRAY_END)
                 if (.not. stack_index_is_valid(depth)) return
                 depth = depth - 1
             case (JSON_KEY)
                 if (.not. stack_index_is_valid(depth)) return
-                if (allocated(ev%string_val)) key_stack(depth) = ev%string_val
-            case (JSON_BOOL)
+                key_stack(depth)%s = event%string_val
+            case (JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, JSON_NULL_VAL)
                 if (stack_index_is_valid(depth)) then
                     if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
                 end if
-                if (path_matches(key_stack, arr_idx, is_arr, depth, &
-                    segments, n_segs)) then
-                    result = ev%bool_val
-                    found = .true.
-                    return
+                if (.not. matched .and. event%event_type == wanted) then
+                    if (path_matches(key_stack, arr_idx, is_arr, depth, &
+                            segments, n_segs)) then
+                        result = event
+                        matched = .true.
+                    end if
                 end if
-                if (stack_index_is_valid(depth)) key_stack(depth) = ''
-            case (JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_NULL_VAL)
-                if (stack_index_is_valid(depth)) then
-                    if (is_arr(depth)) arr_idx(depth) = arr_idx(depth) + 1
-                    key_stack(depth) = ''
-                end if
+                if (stack_index_is_valid(depth)) key_stack(depth)%s = ''
             end select
         end do
-    end subroutine json_extract_bool
+    end subroutine json_extract_event
 
     ! Check key_stack/arr_idx against path segments at given depth
     pure logical function path_matches(key_stack, arr_idx, is_arr, depth, &
             segments, n_segs)
-        character(len=256), intent(in) :: key_stack(:)
+        type(string_t), intent(in) :: key_stack(:)
         integer, intent(in) :: arr_idx(:)
         logical, intent(in) :: is_arr(:)
         integer, intent(in) :: depth
-        character(len=256), intent(in) :: segments(:)
+        type(string_t), intent(in) :: segments(:)
         integer, intent(in) :: n_segs
         integer :: i
         character(len=32) :: buf
@@ -873,9 +756,11 @@ module fx_json_parse
         do i = 1, depth
             if (is_arr(i)) then
                 write(buf, '(I0)') arr_idx(i)
-                if (trim(segments(i)) /= trim(buf)) return
+                if (segments(i)%s /= trim(buf)) return
             else
-                if (trim(key_stack(i)) /= trim(segments(i))) return
+                if (.not. allocated(key_stack(i)%s)) return
+                if (len(key_stack(i)%s) /= len(segments(i)%s)) return
+                if (key_stack(i)%s /= segments(i)%s) return
             end if
         end do
         path_matches = .true.
@@ -885,7 +770,7 @@ module fx_json_parse
     ! Overflow returns size(segments) + 1; callers reject the incomplete path.
     pure subroutine parse_path(path, segments, n_segs)
         character(len=*), intent(in) :: path
-        character(len=256), intent(out) :: segments(:)
+        type(string_t), intent(out) :: segments(:)
         integer, intent(out) :: n_segs
         integer :: i, start, plen
         character(len=1) :: ch
@@ -902,7 +787,7 @@ module fx_json_parse
                 if (i > start) then
                     n_segs = n_segs + 1
                     if (n_segs > size(segments)) return
-                    segments(n_segs) = path(start:i - 1)
+                    segments(n_segs)%s = path(start:i - 1)
                 end if
                 start = i + 1
             end if
@@ -911,7 +796,7 @@ module fx_json_parse
         if (start <= plen) then
             n_segs = n_segs + 1
             if (n_segs > size(segments)) return
-            segments(n_segs) = path(start:plen)
+            segments(n_segs)%s = path(start:plen)
         end if
     end subroutine parse_path
 

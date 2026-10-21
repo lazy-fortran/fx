@@ -46,3 +46,9 @@ jobs:
 
       - name: Concurrent immutable initialization
         run: fpm test --target test_immutable_init_concurrent --flag "-fopenmp"
+
+      - name: Optimized MCP parser and public process oracle
+        run: |
+          fpm build --flag "-O2 -fopenmp"
+          fpm test --flag "-O2 -fopenmp" --target test_mcp
+          fpm test --flag "-O2 -fopenmp" --target test_mcp_system

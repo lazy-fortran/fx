@@ -6,6 +6,8 @@ program test_json_extract_bounds
     type(test_suite_t) :: suite
 
     call test_suite_init(suite, 'fx_json_extract_bounds')
+    call test_complete_document(suite)
+    call test_exact_keys(suite)
     call test_root_scalars(suite)
     call test_path_capacity(suite)
     call test_container_boundaries(suite)
@@ -14,6 +16,66 @@ program test_json_extract_bounds
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_complete_document(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=72), parameter :: bad(*) = [character(len=72) :: &
+            '{"s":"yes","n":7,"b":true} trailing', &
+            '{"s":"yes","n":7,"b":true,"bad":"\q"}', &
+            '{"s":"yes","n":7,"b":true,"bad":"\uD800"}', &
+            '{"s":"yes","n":7,"b":true,"bad":01}', &
+            '{"s":"yes","n":7,"b":true,', &
+            '{"s":"yes","n":7,"b":true,"bad":"'//achar(1)//'"}']
+        character(len=:), allocatable :: text
+        integer :: number, i
+        logical :: found, value
+
+        do i = 1, size(bad)
+            call json_extract_string(trim(bad(i)), 's', text, found)
+            call test_assert(suite, .not. found .and. text == '', &
+                'string extraction rejects malformed suffix')
+            call json_extract_int(trim(bad(i)), 'n', number, found)
+            call test_assert(suite, .not. found .and. number == 0, &
+                'integer extraction rejects malformed suffix')
+            call json_extract_bool(trim(bad(i)), 'b', value, found)
+            call test_assert(suite, .not. found .and. .not. value, &
+                'boolean extraction rejects malformed suffix')
+        end do
+        call json_extract_string('{"large":9223372036854775808,"s":"yes"}', &
+            's', text, found)
+        call test_assert(suite, found .and. text == 'yes', &
+            'unrelated lossless integer does not prevent extraction')
+        call json_extract_int('{"n":9223372036854775808}', 'n', number, found)
+        call test_assert(suite, .not. found .and. number == 0, &
+            'unrepresentable integer is never silently narrowed')
+        call json_extract_int('{"n":2147483648}', 'n', number, found)
+        call test_assert(suite, .not. found .and. number == 0, &
+            'int64 value outside default kind is never narrowed')
+        call json_extract_string('{"s":1,"s":"first","s":"last"}', 's', text, found)
+        call test_assert(suite, found .and. text == 'first', &
+            'duplicate extraction retains first scalar of requested type')
+    end subroutine test_complete_document
+
+    subroutine test_exact_keys(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=:), allocatable :: text, key, input
+        logical :: found
+
+        key = repeat('k', 300)
+        input = '{"'//key//'":"long","'//key//'z":"other",'// &
+            '"k ":"spaced","k":"exact"}'
+        call json_extract_string(input, key, text, found)
+        call test_assert(suite, found .and. text == 'long', &
+            'long member names are not truncated')
+        call json_extract_string(input, key//'z', text, found)
+        call test_assert(suite, found .and. text == 'other', &
+            'long names sharing a prefix remain distinct')
+        call json_extract_string(input, 'k', text, found)
+        call test_assert(suite, found .and. text == 'exact', &
+            'member name whitespace remains significant')
+        call json_extract_string('{"k ":"spaced"}', 'k', text, found)
+        call test_assert(suite, .not. found, 'spaced member cannot alias plain member')
+    end subroutine test_exact_keys
 
     subroutine test_nested_array_elements(suite)
         type(test_suite_t), intent(inout) :: suite
