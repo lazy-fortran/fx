@@ -4,7 +4,7 @@ program test_immutable_store
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
-    use fx_hash, only: sha256_string
+    use fx_hash, only: sha256_string, sha256_file
     use fx_immutable_store, only: immutable_store_t, immutable_tree_entry_t, &
         IMMUTABLE_OK, IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, &
         IMMUTABLE_INVALID, IMMUTABLE_UNSUPPORTED, IMMUTABLE_BLOB, &
@@ -21,9 +21,8 @@ program test_immutable_store
         proc_watch_init, proc_watch_add, proc_watch_poll, proc_watch_close
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_identity, test_process_clock_ms, &
-        test_process_sleep_ms
-    use fx_test_fs, only: fx_test_temp_root, fx_test_lock_directory, &
-        fx_test_unlock, fx_test_remove_tree
+        test_process_sleep_ms, test_hold_fsync
+    use fx_test_fs, only: fx_test_temp_root, fx_test_remove_tree
     use fx_path, only: path_dirname
     implicit none
 
@@ -649,10 +648,10 @@ contains
         character(len=*), intent(in) :: base
         character(len=512) :: path, parent_dir, stage_dir, stage_path, source_path
         character(len=512) :: child_exe, child_path, sentinel_release
-        character(len=4096) :: child_argv(4), sentinel_argv(3)
+        character(len=4096) :: child_argv(5), sentinel_argv(3)
         character(len=1) :: bytes(262144)
         character(len=64) :: missing_id
-        integer :: local_err, child_status, file_err, i, writer_pid, lock_fd
+        integer :: local_err, child_status, file_err, i, writer_pid
         integer :: sentinel_pid, spawn_err, signal_err, state, child_parent
         integer(int64) :: staged_size
         integer(int64) :: child_start, sentinel_start
@@ -675,10 +674,6 @@ contains
         call test_assert_equal_int(s, 0, int(c_status), &
             'crash oracle prepares the object shard')
         if (c_status /= 0_c_int) return
-        lock_fd = fx_test_lock_directory(trim(parent_dir))
-        call test_assert(s, lock_fd >= 0, &
-            'crash oracle holds the real publication admission lock')
-        if (lock_fd < 0) return
         sentinel_release = trim(base)//'/unrelated-sentinel-release'
         call get_command_argument(0, executable)
         sentinel_argv(1:3) = [character(len=4096) :: trim(executable), &
@@ -689,13 +684,16 @@ contains
         call assert_fortran_child(s, sentinel_pid, sentinel_start, &
             child_parent, child_path)
 
-        child_argv(1:4) = [character(len=4096) :: trim(executable), &
-            '--put-blob', trim(cache%root_dir), trim(source_path)]
-        call test_process_spawn(child_argv(1:4), writer_pid, spawn_err)
+        child_argv = [character(len=4096) :: trim(executable), &
+            '--put-blob', trim(cache%root_dir), trim(source_path), &
+            trim(source_path)//'.release']
+        call test_process_spawn(child_argv, writer_pid, spawn_err)
         call test_assert_equal_int(s, 0, spawn_err, &
             'native process API starts exact blob writer')
         stage_dir = trim(parent_dir)//'/.fx-owned-'//number(writer_pid)//'-0'
         stage_path = trim(stage_dir)//'/payload'
+        call wait_for_file(trim(source_path)//'.ready', 30000, staged)
+        call test_assert(s, staged, 'writer reaches post-validation fsync barrier')
         call wait_for_owned_stage(trim(stage_path), int(size(bytes), int64), staged)
         call test_assert(s, staged, &
             'writer prepares a complete immutable payload before publication')
@@ -710,9 +708,6 @@ contains
         call wait_for_child(writer_pid, 5000, child_status, exists)
         call test_assert(s, exists .and. child_status == 137, &
             'prepublication writer is killed and reaped by its owner')
-        local_err = fx_test_unlock(lock_fd)
-        call test_assert_equal_int(s, 0, local_err, &
-            'crash oracle releases the real publication admission lock')
         call test_process_wait_once(sentinel_pid, child_status, state)
         call test_assert_equal_int(s, 0, state, &
             'unrelated sentinel remains alive after exact writer signal')
@@ -848,7 +843,7 @@ contains
     end subroutine test_corruption_is_reported
 
     subroutine run_worker_put()
-        character(len=4096) :: store_root, source_path
+        character(len=4096) :: store_root, source_path, release, stage
         type(immutable_store_t) :: worker_store
         character(len=64) :: id
         integer :: local_err
@@ -856,6 +851,16 @@ contains
         call get_command_argument(3, source_path)
         call immutable_store_init(worker_store, trim(store_root), local_err)
         if (local_err /= IMMUTABLE_OK) stop 10
+        call get_command_argument(4, release)
+        if (len_trim(release) > 0) then
+            call sha256_file(trim(source_path), id, local_err)
+            if (local_err /= 0) stop 15
+            stage = path_dirname(immutable_store_blob_path(worker_store, id))// &
+                '/.fx-owned-'//number(proc_pid())//'-0/payload'
+            local_err = test_hold_fsync(trim(stage), &
+                trim(source_path)//'.ready', trim(release))
+            if (local_err /= 0) stop 16
+        end if
         call immutable_store_put_blob(worker_store, trim(source_path), id, &
             local_err)
         if (local_err /= IMMUTABLE_OK) stop 11

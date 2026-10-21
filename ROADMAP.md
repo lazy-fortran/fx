@@ -38,6 +38,18 @@ their actual unresolved goals, not instructions to recreate finished work.
 
 ## Delivery
 
+[V] 2026-10-21: publication/crash oracles synchronize at the real read-only
+payload fsync through a test-only syscall interposer; they no longer wait for
+retired production directory locks. The same pathname-substitution, concurrent
+winner, interrupted-writer and unrelated-sentinel assertions remain. Test
+scratch now honors TMPDIR on POSIX. aCluster/GCC 12.2 passes both owning tests
+and all 31 native cases (21817021); that job exits during cleanup of mode-0000
+fixtures, repaired by exact owned cleanup job 21817022 (COMPLETED 0:0).
+[V] Darwin passes the publication-race oracle. Its store oracle retains
+pre-existing process-identity failures at test-support/fx_mcp_test_os/src/
+immutable_test_process.c:150 (proc_pidpath receives a 512-byte output buffer)
+and one file-watcher failure. No full Darwin qualification is claimed.
+
 2026-10-17 branch integration ports the deferred graph verification from
 `0f60c9f` onto the current complete-interface cache API. A manifest-only preview
 checks local outputs before traversing the immutable graph; every accepted hit

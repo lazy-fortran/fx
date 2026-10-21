@@ -5,7 +5,7 @@ module fx_test_process
     public :: test_process_spawn, test_process_spawn_piped, test_process_read
     public :: test_process_write, test_process_close, test_process_is_executable
     public :: test_process_wait_once, test_process_signal, test_process_identity
-    public :: test_process_clock_ms, test_process_sleep_ms
+    public :: test_process_clock_ms, test_process_sleep_ms, test_hold_fsync
 
     type, public :: test_process_t
         integer :: pid = -1
@@ -14,6 +14,11 @@ module fx_test_process
     end type test_process_t
 
     interface
+        integer(c_int) function c_hold_fsync(held, ready, release) &
+                bind(C, name='fx_test_hold_fsync')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: held(*), ready(*), release(*)
+        end function c_hold_fsync
         integer(c_int) function c_spawn(bytes, offsets, count, pid) &
                 bind(C, name='fx_test_process_spawn')
             import :: c_char, c_int
@@ -84,6 +89,12 @@ module fx_test_process
     end interface
 
 contains
+
+    integer function test_hold_fsync(held, ready, release) result(ierr)
+        character(len=*), intent(in) :: held, ready, release
+        ierr = int(c_hold_fsync(trim(held)//c_null_char, &
+            trim(ready)//c_null_char, trim(release)//c_null_char))
+    end function test_hold_fsync
 
     subroutine test_process_spawn(arguments, pid, ierr)
         character(len=*), intent(in) :: arguments(:)
