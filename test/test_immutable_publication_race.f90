@@ -13,9 +13,9 @@ program test_immutable_publication_race
     use fx_immutable_manifest, only: immutable_manifest_serialize
     use fx_immutable_owned, only: owned_begin_path, owned_write, owned_publish, &
         owned_reject, owned_dispose
-    use fx_test_fs, only: fx_test_temp_root, fx_test_chmod
+    use fx_test_fs, only: fx_test_temp_root, fx_test_mkdir_p, fx_test_chmod
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
-        test_process_signal, test_process_sleep_ms
+        test_process_signal, test_process_sleep_ms, test_hold_fsync
     implicit none
     interface
         integer(c_int) function file_info(path, bytes, mtime, inode) &
@@ -61,7 +61,7 @@ program test_immutable_publication_race
     do kind = 1, 2
         do attack = 1, 2
             trial = trial + 1
-            call test_staged_substitution(kind, attack, trial)
+            call test_after_check(kind, attack, trial)
         end do
         trial = trial + 1
         call test_cleanup_winner(kind, trial)
@@ -136,45 +136,51 @@ contains
         entry%mode = 420
     end function tree_entry
 
-    subroutine test_staged_substitution(kind, attack, trial)
+    subroutine test_after_check(kind, attack, trial)
         integer, intent(in) :: kind, attack, trial
         type(immutable_store_t) :: store
         character(len=64) :: id
-        character(len=:), allocatable :: base, expected, temp, final
-        integer :: pid, child_status
+        character(len=:), allocatable :: base, expected, temp, final, parent_dir
+        integer :: pid
         integer(c_int) :: changed
-        logical :: staged, exists
-
+        integer :: local_err
+        integer :: child_status
+        logical :: staged
         base = trim(root)//'/case-'//number(trial)
         call fixture(base, kind, store, id, expected)
         call write_text(base//'/sentinel', 'OUTSIDE SENTINEL')
         final = canonical(store, kind, id)
+        parent_dir = path_dirname(final)
+        local_err = fx_test_mkdir_p(parent_dir)
+        call test_assert_equal_int(suite, 0, local_err, &
+            'object shard exists before external publication admission')
         pid = spawn_worker(base, kind, 8)
-        call test_assert(suite, pid > 0, 'staged publication worker starts')
+        call test_assert(suite, pid > 0, 'late publication worker starts')
         if (pid <= 0) return
         call wait_marker(base//'/ready', staged)
-        call test_assert(suite, staged, 'worker prepares an owned immutable candidate')
+        call test_assert(suite, staged, 'publisher reaches post-validation fsync barrier')
+        call wait_for_owned_stage(parent_dir, pid, len(expected), temp, staged)
+        call test_assert(suite, staged, &
+            'publisher retains its verified read-only temporary file')
         if (.not. staged) then
             call wait_worker(pid, child_status)
             return
         end if
-        temp = path_dirname(final)//'/.fx-owned-'//number(pid)//'-0/payload'
         changed = rename_path(temp//c_null_char, (temp//'.held')//c_null_char)
-        call test_assert_equal_int(suite, 0, int(changed), 'owned candidate entry moves')
+        call test_assert_equal_int(suite, 0, int(changed), 'entry moves after final ownership check')
         if (attack == 1) then
             changed = symlink_path((base//'/sentinel')//c_null_char, temp//c_null_char)
-            call test_assert_equal_int(suite, 0, int(changed), 'entry becomes outside symlink')
+            call test_assert_equal_int(suite, 0, int(changed), 'late entry becomes outside symlink')
         else
             call write_text(temp, 'ARBITRARY SUBSTITUTED BYTES')
         end if
         call write_text(base//'/release', 'release')
-        call result_after_wait(pid, base, -1)
-        inquire (file=final, exist=exists)
-        call test_assert(suite, .not. exists, 'substituted candidate never becomes canonical')
+        call result_after_wait(pid, base, IMMUTABLE_OK)
+        call check_bytes(final, expected, 'descriptor publication preserves original bytes')
         call check_outside_and_temps(base, temp)
         call retry(store, base, kind, id)
-        call check_bytes(final, expected, 'retry publishes the correct canonical bytes')
-    end subroutine test_staged_substitution
+        call check_bytes(final, expected, 'retry keeps the correct canonical object')
+    end subroutine test_after_check
 
     subroutine test_cleanup_winner(kind, trial)
         integer, intent(in) :: kind, trial
@@ -184,6 +190,7 @@ contains
         integer :: pid
         integer(c_int) :: changed
         integer(c_long_long) :: winner_inode
+        integer :: local_err
         integer :: child_status
         logical :: found
         base = trim(root)//'/case-'//number(trial)
@@ -207,6 +214,7 @@ contains
         call retry(store, base, kind, id)
         winner_inode = inode_of(final)
         call test_assert(suite, winner_inode > 0, 'concurrent valid winner has real inode')
+        call check_bytes(final, expected, 'valid winner is complete before cleanup')
         call write_text(base//'/release', 'release')
         call result_after_wait(pid, base, IMMUTABLE_OK)
         call test_assert(suite, inode_of(final) == winner_inode, &
@@ -306,7 +314,10 @@ contains
 
     subroutine run_worker()
         type(immutable_store_t) :: store
-        character(len=512) :: base, argument
+        type(immutable_tree_entry_t) :: entry(1)
+        character(len=512) :: base, argument, stage
+        character(len=:), allocatable :: final, expected
+        character(len=64) :: id
         integer :: kind, phase, ierr, unit
         call get_command_argument(2, base)
         call get_command_argument(3, argument)
@@ -319,41 +330,24 @@ contains
             call run_cleanup_worker(store, base, kind)
             return
         end if
-        call run_stage_worker(store, trim(base), kind, ierr)
+        if (phase == 8) then
+            call fixture(trim(base), kind, store, id, expected)
+            final = canonical(store, kind, id)
+            stage = path_dirname(final)//'/.fx-owned-'//number(proc_pid())//'-0/payload'
+            ierr = test_hold_fsync(trim(stage), trim(base)//'/ready', &
+                trim(base)//'/release')
+            if (ierr /= 0) stop 30
+        end if
+        if (kind == 1) then
+            call immutable_store_put_blob(store, trim(base)//'/source', id, ierr)
+        else
+            entry(1) = tree_entry(sha256_string(PAYLOAD))
+            call immutable_store_put_tree(store, entry, id, ierr)
+        end if
         open (newunit=unit, file=trim(base)//'/result', status='replace')
         write (unit, *) ierr
         close (unit)
     end subroutine run_worker
-
-    subroutine run_stage_worker(store, base, kind, ierr)
-        type(immutable_store_t), intent(in) :: store
-        character(len=*), intent(in) :: base
-        integer, intent(in) :: kind
-        integer, intent(out) :: ierr
-        type(c_ptr) :: capture
-        type(immutable_tree_entry_t) :: entry(1)
-        character(len=:), allocatable :: expected, final, temp
-        logical :: released
-
-        expected = PAYLOAD
-        if (kind == 2) then
-            entry(1) = tree_entry(sha256_string(PAYLOAD))
-            expected = immutable_manifest_serialize(entry)
-        end if
-        final = canonical(store, kind, sha256_string(expected))
-        capture = owned_begin_path(final//c_null_char, 0_c_int)
-        if (.not. c_associated(capture)) stop 30
-        ierr = owned_write(capture, expected, int(len(expected), c_int))
-        temp = path_dirname(final)//'/.fx-owned-'//number(proc_pid())//'-0/payload'
-        if (ierr == 0) ierr = fx_test_chmod(temp, 292)
-        if (ierr /= 0) stop 31
-        ! Synchronize only this test worker, before the public publication API.
-        call write_text(base//'/ready', 'staged')
-        call wait_marker(base//'/release', released)
-        if (.not. released) stop 32
-        ierr = owned_publish(capture)
-        call owned_dispose(capture)
-    end subroutine run_stage_worker
 
     subroutine run_cleanup_worker(store, base, kind)
         type(immutable_store_t), intent(in) :: store
@@ -395,6 +389,31 @@ contains
         call owned_dispose(capture)
         if (ierr /= 0) stop 29
     end subroutine run_cleanup_worker
+
+    subroutine wait_for_owned_stage(parent_dir, pid, expected_size, path, ready)
+        character(len=*), intent(in) :: parent_dir
+        integer, intent(in) :: pid
+        integer, intent(in) :: expected_size
+        character(len=:), allocatable, intent(out) :: path
+        logical, intent(out) :: ready
+        integer(c_long_long) :: bytes, mtime, inode
+        integer(c_int) :: status
+        integer :: attempt
+
+        path = trim(parent_dir)//'/.fx-owned-'//number(int(pid))//'-0/payload'
+        ready = .false.
+        do attempt = 1, 3000
+            bytes = -1_c_long_long
+            mtime = -1_c_long_long
+            inode = -1_c_long_long
+            status = file_info(path//c_null_char, bytes, mtime, inode)
+            if (status == 0_c_int .and. bytes == expected_size) then
+                ready = .true.
+                return
+            end if
+            call test_process_sleep_ms(10)
+        end do
+    end subroutine wait_for_owned_stage
 
     subroutine wait_marker(path, found)
         character(len=*), intent(in) :: path
