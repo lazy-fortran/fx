@@ -230,8 +230,7 @@ int fx_owned_fill(void *handle, int input, int strategy, int *cloned)
 }
 /* Filesystems such as AFS refuse a hard link between directories (EXDEV or
  * EPERM). Publish a private copy through a same-directory link instead, which
- * keeps the exclusive, atomic name creation. FX_STORE_FORCE_NO_LINK=1 forces
- * this path so it can be tested on any filesystem. */
+ * keeps the exclusive, atomic name creation. */
 static int link_unsupported(int error)
 {
     return error == EXDEV || error == EPERM || error == EMLINK ||
@@ -267,9 +266,8 @@ static int publish_by_copy(owned_t *t)
     t->fd = copy;
     return 0;
 }
-static int link_or_copy(owned_t *t, int forced)
+static int link_or_copy(owned_t *t)
 {
-    if (forced) errno = EXDEV;
     return link_unsupported(errno) ? publish_by_copy(t) : -1;
 }
 static int publish_owned_file(owned_t *t, int cas)
@@ -279,21 +277,18 @@ static int publish_owned_file(owned_t *t, int cas)
     /* /proc's fd link binds the held inode even for an unprivileged caller. */
     char source[64];
     snprintf(source, sizeof(source), "/proc/self/fd/%d", t->fd);
-    int forced = getenv("FX_STORE_FORCE_NO_LINK") != NULL;
-    if (!forced && linkat(AT_FDCWD, source, t->parent, t->name,
-                          AT_SYMLINK_FOLLOW) == 0) return 0;
-    return link_or_copy(t, forced);
+    if (linkat(AT_FDCWD, source, t->parent, t->name,
+               AT_SYMLINK_FOLLOW) == 0) return 0;
+    return link_or_copy(t);
 #elif defined(__APPLE__)
-    int forced = getenv("FX_STORE_FORCE_NO_LINK") != NULL;
     if (cas) {
         /* Atomic exclusive clone from the verified descriptor, never its name. */
-        if (!forced && fclonefileat(t->fd, t->parent, t->name,
-                                    CLONE_NOOWNERCOPY) == 0) return 0;
-    } else if (!forced &&
-               linkat(t->staging, "payload", t->parent, t->name, 0) == 0) {
+        if (fclonefileat(t->fd, t->parent, t->name,
+                         CLONE_NOOWNERCOPY) == 0) return 0;
+    } else if (linkat(t->staging, "payload", t->parent, t->name, 0) == 0) {
         return 0;
     }
-    return link_or_copy(t, forced);
+    return link_or_copy(t);
 #elif defined(_WIN32)
     (void)cas;
     return fx_win_link_fd(t->fd, t->parent, t->name);

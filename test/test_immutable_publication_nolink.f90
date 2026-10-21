@@ -1,8 +1,8 @@
 ! Publication must succeed where hard links between directories fail (AFS).
-! The test re-executes itself with FX_STORE_FORCE_NO_LINK set, which makes the
-! store treat every link as EXDEV and take the copy fallback.
+! A test-only compilation adapter returns EXDEV for cross-directory links.
+! The production object has no fixture policy or environment controls.
 program test_immutable_publication_nolink
-    use, intrinsic :: iso_c_binding, only: c_char, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int, c_ptr, c_associated
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
@@ -11,25 +11,46 @@ program test_immutable_publication_nolink
     use fx_test_fs, only: fx_test_temp_root
     use fx_immutable_store, only: immutable_store_t, IMMUTABLE_OK, &
         immutable_store_init, immutable_store_put_blob, &
-        immutable_store_verify_blob
+        immutable_store_verify_blob, immutable_store_blob_path
     implicit none
+    interface
+        function begin_candidate(path, tree) result(handle) &
+                bind(C, name='fx_test_nolink_owned_begin_path')
+            import :: c_char, c_int, c_ptr
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: tree
+            type(c_ptr) :: handle
+        end function begin_candidate
+        integer(c_int) function write_candidate(handle, bytes, count) &
+                bind(C, name='fx_test_nolink_owned_write')
+            import :: c_ptr, c_int, c_char
+            type(c_ptr), value :: handle
+            character(kind=c_char), intent(in) :: bytes(*)
+            integer(c_int), value :: count
+        end function write_candidate
+        integer(c_int) function publish_candidate(handle) &
+                bind(C, name='fx_test_nolink_owned_publish')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: handle
+        end function publish_candidate
+        subroutine dispose_candidate(handle) bind(C, name='fx_test_nolink_owned_dispose')
+            import :: c_ptr
+            type(c_ptr), value :: handle
+        end subroutine dispose_candidate
+        integer(c_int) function link_attempts() bind(C, name='fx_test_nolink_attempts')
+            import :: c_int
+        end function link_attempts
+    end interface
 
     character(len=*), parameter :: PAYLOAD = 'payload published without links'
     type(test_suite_t) :: suite
     type(immutable_store_t) :: store
-    character(len=512) :: root, source, flag, exe
+    character(len=512) :: root, source
     character(len=512, kind=c_char) :: scratch
     character(len=64) :: blob_id, again_id
     integer :: ierr, end_path, unit, status
-
-    call get_environment_variable('FX_STORE_FORCE_NO_LINK', flag, status=status)
-    if (status /= 0) then
-        call get_command_argument(0, exe)
-        call execute_command_line('FX_STORE_FORCE_NO_LINK=1 '//trim(exe), &
-            exitstat=status)
-        if (status /= 0) stop 1
-        stop 0
-    end if
+    type(c_ptr) :: candidate
+    character(len=:), allocatable :: final
 
     call test_suite_init(suite, 'immutable_publication_nolink')
     scratch = c_null_char
@@ -46,9 +67,17 @@ program test_immutable_publication_nolink
     write(unit) PAYLOAD
     close(unit)
 
-    call immutable_store_put_blob(store, trim(source), blob_id, ierr)
-    call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, &
-        'blob publishes when links are unavailable')
+    blob_id = sha256_string(PAYLOAD)
+    final = immutable_store_blob_path(store, blob_id)
+    candidate = begin_candidate(final//c_null_char, 0_c_int)
+    call test_assert(suite, c_associated(candidate), 'test candidate opens')
+    if (.not. c_associated(candidate)) stop 22
+    ierr = write_candidate(candidate, PAYLOAD, int(len(PAYLOAD), c_int))
+    call test_assert_equal_int(suite, 0, ierr, 'candidate bytes are staged')
+    ierr = publish_candidate(candidate)
+    call test_assert_equal_int(suite, 0, ierr, 'copy fallback publishes without cross links')
+    call dispose_candidate(candidate)
+    call test_assert(suite, link_attempts() > 0, 'oracle exercised unsupported link fallback')
     call test_assert_equal_str(suite, sha256_string(PAYLOAD), blob_id, &
         'copy-published blob ID hashes its bytes')
     call immutable_store_verify_blob(store, blob_id, ierr)
