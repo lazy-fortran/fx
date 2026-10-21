@@ -1,7 +1,7 @@
 module fx_mcp
     use fx_json_build, only: json_builder_t
     use fx_string, only: to_lower
-    use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_fortran_env, only: int64, output_unit
     use, intrinsic :: iso_c_binding, only: c_int, c_char
     implicit none
     private
@@ -350,6 +350,8 @@ contains
         case default
             write(*, '(A)', advance='no') trim(response) // achar(10)
         end select
+        ! The peer waits for this response while keeping its input open.
+        flush(output_unit)
     end subroutine mcp_send_response
 
     subroutine mcp_make_initialize_response(id_str, proto_ver, &

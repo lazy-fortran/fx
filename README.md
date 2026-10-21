@@ -51,6 +51,13 @@ backend failure are distinct outcomes. Native lifecycle tests exercise these pub
 operations without production fixture controls. Internal allocation failures are
 not deterministically injected.
 
+## Collection safety
+
+Bounded immutable collection and size eviction refuse deletion on BeeGFS while
+ownership snapshots rely on host-local locks. Inventory-only collection remains
+available. These APIs return an unsupported status; automatic size eviction skips
+these stores. Cross-host ownership serialization is required before enabling it.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
