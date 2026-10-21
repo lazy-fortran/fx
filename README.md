@@ -23,7 +23,7 @@ stack so the tools above it stay cheap to build.
 | `fx_mcp` | Model Context Protocol server over JSON-RPC/stdio |
 | `fx_cli` | Command-line argument parsing |
 | `fx_proc` | Process execution |
-| `fx_watch` | inotify-based file watching |
+| `fx_watch` | Native Linux/macOS file watching |
 | `fx_diag` | Diagnostic records |
 | `fx_test` | Minimal test-suite framework |
 | `fx_log` | Logging |
@@ -41,6 +41,15 @@ uses, since bootstrapping `fo` inside `fx`'s own CI would be circular.
 ## Executables
 
 `fx-mcp-server` exposes fx functionality over JSON-RPC on stdio.
+
+## Watcher lifecycle
+
+Each watcher owns its subscriptions until `watcher_close`. Repeated registration,
+root replacement and failed registration retain bounded descriptors; a failed root
+can be followed by a useful subscription on the same watcher. Poll timeout and
+backend failure are distinct outcomes. Native lifecycle tests exercise these public
+operations without production fixture controls. Internal allocation failures are
+not deterministically injected.
 
 ## License
 
