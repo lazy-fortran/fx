@@ -721,7 +721,7 @@ contains
         character(len=*), intent(in) :: text
         integer, intent(in) :: pos_in, end_idx
         integer, intent(out) :: value_start, value_end, pos_out
-        integer :: p
+        integer :: p, next_pos
 
         call skip_ws(text, pos_in, end_idx, p)
         if (p > end_idx) then
@@ -734,8 +734,8 @@ contains
         value_start = p
         select case (text(p:p))
         case ('"')
-            call parse_quoted_string(text, p, value_start, value_end, p)
-            pos_out = p
+            call parse_quoted_string(text, p, value_start, value_end, next_pos)
+            pos_out = next_pos
         case ('{')
             call parse_nested_bounds(text, p, end_idx, '{', '}', value_end, pos_out)
         case ('[')
@@ -805,7 +805,7 @@ contains
         logical, intent(out) :: found
 
         integer :: pos, key_start, key_end, ks
-        integer :: skipped_start, skipped_end, skipped_pos
+        integer :: skipped_start, skipped_end, skipped_pos, next_pos
 
         found = .false.
         value_start = 0
@@ -814,7 +814,8 @@ contains
 
         if (pos <= end_idx .and. json_text(pos:pos) == '{') pos = pos + 1
         do while (pos <= end_idx)
-            call skip_ws(json_text, pos, end_idx, pos)
+            call skip_ws(json_text, pos, end_idx, next_pos)
+            pos = next_pos
             if (pos > end_idx) return
             if (json_text(pos:pos) == '}') return
             if (json_text(pos:pos) == ',') then
@@ -823,9 +824,11 @@ contains
             end if
             if (json_text(pos:pos) /= '"') return
 
-            call parse_quoted_string(json_text, pos, key_start, key_end, pos)
+            call parse_quoted_string(json_text, pos, key_start, key_end, next_pos)
+            pos = next_pos
             if (key_start == 0 .or. key_end < key_start) return
-            call skip_ws(json_text, pos, end_idx, pos)
+            call skip_ws(json_text, pos, end_idx, next_pos)
+            pos = next_pos
             if (pos > end_idx .or. json_text(pos:pos) /= ':') return
             pos = pos + 1
             ks = len_trim(key)
@@ -836,7 +839,9 @@ contains
                 cycle
             end if
 
-            call parse_value_bounds(json_text, pos, end_idx, value_start, value_end, pos)
+            call parse_value_bounds(json_text, pos, end_idx, value_start, &
+                value_end, next_pos)
+            pos = next_pos
             if (value_start == 0) return
             found = .true.
             return
