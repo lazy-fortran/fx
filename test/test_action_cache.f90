@@ -25,6 +25,7 @@ program test_action_cache
     call test_suite_init(suite, 'fx_action_cache')
     call test_root_resolution(suite)
     call test_action_round_trip(suite)
+    call test_concurrent_round_trip(suite)
     call test_smod_round_trip(suite)
     call test_multiple_interfaces(suite)
     call test_action_result_warm_validation(suite)
@@ -39,6 +40,66 @@ program test_action_cache
     call test_suite_exit(suite)
 
 contains
+
+    subroutine test_concurrent_round_trip(suite)
+        type(test_suite_t), intent(inout) :: suite
+        character(len=:), allocatable :: root
+        character(len=1024) :: paths(4)
+        character(len=32) :: names(4), payloads(4)
+        integer :: lane, failures(4)
+
+        root = temp_root('concurrent')
+        call cleanup_tree(root)
+        do lane = 1, 4
+            paths(lane) = root//'/'//repeat('x', lane*7)
+            names(lane) = 'unit_'//repeat('m', lane*5)
+            payloads(lane) = repeat('v', lane*9)
+            call make_dir(trim(paths(lane))//'/source')
+            call make_dir(trim(paths(lane))//'/restored')
+            call write_file(trim(paths(lane))//'/source/object.o', &
+                trim(payloads(lane)))
+            call write_file(trim(paths(lane))//'/source/'//trim(names(lane))// &
+                '.mod', 'module '//trim(payloads(lane)))
+        end do
+        !$omp parallel do num_threads(4)
+        do lane = 1, 4
+            call concurrent_round_trip(trim(paths(lane)), trim(names(lane)), &
+                trim(payloads(lane)), failures(lane))
+        end do
+        !$omp end parallel do
+        call test_assert_equal_int(suite, 0, sum(failures), &
+            'concurrent varied-length caches restore exact object and module bytes')
+        call cleanup_tree(root)
+    end subroutine test_concurrent_round_trip
+
+    subroutine concurrent_round_trip(root, name, payload, failures)
+        character(len=*), intent(in) :: root, name, payload
+        integer, intent(out) :: failures
+        type(cache_t) :: cache
+        character(len=HASH_LEN) :: output_id
+        integer :: ierr, iteration
+        logical :: restored
+
+        failures = 0
+        do iteration = 1, 8
+            call cache_init(cache, root//'/cache')
+            call cache_store_action(cache, 'action', root//'/source/object.o', &
+                root//'/source', [name], output_id, ierr)
+            if (ierr /= 0) failures = failures + 1
+            call delete_file(root//'/restored/object.o')
+            call delete_file(root//'/restored/'//name//'.mod')
+            call cache_restore_action(cache, 'action', root//'/restored/object.o', &
+                root//'/restored', restored)
+            if (.not. restored) failures = failures + 1
+            if (.not. file_has_bytes(root//'/restored/object.o', payload)) &
+                failures = failures + 1
+            if (.not. file_has_bytes(root//'/restored/'//name//'.mod', &
+                'module '//payload)) failures = failures + 1
+            call cache_restore_action(cache, 'action', root//'/restored/object.o', &
+                root//'/restored', restored)
+            if (.not. restored) failures = failures + 1
+        end do
+    end subroutine concurrent_round_trip
 
     subroutine test_root_resolution(suite)
         type(test_suite_t), intent(inout) :: suite

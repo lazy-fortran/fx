@@ -69,6 +69,8 @@ fpm test --target test_immutable_init_concurrent --flag "-fopenmp"
 fpm build --flag "-O2 -fopenmp"
 fpm test --flag "-O2 -fopenmp" --target test_mcp
 fpm test --flag "-O2 -fopenmp" --target test_mcp_system
+fpm test --flag "-O2 -fopenmp" --target test_action_cache
+fpm test --flag "-O2 -fopenmp" --target test_watch_lifecycle
 
 
     )

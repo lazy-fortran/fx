@@ -273,7 +273,7 @@ contains
         ierr = IMMUTABLE_OK
     end subroutine parse_octal
 
-    logical function immutable_id_valid(text)
+    pure logical function immutable_id_valid(text)
         character(len=*), intent(in) :: text
         integer :: i, c
         immutable_id_valid = .false.

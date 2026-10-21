@@ -608,15 +608,16 @@ contains
 
     function watcher_canonical_path(path) result(normalized)
         character(len=*), intent(in) :: path
-        character(len=:), allocatable :: normalized
+        character(len=WATCH_PATH_LEN) :: normalized
 
         integer :: n
 
         normalized = trim(path)
-        n = len(normalized)
-        do while (n > 1 .and. normalized(n:n) == '/')
-            normalized = normalized(:n - 1)
-            n = len(normalized)
+        n = len_trim(normalized)
+        do while (n > 1)
+            if (normalized(n:n) /= '/') exit
+            normalized(n:n) = ' '
+            n = n - 1
         end do
     end function watcher_canonical_path
 

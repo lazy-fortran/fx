@@ -10,13 +10,14 @@ module fx_action_result_record
     integer, parameter :: HASH_LEN = 64
 
     public :: action_result_bound_record, action_result_conflict_record
+    public :: action_result_conflict_encode
     public :: action_result_record_parse
 
 contains
 
     function action_result_bound_record(action_id, result_id) result(record)
         character(len=*), intent(in) :: action_id, result_id
-        character(len=:), allocatable :: record
+        character(len=18 + len_trim(action_id) + len_trim(result_id)) :: record
 
         record = 'FXACTION2'//achar(10)//trim(action_id)//achar(10)// &
             'BOUND'//achar(10)//trim(result_id)//achar(10)
@@ -27,10 +28,18 @@ contains
         character(len=HASH_LEN), intent(in) :: ids(2)
         character(len=:), allocatable :: record
 
+        call action_result_conflict_encode(action_id, ids, record)
+    end function action_result_conflict_record
+
+    subroutine action_result_conflict_encode(action_id, ids, record)
+        character(len=*), intent(in) :: action_id
+        character(len=HASH_LEN), intent(in) :: ids(2)
+        character(len=:), allocatable, intent(out) :: record
+
         record = 'FXACTION2'//achar(10)//trim(action_id)//achar(10)// &
             'NONDETERMINISTIC_ACTION incomplete-key'//achar(10)// &
             trim(ids(1))//achar(10)//trim(ids(2))//achar(10)
-    end function action_result_conflict_record
+    end subroutine action_result_conflict_encode
 
     subroutine action_result_record_parse(bytes, count, action_id, result_id, &
             ids, status)
