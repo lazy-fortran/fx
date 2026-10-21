@@ -1,10 +1,10 @@
 program test_immutable_store
     use, intrinsic :: iso_fortran_env, only: int64
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_ptr, c_associated
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_assert_equal_str, test_suite_summary, &
         test_suite_exit
-    use fx_hash, only: sha256_string
+    use fx_hash, only: sha256_string, sha256_file
     use fx_immutable_store, only: immutable_store_t, immutable_tree_entry_t, &
         IMMUTABLE_OK, IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, &
         IMMUTABLE_INVALID, IMMUTABLE_UNSUPPORTED, IMMUTABLE_BLOB, &
@@ -14,6 +14,8 @@ program test_immutable_store
         immutable_store_put_blob, immutable_store_verify_blob, &
         immutable_store_blob_path, immutable_store_tree_path, &
         immutable_store_materialize_blob, immutable_store_file_info
+    use fx_immutable_owned, only: owned_begin_path, owned_copy_source, &
+        owned_publish, owned_dispose
     use fx_immutable_tree, only: immutable_store_put_tree, &
         immutable_store_verify_tree, immutable_store_materialize_tree
     use fx_immutable_manifest, only: immutable_manifest_serialize, immutable_manifest_parse
@@ -22,8 +24,7 @@ program test_immutable_store
     use fx_test_process, only: test_process_spawn, test_process_wait_once, &
         test_process_signal, test_process_identity, test_process_clock_ms, &
         test_process_sleep_ms
-    use fx_test_fs, only: fx_test_temp_root, fx_test_lock_directory, &
-        fx_test_unlock, fx_test_remove_tree
+    use fx_test_fs, only: fx_test_temp_root, fx_test_chmod, fx_test_remove_tree
     use fx_path, only: path_dirname
     implicit none
 
@@ -62,6 +63,10 @@ program test_immutable_store
     call get_command_argument(1, arg)
     if (trim(arg) == '--put-blob') then
         call run_worker_put()
+        stop 0
+    end if
+    if (trim(arg) == '--stage-blob') then
+        call run_worker_stage()
         stop 0
     end if
     if (trim(arg) == '--mkdir-race') then
@@ -652,7 +657,7 @@ contains
         character(len=4096) :: child_argv(4), sentinel_argv(3)
         character(len=1) :: bytes(262144)
         character(len=64) :: missing_id
-        integer :: local_err, child_status, file_err, i, writer_pid, lock_fd
+        integer :: local_err, child_status, file_err, i, writer_pid
         integer :: sentinel_pid, spawn_err, signal_err, state, child_parent
         integer(int64) :: staged_size
         integer(int64) :: child_start, sentinel_start
@@ -675,10 +680,6 @@ contains
         call test_assert_equal_int(s, 0, int(c_status), &
             'crash oracle prepares the object shard')
         if (c_status /= 0_c_int) return
-        lock_fd = fx_test_lock_directory(trim(parent_dir))
-        call test_assert(s, lock_fd >= 0, &
-            'crash oracle holds the real publication admission lock')
-        if (lock_fd < 0) return
         sentinel_release = trim(base)//'/unrelated-sentinel-release'
         call get_command_argument(0, executable)
         sentinel_argv(1:3) = [character(len=4096) :: trim(executable), &
@@ -690,7 +691,7 @@ contains
             child_parent, child_path)
 
         child_argv(1:4) = [character(len=4096) :: trim(executable), &
-            '--put-blob', trim(cache%root_dir), trim(source_path)]
+            '--stage-blob', trim(cache%root_dir), trim(source_path)]
         call test_process_spawn(child_argv(1:4), writer_pid, spawn_err)
         call test_assert_equal_int(s, 0, spawn_err, &
             'native process API starts exact blob writer')
@@ -703,16 +704,13 @@ contains
             child_path)
         inquire(file=trim(path), exist=exists)
         call test_assert(s, .not. exists, &
-            'canonical object is missing while the writer waits for admission')
+            'canonical object is missing before the publication call')
         call test_process_signal(writer_pid, 9, signal_err)
         call test_assert_equal_int(s, 0, signal_err, &
             'SIGKILL targets only the exact owned writer PID')
         call wait_for_child(writer_pid, 5000, child_status, exists)
         call test_assert(s, exists .and. child_status == 137, &
             'prepublication writer is killed and reaped by its owner')
-        local_err = fx_test_unlock(lock_fd)
-        call test_assert_equal_int(s, 0, local_err, &
-            'crash oracle releases the real publication admission lock')
         call test_process_wait_once(sentinel_pid, child_status, state)
         call test_assert_equal_int(s, 0, state, &
             'unrelated sentinel remains alive after exact writer signal')
@@ -860,6 +858,36 @@ contains
             local_err)
         if (local_err /= IMMUTABLE_OK) stop 11
     end subroutine run_worker_put
+
+    subroutine run_worker_stage()
+        character(len=4096) :: store_root, source_path
+        character(len=:), allocatable :: final, temp
+        type(immutable_store_t) :: worker_store
+        type(c_ptr) :: capture
+        character(len=64) :: id
+        integer :: local_err
+        logical :: released
+
+        call get_command_argument(2, store_root)
+        call get_command_argument(3, source_path)
+        call immutable_store_init(worker_store, trim(store_root), local_err)
+        if (local_err /= IMMUTABLE_OK) stop 15
+        ! Hash the synthetic source independently to choose its canonical slot.
+        call sha256_file(trim(source_path), id, local_err)
+        if (local_err /= 0) stop 20
+        final = immutable_store_blob_path(worker_store, id)
+        capture = owned_begin_path(final//c_null_char, 0_c_int)
+        if (.not. c_associated(capture)) stop 16
+        local_err = owned_copy_source(capture, trim(source_path)//c_null_char)
+        temp = path_dirname(final)//'/.fx-owned-'//number(proc_pid())//'-0/payload'
+        if (local_err == 0) local_err = fx_test_chmod(temp, 292)
+        if (local_err /= 0) stop 17
+        call wait_for_file(trim(source_path)//'.release', 30000, released)
+        if (.not. released) stop 18
+        local_err = owned_publish(capture)
+        call owned_dispose(capture)
+        if (local_err /= 0) stop 19
+    end subroutine run_worker_stage
 
     subroutine run_mkdir_worker()
         character(len=4096) :: path, ready, start
