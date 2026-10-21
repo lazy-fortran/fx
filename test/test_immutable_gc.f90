@@ -2,6 +2,9 @@ program test_immutable_gc
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_test, only: test_suite_t, test_suite_init, test_assert, &
         test_assert_equal_int, test_suite_summary, test_suite_exit
+    use fx_hash, only: sha256_string
+    use fx_test_process, only: test_process_spawn, test_process_wait_once, &
+        test_process_signal, test_process_clock_ms, test_process_sleep_ms
     use fx_proc, only: proc_pid
     use fx_test_fs, only: fx_test_remove_tree, fx_test_mkdir_p
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
@@ -10,12 +13,13 @@ program test_immutable_gc
         immutable_store_blob_path, immutable_store_tree_path, &
         immutable_store_root_set, immutable_store_reason_release, &
         immutable_store_publication_lease_acquire, &
-        immutable_store_read_lease_acquire, immutable_store_lease_release
+        immutable_store_read_lease_acquire, immutable_store_lease_release, &
+        immutable_store_publication_commit
     use fx_immutable_tree, only: immutable_store_put_tree
     use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_publish, &
         action_result_action_key, ACTION_RESULT_OK, ACTION_RESULT_CONFLICT
-    use fx_immutable_gc, only: immutable_store_collect
+    use fx_immutable_gc, only: immutable_store_collect, IMMUTABLE_GC_CHANGED
     implicit none
 
     type(test_suite_t) :: suite
@@ -33,9 +37,15 @@ program test_immutable_gc
     character(len=4) :: kinds(1), group_kinds(8)
     integer :: ierr, scanned, deleted, unit, i
     character(len=32) :: group_payload
+    character(len=512) :: argument
     integer(int64) :: allocated, reclaimed
     logical :: exists
 
+    call get_command_argument(1, argument)
+    if (trim(argument) == '--gc-publisher') then
+        call crashed_publisher()
+        stop 0
+    end if
     call test_suite_init(suite, 'fx_immutable_gc')
     write(root, '(A,I0)') '/var/tmp/fx_gc_', proc_pid()
     call immutable_store_init(store, trim(root), ierr)
@@ -228,11 +238,137 @@ program test_immutable_gc
             'released compact group member is collected')
     end do
 
+    call test_crashed_publisher()
+
     ierr = fx_test_remove_tree(trim(root))
     call test_assert_equal_int(suite, 0, ierr, 'fixture tree removed')
     call test_suite_summary(suite)
     call test_suite_exit(suite)
 contains
+    subroutine marker(path)
+        character(len=*), intent(in) :: path
+        integer :: fd
+        open(newunit=fd, file=path, status='replace')
+        close(fd)
+    end subroutine marker
+
+    logical function await(path) result(found)
+        character(len=*), intent(in) :: path
+        integer(int64) :: deadline
+        deadline = test_process_clock_ms() + 30000_int64
+        do
+            inquire(file=path, exist=found)
+            if (found .or. test_process_clock_ms() >= deadline) return
+            call test_process_sleep_ms(5)
+        end do
+    end function await
+
+    subroutine crashed_publisher()
+        type(immutable_lease_t) :: lease
+        character(len=64) :: payload, id(1), actual
+        character(len=32) :: reason
+        integer :: k, status, fd
+
+        call get_command_argument(2, root)
+        call immutable_store_init(store, trim(root), status)
+        if (status /= IMMUTABLE_OK) stop 10
+        call marker(trim(root)//'/gc-ready')
+        if (.not. await(trim(root)//'/gc-start')) stop 11
+        do k = 1, 64
+            write(payload, '(a,i0)') 'concurrent-payload-', k
+            write(reason, '(a,i0)') 'result-', k
+            id(1) = sha256_string(trim(payload))
+            call immutable_store_publication_lease_acquire(store, 'gc-writer', &
+                'incarnation', 'publishing', ['blob'], id, lease, status)
+            if (status /= IMMUTABLE_OK) stop 12
+            open(newunit=fd, file=trim(root)//'/gc-source', status='replace', &
+                access='stream', form='unformatted')
+            write(fd) trim(payload)
+            close(fd)
+            call immutable_store_put_blob(store, trim(root)//'/gc-source', &
+                actual, status, protected_by=lease)
+            if (status /= IMMUTABLE_OK .or. actual /= id(1)) stop 13
+            call immutable_store_publication_commit(store, lease, trim(reason), &
+                ['blob'], id, status)
+            if (status /= IMMUTABLE_OK) stop 14
+        end do
+        call marker(trim(root)//'/gc-committed')
+        if (.not. await(trim(root)//'/gc-release')) stop 15
+    end subroutine crashed_publisher
+
+    subroutine test_crashed_publisher()
+        character(len=1024) :: exe, argv(3)
+        character(len=64) :: payload, id, observed
+        character(len=32) :: reason
+        integer :: pid, status, state, child_status, fd, k, passes, bytes
+        integer(int64) :: deadline
+        logical :: done, clean
+
+        call get_command_argument(0, exe)
+        argv = [character(len=1024) :: trim(exe), '--gc-publisher', trim(root)]
+        call test_process_spawn(argv, pid, status)
+        call test_assert_equal_int(suite, 0, status, 'GC publisher starts directly')
+        if (status /= 0) return
+        call test_assert(suite, await(trim(root)//'/gc-ready'), 'GC publisher is ready')
+        call marker(trim(root)//'/gc-start')
+        deadline = test_process_clock_ms() + 30000_int64
+        done = .false.
+        clean = .true.
+        passes = 0
+        do while (test_process_clock_ms() < deadline)
+            call collect(512, 1, 0_int64, 0_int64)
+            passes = passes + 1
+            if (deleted > 1 .or. scanned > 512) clean = .false.
+            if (ierr /= IMMUTABLE_OK .and. ierr /= IMMUTABLE_GC_CHANGED) clean = .false.
+            inquire(file=trim(root)//'/gc-committed', exist=done)
+            if (done) exit
+            call test_process_wait_once(pid, child_status, state)
+            if (state /= 0) exit
+        end do
+        call test_assert(suite, clean .and. passes > 0, &
+            'concurrent GC respects scan/delete caps and retries changed ownership')
+        call test_assert(suite, done, 'publisher commits all retained results during GC')
+        call test_process_signal(pid, 9, status)
+        call test_assert_equal_int(suite, 0, status, 'exact publisher receives SIGKILL')
+        deadline = test_process_clock_ms() + 5000_int64
+        do
+            call test_process_wait_once(pid, child_status, state)
+            if (state /= 0 .or. test_process_clock_ms() >= deadline) exit
+            call test_process_sleep_ms(5)
+        end do
+        call test_assert(suite, state == 1 .and. child_status == 137, &
+            'publisher crash is reaped before restart verification')
+        if (.not. done) return
+        ! A fresh store instance and another owner cannot discard crashed roots.
+        call immutable_store_init(store, trim(root), status)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, status, 'store reopens after crash')
+        do k = 1, 64
+            write(reason, '(a,i0)') 'result-', k
+            call immutable_store_reason_release(store, 'unrelated-owner', &
+                'incarnation', trim(reason), status)
+            if (status /= IMMUTABLE_OK) error stop 'unrelated owner release failed'
+        end do
+        call collect(512, 512, 0_int64, 0_int64)
+        call test_assert_equal_int(suite, IMMUTABLE_OK, ierr, 'post-crash bounded GC succeeds')
+        do k = 1, 64
+            write(payload, '(a,i0)') 'concurrent-payload-', k
+            id = sha256_string(trim(payload))
+            inquire(file=immutable_store_blob_path(store, id), size=bytes, iostat=status)
+            if (status == 0 .and. bytes == len_trim(payload)) then
+                open(newunit=fd, file=immutable_store_blob_path(store, id), &
+                    access='stream', form='unformatted', status='old', iostat=status)
+                if (status == 0) then
+                    read(fd, iostat=status) observed(:bytes)
+                    close(fd)
+                end if
+            else
+                status = -1
+            end if
+            call test_assert(suite, status == 0 .and. observed(:len_trim(payload)) == &
+                trim(payload), 'crashed owner retains exact independently read bytes')
+        end do
+    end subroutine test_crashed_publisher
+
     subroutine assert_compact_group()
         character(len=512) :: line
         integer :: fd, status

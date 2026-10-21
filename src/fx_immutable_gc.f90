@@ -3,7 +3,7 @@ module fx_immutable_gc
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_immutable_store, only: immutable_store_t
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_IO_ERROR, &
-        IMMUTABLE_INVALID
+        IMMUTABLE_INVALID, IMMUTABLE_UNSUPPORTED
     implicit none
     private
     integer, parameter, public :: IMMUTABLE_GC_CHANGED = 6
@@ -55,6 +55,8 @@ contains
             ierr = IMMUTABLE_OK
         case (1)
             ierr = IMMUTABLE_GC_CHANGED
+        case (-3)
+            ierr = IMMUTABLE_UNSUPPORTED
         case (-2)
             ierr = IMMUTABLE_INVALID
         case default
