@@ -1,5 +1,5 @@
 module fx_immutable_manifest
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_size_t
     use fx_immutable_constants, only: IMMUTABLE_OK, IMMUTABLE_INVALID, &
         IMMUTABLE_CORRUPT
     implicit none
@@ -31,11 +31,13 @@ module fx_immutable_manifest
             import :: c_int, c_char
             character(kind=c_char), intent(in) :: name(*)
         end function name_valid
-        integer(c_int) function names_equivalent(left, right) &
-                bind(C, name='fx_immutable_names_equivalent')
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: left(*), right(*)
-        end function names_equivalent
+        integer(c_int) function names_unique(names, offsets, count) &
+                bind(C, name='fx_immutable_names_unique')
+            import :: c_int, c_char, c_size_t
+            character(kind=c_char), intent(in) :: names(*)
+            integer(c_size_t), intent(in) :: offsets(*)
+            integer(c_size_t), value :: count
+        end function names_unique
     end interface
 
 contains
@@ -44,12 +46,15 @@ contains
         type(immutable_tree_entry_t), intent(in) :: input(:)
         type(immutable_tree_entry_t), allocatable, intent(out) :: output(:)
         integer, intent(out) :: ierr
-        integer :: i, j
+        integer :: i, n, pos
+        integer(c_size_t), allocatable :: offsets(:)
+        character(kind=c_char, len=:), allocatable :: names
 
         allocate(output(size(input)))
         output = input
         call sort_entries(output, 1, size(output))
         ierr = IMMUTABLE_INVALID
+        n = 0
         do i = 1, size(output)
             if (.not. valid_component(output(i)%path)) return
             if (name_valid(output(i)%path//c_null_char) /= 1_c_int) return
@@ -58,11 +63,19 @@ contains
             if (output(i)%mode < 0 .or. output(i)%mode > 511) return
             if (output(i)%kind /= IMMUTABLE_BLOB .and. &
                 output(i)%kind /= IMMUTABLE_TREE) return
-            do j = 1, i - 1
-                if (names_equivalent(output(j)%path//c_null_char, &
-                    output(i)%path//c_null_char) /= 0_c_int) return
-            end do
+            n = n + len(output(i)%path) + 1
         end do
+        allocate(character(kind=c_char, len=n) :: names)
+        allocate(offsets(size(output)))
+        pos = 1
+        do i = 1, size(output)
+            offsets(i) = int(pos - 1, c_size_t)
+            n = len(output(i)%path)
+            names(pos:pos + n - 1) = output(i)%path
+            names(pos + n:pos + n) = c_null_char
+            pos = pos + n + 1
+        end do
+        if (names_unique(names, offsets, int(size(output), c_size_t)) /= 1_c_int) return
         ierr = IMMUTABLE_OK
     end subroutine immutable_entries_canonical
 

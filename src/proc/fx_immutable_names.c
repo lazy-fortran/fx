@@ -10,6 +10,7 @@
 #include "../../include/fx_win_store.h"
 #endif
 #include <string.h>
+#include <stdlib.h>
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
@@ -86,38 +87,116 @@ int fx_immutable_name_valid(const char *name)
 #endif
     return 1;
 }
-int fx_immutable_names_equivalent(const char *a, const char *b)
+/* Comparison uses exactly the native equivalence relation above. Sorting an
+ * index avoids comparing every pair and leaves manifest byte order untouched. */
+typedef struct {
+#ifdef _WIN32
+    wchar_t *value;
+#elif defined(__APPLE__)
+    CFMutableStringRef value;
+#else
+    const char *value;
+#endif
+} fx_name_key;
+
+static int name_key_init(fx_name_key *key, const char *name)
 {
 #ifdef _WIN32
-    wchar_t *left = fx_win32_wide(a), *right = fx_win32_wide(b);
-    if (!left || !right) { free(left); free(right); return -1; }
-    int comparison = CompareStringOrdinal(left, -1, right, -1, TRUE);
-    free(left); free(right);
-    return comparison ? comparison == CSTR_EQUAL : -1;
+    key->value = fx_win32_wide(name);
 #elif defined(__APPLE__)
     pthread_once(&name_once, load_names);
-    if (!names_available) return -1;
-    CFMutableStringRef left = normalized(a), right = normalized(b);
-    if (!left || !right) {
-        if (left) release_string(left);
-        if (right) release_string(right);
-        return -1;
-    }
-    int equal = compare_string(left, right, kCFCompareCaseInsensitive) == kCFCompareEqualTo;
-    release_string(left);
-    release_string(right);
-    return equal;
+    if (!names_available) return 0;
+    key->value = normalized(name);
 #else
-    /* ASCII case collisions cannot be portably materialized on default APFS. */
-    if (strlen(a) != strlen(b)) return 0;
-    for (size_t i = 0; a[i]; ++i) {
-        unsigned char left = (unsigned char)a[i], right = (unsigned char)b[i];
-        if (left >= 'A' && left <= 'Z') left += 'a' - 'A';
-        if (right >= 'A' && right <= 'Z') right += 'a' - 'A';
-        if (left != right) return 0;
-    }
-    return 1;
+    key->value = name;
 #endif
+    return key->value != NULL;
+}
+
+static void name_key_destroy(fx_name_key *key)
+{
+#ifdef _WIN32
+    free(key->value);
+#elif defined(__APPLE__)
+    if (key->value) release_string(key->value);
+#else
+    (void)key;
+#endif
+}
+
+static int name_key_compare(const fx_name_key *left, const fx_name_key *right,
+                            int *valid)
+{
+#ifdef _WIN32
+    int comparison = CompareStringOrdinal(left->value, -1, right->value, -1, TRUE);
+    if (!comparison) { *valid = 0; return 0; }
+    return comparison - CSTR_EQUAL;
+#elif defined(__APPLE__)
+    (void)valid;
+    return (int)compare_string(left->value, right->value, kCFCompareCaseInsensitive);
+#else
+    (void)valid;
+    const unsigned char *a = (const unsigned char *)left->value;
+    const unsigned char *b = (const unsigned char *)right->value;
+    for (size_t i = 0; ; ++i) {
+        unsigned char x = a[i], y = b[i];
+        if (x >= 'A' && x <= 'Z') x += 'a' - 'A';
+        if (y >= 'A' && y <= 'Z') y += 'a' - 'A';
+        if (x != y) return x < y ? -1 : 1;
+        if (!x) return 0;
+    }
+#endif
+}
+
+int fx_immutable_names_equivalent(const char *a, const char *b)
+{
+    fx_name_key left = {0}, right = {0};
+    int valid = name_key_init(&left, a) && name_key_init(&right, b);
+    int comparison = valid ? name_key_compare(&left, &right, &valid) : 0;
+    name_key_destroy(&left);
+    name_key_destroy(&right);
+    return valid ? comparison == 0 : -1;
+}
+
+int fx_immutable_names_unique(const char *names, const size_t *offsets, size_t count)
+{
+    if (count < 2) return 1;
+    if (count > SIZE_MAX / sizeof(fx_name_key) ||
+        count > SIZE_MAX / sizeof(size_t)) return -1;
+    fx_name_key *keys = calloc(count, sizeof(*keys));
+    size_t *order = malloc(count * sizeof(*order));
+    size_t *scratch = malloc(count * sizeof(*scratch));
+    size_t initialized = 0;
+    int result = -1, valid = 1;
+    if (!keys || !order || !scratch) goto done;
+    for (size_t i = 0; i < count; ++i) {
+        if (!name_key_init(&keys[i], names + offsets[i])) goto done;
+        initialized++;
+        order[i] = i;
+    }
+    for (size_t width = 1; width < count; ) {
+        for (size_t begin = 0; begin < count; begin += 2 * width) {
+            size_t middle = begin + (count - begin < width ? count - begin : width);
+            size_t end = middle + (count - middle < width ? count - middle : width);
+            size_t a = begin, b = middle, out = begin;
+            while (a < middle && b < end) {
+                int comparison = name_key_compare(&keys[order[a]], &keys[order[b]], &valid);
+                if (!valid) goto done;
+                if (!comparison) { result = 0; goto done; }
+                scratch[out++] = comparison < 0 ? order[a++] : order[b++];
+            }
+            while (a < middle) scratch[out++] = order[a++];
+            while (b < end) scratch[out++] = order[b++];
+        }
+        size_t *swap = order; order = scratch; scratch = swap;
+        if (width > count / 2) break;
+        width *= 2;
+    }
+    result = 1;
+done:
+    for (size_t i = 0; i < initialized; ++i) name_key_destroy(&keys[i]);
+    free(keys); free(order); free(scratch);
+    return result;
 }
 /* Independent OS oracle: actual exclusive creation reports volume aliasing. */
 int fx_immutable_probe_alias(const char *directory, const char *a, const char *b)
