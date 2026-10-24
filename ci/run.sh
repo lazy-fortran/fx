@@ -12,9 +12,11 @@ if [ -n "${SLURM_JOB_ID:-}" ]; then
 else
     tier=${1:?usage: ci/run.sh TIER}
     root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/native-ci.XXXXXX")
-    export FC=/usr/bin/gfortran CC=/usr/bin/gcc CXX=/usr/bin/g++
+    export FC=${2:-/usr/bin/gfortran} CC=/usr/bin/gcc CXX=/usr/bin/g++
     export OPENBLAS_NUM_THREADS=1 MPLBACKEND=Agg
 fi
+export FC=${FC:-/usr/bin/gfortran} CC=${CC:-/usr/bin/gcc} CXX=${CXX:-/usr/bin/g++}
+export FPM_FC=$FC FPM_CC=$CC FPM_CXX=$CXX
 unset DISPLAY
 export CMAKE_TOOLCHAIN_FILE=$src/ci/cluster-toolchain.cmake
 if [ -d "$root/mirrors" ]; then
@@ -37,7 +39,15 @@ export CMAKE_BUILD_PARALLEL_LEVEL=$SCI_CPUS CTEST_PARALLEL_LEVEL=$SCI_CPUS
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export RUNNER_TEMP=$root/tmp
 mkdir -p "$RUNNER_TEMP" ci-out
-{ hostname; /usr/bin/gfortran --version | head -1; git rev-parse HEAD; } | tee ci-out/toolchain.txt
+{
+    hostname
+    "$FC" --version | head -1
+    "$CC" --version | head -1
+    "$CXX" --version | head -1
+    fpm --version
+    sha256sum "$(command -v "$FC")" "$CC" "$CXX" "$(command -v fpm)"
+    git rev-parse HEAD
+} | tee ci-out/toolchain.txt
 load_job_environment() {
     while IFS='=' read -r key value; do
         [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$value"

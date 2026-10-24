@@ -517,6 +517,10 @@ contains
         call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
             'young binding is ineligible')
         call test_assert(suite, .not. retired, 'age guard leaves binding intact')
+        status = set_mtime(trim(record_path)//c_null_char, &
+            unix_time() - 172800_c_long_long)
+        call test_assert_equal_int(suite, 0, status, &
+            'fixture ages binding before eligible concurrent retirement')
         child = fork_process()
         call test_assert(suite, child >= 0_c_int, &
             'retirement worker forks alongside live reader')

@@ -701,7 +701,8 @@ contains
         call get_command_argument(0, executable, length=argument_length, &
             status=argument_status)
         if (argument_status /= 0 .or. argument_length > len(executable)) return
-        call test_process_spawn_piped([executable(:argument_length), trim(mode_arg)], &
+        call test_process_spawn_piped([character(len=max(argument_length, len_trim(mode_arg))) :: &
+            executable(:argument_length), trim(mode_arg)], &
             child, .true., i)
         if (i /= 0) return
         do
