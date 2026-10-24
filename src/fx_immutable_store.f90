@@ -558,18 +558,30 @@ contains
         character(len=*), intent(in) :: kinds(:), ids(:)
         character(len=:), allocatable, intent(out) :: roots
         integer, intent(out) :: ierr
-        integer :: i
+        integer :: i, n, width, pos
 
         roots = ''
         ierr = IMMUTABLE_INVALID
         if (size(kinds) /= size(ids)) return
+        n = 0
         do i = 1, size(kinds)
             if (len_trim(kinds(i)) == 0) return
             if (len_trim(kinds(i)) > 255) return
             if (.not. immutable_id_valid(ids(i))) return
-            roots = roots//trim(kinds(i))//':'//trim(ids(i))//achar(10)
+            width = len_trim(kinds(i)) + len_trim(ids(i)) + 2
+            if (n > huge(n) - width) return
+            n = n + width
         end do
-        if (len(roots) == 0) return
+        if (n == 0) return
+        deallocate(roots)
+        allocate(character(len=n) :: roots)
+        pos = 1
+        do i = 1, size(kinds)
+            width = len_trim(kinds(i)) + len_trim(ids(i)) + 2
+            roots(pos:pos + width - 1) = &
+                trim(kinds(i))//':'//trim(ids(i))//achar(10)
+            pos = pos + width
+        end do
         ierr = IMMUTABLE_OK
     end subroutine build_root_rows
 

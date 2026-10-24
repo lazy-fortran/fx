@@ -86,6 +86,8 @@ contains
         write (unit, iostat=ios) text
         close (unit, iostat=closed)
         if (ios /= 0 .or. closed /= 0) stop 22
+        ios = fx_test_chmod(path, 420)
+        if (ios /= 0) stop 33
     end subroutine write_text
 
     subroutine read_text(path, text, ios)
