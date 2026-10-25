@@ -18,6 +18,7 @@ module fx_immutable_tree
         IMMUTABLE_TREE, immutable_entries_canonical, &
         immutable_manifest_encode, immutable_manifest_parse, &
         immutable_id_valid
+    use fx_immutable_batch, only: immutable_batch_t, immutable_batch_covers
     implicit none
     private
 
@@ -31,11 +32,15 @@ module fx_immutable_tree
 
 contains
 
-    subroutine immutable_store_put_tree(store, entries, tree_id, ierr)
+    !! A committed verified_by batch vouches for the blobs it published or
+    !! verified, which are then not read again; all other children are.
+    subroutine immutable_store_put_tree(store, entries, tree_id, ierr, &
+            verified_by)
         type(immutable_store_t), intent(in) :: store
         type(immutable_tree_entry_t), intent(in) :: entries(:)
         character(len=HASH_LEN), intent(out) :: tree_id
         integer, intent(out) :: ierr
+        type(immutable_batch_t), intent(in), optional :: verified_by
         type(immutable_tree_entry_t), allocatable :: sorted(:)
         character(len=HASH_LEN) :: anticipated_id
         character(len=:), allocatable :: manifest
@@ -52,14 +57,16 @@ contains
         ! existing tree is freshened to restart its collection grace period.
         do i = 1, size(sorted)
             if (sorted(i)%kind == IMMUTABLE_BLOB) then
+                if (vouched(sorted(i)%object_id, verified_by)) cycle
                 call immutable_store_verify_blob(store, sorted(i)%object_id, ierr)
             else
-                call verify_tree_depth(store, sorted(i)%object_id, 0, ierr)
+                call verify_tree_depth(store, sorted(i)%object_id, 0, ierr, &
+                    verified_by)
             end if
             if (ierr /= IMMUTABLE_OK) return
         end do
         tree_id = anticipated_id
-        call immutable_store_verify_tree(store, tree_id, status)
+        call verify_tree_depth(store, tree_id, 0, status, verified_by)
         if (status == IMMUTABLE_OK) then
             call immutable_store_freshen(store, 2, tree_id, status)
             ierr = status
@@ -69,13 +76,23 @@ contains
             ierr = status
             return
         end if
-        call publish_tree_capture(store, tree_id, manifest, ierr)
+        call publish_tree_capture(store, tree_id, manifest, ierr, verified_by)
     end subroutine immutable_store_put_tree
 
-    subroutine publish_tree_capture(store, id, manifest, ierr)
+    logical function vouched(object_id, verified_by)
+        character(len=*), intent(in) :: object_id
+        type(immutable_batch_t), intent(in), optional :: verified_by
+
+        vouched = .false.
+        if (present(verified_by)) vouched = immutable_batch_covers(verified_by, &
+            object_id)
+    end function vouched
+
+    subroutine publish_tree_capture(store, id, manifest, ierr, verified_by)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: id, manifest
         integer, intent(out) :: ierr
+        type(immutable_batch_t), intent(in), optional :: verified_by
         character(len=HASH_LEN) :: actual
         type(c_ptr) :: capture
         integer(c_int) :: status, cleanup
@@ -94,7 +111,7 @@ contains
                     ierr = IMMUTABLE_IO_ERROR
                     if (status == 2_c_int) ierr = IMMUTABLE_UNSUPPORTED
                     if (status == 0_c_int .or. status == 1_c_int) then
-                        call immutable_store_verify_tree(store, id, ierr)
+                        call verify_tree_depth(store, id, 0, ierr, verified_by)
                     end if
                 end if
             end if
@@ -111,11 +128,12 @@ contains
         call verify_tree_depth(store, tree_id, 0, ierr)
     end subroutine immutable_store_verify_tree
 
-    subroutine verify_tree_depth(store, tree_id, depth, ierr)
+    subroutine verify_tree_depth(store, tree_id, depth, ierr, verified_by)
         type(immutable_store_t), intent(in) :: store
         character(len=*), intent(in) :: tree_id
         integer, intent(in) :: depth
         integer, intent(out) :: ierr
+        type(immutable_batch_t), intent(in), optional :: verified_by
         integer(c_int) :: root, cleanup
 
         ierr = IMMUTABLE_INVALID
@@ -123,15 +141,17 @@ contains
         root = owned_open_store(store%root_dir//c_null_char)
         ierr = IMMUTABLE_CORRUPT
         if (root < 0) return
-        call verify_owned_depth(root, tree_id, depth, ierr)
+        call verify_owned_depth(root, tree_id, depth, ierr, verified_by)
         cleanup = owned_close(root)
     end subroutine verify_tree_depth
 
-    recursive subroutine verify_owned_depth(root, tree_id, depth, ierr)
+    recursive subroutine verify_owned_depth(root, tree_id, depth, ierr, &
+            verified_by)
         integer(c_int), intent(in) :: root
         character(len=*), intent(in) :: tree_id
         integer, intent(in) :: depth
         integer, intent(out) :: ierr
+        type(immutable_batch_t), intent(in), optional :: verified_by
         type(immutable_tree_entry_t), allocatable :: entries(:)
         character(len=:), allocatable :: raw
 
@@ -141,7 +161,7 @@ contains
         if (ierr /= IMMUTABLE_OK) return
         call immutable_manifest_parse(raw, entries, ierr)
         if (ierr /= IMMUTABLE_OK) return
-        call verify_owned_entries(root, entries, depth, ierr)
+        call verify_owned_entries(root, entries, depth, ierr, verified_by)
     end subroutine verify_owned_depth
 
     subroutine immutable_store_verify_entries(store, entries, ierr)
@@ -161,11 +181,13 @@ contains
         cleanup = owned_close(root)
     end subroutine immutable_store_verify_entries
 
-    recursive subroutine verify_owned_entries(root, entries, depth, ierr)
+    recursive subroutine verify_owned_entries(root, entries, depth, ierr, &
+            verified_by)
         integer(c_int), intent(in) :: root
         type(immutable_tree_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: depth
         integer, intent(out) :: ierr
+        type(immutable_batch_t), intent(in), optional :: verified_by
         integer :: i
         integer(c_int) :: fd, cleanup
 
@@ -173,10 +195,12 @@ contains
         do i = 1, size(entries)
             select case (entries(i)%kind)
             case (IMMUTABLE_BLOB)
+                if (vouched(entries(i)%object_id, verified_by)) cycle
                 call owned_open_verified(root, 1_c_int, entries(i)%object_id, fd, ierr)
                 if (fd >= 0) cleanup = owned_close(fd)
             case (IMMUTABLE_TREE)
-                call verify_owned_depth(root, entries(i)%object_id, depth + 1, ierr)
+                call verify_owned_depth(root, entries(i)%object_id, depth + 1, ierr, &
+                    verified_by)
             case default
                 ierr = IMMUTABLE_INVALID
             end select

@@ -47,5 +47,14 @@ static int no_clone(int fd, int directory, const char *name, unsigned flags)
 #define fx_owned_same_entry fx_test_nolink_owned_same_entry
 #define fx_owned_sync fx_test_nolink_owned_sync
 #define fx_owned_write fx_test_nolink_owned_write
+#define fx_batch_begin fx_test_nolink_batch_begin
+#define fx_batch_count fx_test_nolink_batch_count
+#define fx_batch_deferred fx_test_nolink_batch_deferred
+#define fx_batch_open_file fx_test_nolink_batch_open_file
+#define fx_batch_stage fx_test_nolink_batch_stage
+#define fx_batch_write fx_test_nolink_batch_write
+#define fx_batch_stage_end fx_test_nolink_batch_stage_end
+#define fx_batch_commit fx_test_nolink_batch_commit
+#define fx_batch_end fx_test_nolink_batch_end
 #include "../../../src/proc/fx_immutable_owned.c"
 int fx_test_nolink_attempts(void) { return attempts; }
