@@ -89,6 +89,7 @@ module fx_immutable_store
     public :: immutable_store_lease_release
     public :: immutable_store_file_info
     public :: immutable_store_hash_file
+    public :: immutable_lease_covers_blob
     public :: IMMUTABLE_OK, IMMUTABLE_IO_ERROR, IMMUTABLE_INVALID
     public :: IMMUTABLE_MISSING, IMMUTABLE_CORRUPT, IMMUTABLE_UNSUPPORTED
     public :: immutable_tree_entry_t, IMMUTABLE_BLOB, IMMUTABLE_TREE
@@ -467,6 +468,15 @@ contains
         end if
         if (present(epoch)) epoch = int(current_epoch, int64)
     end subroutine immutable_store_lease_release
+
+    logical function immutable_lease_covers_blob(store, lease, object_id) &
+            result(covers)
+        type(immutable_store_t), intent(in) :: store
+        type(immutable_lease_t), intent(in) :: lease
+        character(len=*), intent(in) :: object_id
+
+        covers = lease_covers_blob(store, lease, object_id)
+    end function immutable_lease_covers_blob
 
     logical function lease_covers_blob(store, lease, object_id) result(covers)
         type(immutable_store_t), intent(in) :: store

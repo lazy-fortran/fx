@@ -27,6 +27,9 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
 int fx_immutable_open_directory(const char *path);
 int fx_immutable_mkdirs_sync(const char *path);
 int fx_immutable_mkdirs_ephemeral(const char *path);
@@ -479,4 +482,210 @@ int fx_owned_file_info(int fd, long long *size, long long *mtime, long long *ino
 #endif
     *inode = (long long)st.st_ino;
     return 0;
+}
+
+/* Batched blob capture with one durability barrier per batch.
+ *
+ * Invariant: a blob name in the store never refers to bytes that are not yet
+ * durable, and a batch commit returns only after every published name is
+ * durable. Callers publish the trees or roots that reference the batch only
+ * after a successful commit, so a crash can lose staged payloads (removed by
+ * the stale-temp collector) but never leaves a published reference to an
+ * unsynced blob.
+ *
+ * Deferred mode (Linux): payloads are written into owned staging directories
+ * without fsync. Commit runs syncfs on the store (payloads durable), links
+ * every payload under its object name without fsync, then runs syncfs again
+ * (names durable): two barriers per batch, independent of the blob count.
+ * Eager mode (other platforms, no syncfs): each payload is published at once
+ * through the synchronized single-object path, as before batching. */
+typedef struct {
+    char id[65], temp[96];
+    dev_t dev;
+    ino_t ino;
+} staged_t;
+typedef struct {
+    int root, deferred, input_valid;
+    struct stat input;
+    staged_t *items;
+    size_t count, capacity;
+} batch_t;
+
+#if defined(__linux__) && !defined(FX_BATCH_EAGER)
+static int batch_barrier(batch_t *b) { return syncfs(b->root); }
+#define BATCH_DEFERRED 1
+#else
+static int batch_barrier(batch_t *b) { (void)b; return 0; }
+#define BATCH_DEFERRED 0
+#endif
+
+void *fx_batch_begin(const char *store_root)
+{
+    batch_t *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    b->root = fx_immutable_open_directory(store_root);
+    if (b->root < 0) { free(b); return NULL; }
+    b->deferred = BATCH_DEFERRED;
+    return b;
+}
+int fx_batch_count(void *handle) { return (int)((batch_t *)handle)->count; }
+int fx_batch_deferred(void *handle) { return ((batch_t *)handle)->deferred; }
+int fx_batch_open_file(const char *path)
+{
+    return open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+}
+/* Start one staged payload for an input descriptor. The input identity is
+ * recorded so that stage_end can reject an input changed during the copy. */
+void *fx_batch_stage(void *handle, const char *blob_path, int input)
+{
+    batch_t *b = handle;
+    b->input_valid = fstat(input, &b->input) == 0 && S_ISREG(b->input.st_mode);
+    if (!b->input_valid) return NULL;
+    return owned_begin_path(blob_path, 0, !b->deferred);
+}
+int fx_batch_write(void *capture, const char *bytes, int count)
+{
+    owned_t *t = capture;
+    int offset = 0;
+    while (offset < count) {
+        ssize_t n = write(t->fd, bytes + offset, (size_t)(count - offset));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        offset += (int)n;
+    }
+    return 0;
+}
+static int input_unchanged(const struct stat *before, int input)
+{
+    struct stat after;
+    return fstat(input, &after) == 0 && before->st_dev == after.st_dev &&
+        before->st_ino == after.st_ino && before->st_size == after.st_size &&
+        before->st_mtime == after.st_mtime && before->st_ctime == after.st_ctime;
+}
+/* Finish one payload: 0 staged (deferred) or published (eager), 1 an
+ * existing object was retained (caller verifies it), -3 the input changed,
+ * -1 failure. The capture handle is always released. */
+int fx_batch_stage_end(void *handle, void *capture, int input, const char *id,
+                       int ok)
+{
+    batch_t *b = handle;
+    owned_t *t = capture;
+    struct stat st;
+    int rc = -1;
+    if (!b->input_valid || !input_unchanged(&b->input, input)) {
+        fx_owned_dispose(t);
+        return -3;
+    }
+    if (!ok || strlen(id) != 64) { fx_owned_dispose(t); return -1; }
+    if (!b->deferred) {
+        rc = fx_owned_publish(t);
+        if (rc != 0 && rc != 1) { (void)fx_owned_reject(t); rc = -1; }
+        fx_owned_dispose(t);
+        return rc;
+    }
+    if (b->count == b->capacity) {
+        size_t capacity = b->capacity ? 2 * b->capacity : 256;
+        staged_t *grown = realloc(b->items, capacity * sizeof(*grown));
+        if (!grown) { fx_owned_dispose(t); return -1; }
+        b->items = grown;
+        b->capacity = capacity;
+    }
+    if (fchmod(t->fd, 0444) != 0 || fstat(t->fd, &st) != 0 ||
+        !fx_owned_same_entry(t->parent, t->temp, t->staging) ||
+        !fx_owned_same_entry(t->staging, "payload", t->fd)) {
+        fx_owned_dispose(t);
+        return -1;
+    }
+    staged_t *item = &b->items[b->count++];
+    memcpy(item->id, id, 64);
+    item->id[64] = '\0';
+    strcpy(item->temp, t->temp);
+    item->dev = st.st_dev;
+    item->ino = st.st_ino;
+    /* Keep the staging directory for commit; release only descriptors. */
+    close(t->fd);
+    close(t->staging);
+    close(t->parent);
+    free(t);
+    return 0;
+}
+static int open_shard(int root, const char *id)
+{
+    char prefix[3] = {id[0], id[1], '\0'};
+    int first = openat(root, "blobs", dir_flags()), second = -1, shard = -1;
+    if (first >= 0) second = openat(first, "sha256", dir_flags());
+    if (second >= 0) shard = openat(second, prefix, dir_flags());
+    if (first >= 0) close(first);
+    if (second >= 0) close(second);
+    return shard;
+}
+/* Reopen one staged payload and bind it to its recorded inode. */
+static owned_t *reopen_staged(batch_t *b, const staged_t *item)
+{
+    struct stat st;
+    owned_t *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    t->fd = t->staging = t->published_fd = -1;
+    strcpy(t->temp, item->temp);
+    strcpy(t->name, item->id);
+    t->parent = open_shard(b->root, item->id);
+    if (t->parent >= 0) t->staging = openat(t->parent, t->temp, dir_flags());
+    if (t->staging >= 0)
+        t->fd = openat(t->staging, "payload", O_RDONLY | O_NOFOLLOW);
+    if (t->fd < 0 || fstat(t->fd, &st) != 0 || st.st_dev != item->dev ||
+        st.st_ino != item->ino || !S_ISREG(st.st_mode) || (st.st_mode & 0222) ||
+        !fx_owned_same_entry(t->parent, t->temp, t->staging)) {
+        if (t->fd >= 0) close(t->fd);
+        if (t->staging >= 0) close(t->staging);
+        if (t->parent >= 0) close(t->parent);
+        free(t);
+        return NULL;
+    }
+    return t;
+}
+static void discard_staged(batch_t *b, const staged_t *item)
+{
+    owned_t *t = reopen_staged(b, item);
+    if (t) fx_owned_dispose(t);
+}
+/* Barrier, publish every staged payload, barrier. retained[i] is set when
+ * the name already existed; the caller verifies those objects. A failed
+ * first barrier publishes nothing. */
+int fx_batch_commit(void *handle, int *retained)
+{
+    batch_t *b = handle;
+    size_t i, published = 0;
+    int rc = 0;
+    if (!b->deferred || b->count == 0) return 0;
+    if (batch_barrier(b) != 0) return -1;
+    for (i = 0; i < b->count; ++i) {
+        owned_t *t = reopen_staged(b, &b->items[i]);
+        int status;
+        if (!t) { rc = -1; break; }
+        status = publish_boundary(t, 1, 0);
+        if (status != 0 && status != 1) {
+            (void)fx_owned_reject(t);
+            fx_owned_dispose(t);
+            rc = -1;
+            break;
+        }
+        retained[i] = status;
+        fx_owned_dispose(t);
+        b->items[i].temp[0] = '\0';
+        ++published;
+    }
+    /* Names published before a failure are made durable too: they refer to
+     * synced bytes, and a later capture deduplicates against them. */
+    if (published > 0 && batch_barrier(b) != 0) rc = -1;
+    return rc;
+}
+void fx_batch_end(void *handle)
+{
+    batch_t *b = handle;
+    if (!b) return;
+    for (size_t i = 0; i < b->count; ++i)
+        if (b->items[i].temp[0]) discard_staged(b, &b->items[i]);
+    if (b->root >= 0) close(b->root);
+    free(b->items);
+    free(b);
 }
