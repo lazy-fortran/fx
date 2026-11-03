@@ -122,8 +122,8 @@ contains
     end subroutine immutable_batch_begin
 
     !! Add the bytes readable from fd under object_id. An object the store
-    !! already holds is verified and freshened without reading fd. The
-    !! optional publication lease must cover object_id, as for put_blob.
+    !! already holds is verified without reading fd and, unless leased, freshened.
+    !! The optional publication lease must cover object_id, as for put_blob.
     subroutine immutable_batch_put_fd(store, batch, fd, object_id, ierr, &
             protected_by)
         type(immutable_store_t), intent(in) :: store
@@ -147,7 +147,9 @@ contains
         end if
         call immutable_store_verify_blob(store, object_id, status)
         if (status == IMMUTABLE_OK) then
-            call immutable_store_freshen(store, 1, object_id, status)
+            ! A publication lease already protects the object until root publication.
+            if (.not. present(protected_by)) &
+                call immutable_store_freshen(store, 1, object_id, status)
             if (status == IMMUTABLE_OK) call remember(batch, object_id)
             if (status /= IMMUTABLE_MISSING) then
                 ierr = status

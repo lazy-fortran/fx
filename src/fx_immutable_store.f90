@@ -41,6 +41,7 @@ module fx_immutable_store
         character(len=:), allocatable :: protected_kinds(:)
         character(len=:), allocatable :: protected_ids(:)
         logical :: active = .false.
+        integer, allocatable :: blob_slots(:)
     end type immutable_lease_t
 
 
@@ -420,6 +421,7 @@ contains
             lease%store_root = store%root_dir
             lease%protected_kinds = kinds
             lease%protected_ids = ids
+            call index_lease_blobs(lease)
             lease%active = .true.
         end if
         if (present(epoch)) epoch = int(current_epoch, int64)
@@ -482,26 +484,56 @@ contains
         type(immutable_store_t), intent(in) :: store
         type(immutable_lease_t), intent(in) :: lease
         character(len=*), intent(in) :: object_id
-        integer :: i
+        integer :: slot, i
 
         covers = .false.
         if (.not. lease%active) return
         if (.not. allocated(lease%store_root)) return
         if (trim(lease%store_root) /= trim(store%root_dir)) return
-        if (.not. allocated(lease%protected_kinds)) return
-        if (.not. allocated(lease%protected_ids)) return
-        if (size(lease%protected_kinds) /= size(lease%protected_ids)) return
-        do i = 1, size(lease%protected_ids)
-            if (trim(lease%protected_kinds(i)) /= 'blob') cycle
-            if (trim(lease%protected_ids(i)) /= trim(object_id)) cycle
-            covers = .true.
-            return
+        if (.not. allocated(lease%blob_slots)) return
+        slot = lease_blob_home(object_id, size(lease%blob_slots))
+        do while (lease%blob_slots(slot) /= 0)
+            i = lease%blob_slots(slot)
+            if (lease%protected_ids(i) == object_id) then
+                covers = .true.
+                return
+            end if
+            slot = modulo(slot, size(lease%blob_slots)) + 1
         end do
     end function lease_covers_blob
+
+    subroutine index_lease_blobs(lease)
+        type(immutable_lease_t), intent(inout) :: lease
+        integer :: i, slot
+
+        allocate (lease%blob_slots(max(1, 2*size(lease%protected_ids))))
+        lease%blob_slots = 0
+        do i = 1, size(lease%protected_ids)
+            if (lease%protected_kinds(i) /= 'blob') cycle
+            slot = lease_blob_home(lease%protected_ids(i), size(lease%blob_slots))
+            do while (lease%blob_slots(slot) /= 0)
+                slot = modulo(slot, size(lease%blob_slots)) + 1
+            end do
+            lease%blob_slots(slot) = i
+        end do
+    end subroutine index_lease_blobs
+
+    pure integer function lease_blob_home(id, n) result(slot)
+        character(len=*), intent(in) :: id
+        integer, intent(in) :: n
+        integer :: i, value
+
+        value = 0
+        do i = 1, min(7, len(id))
+            value = 16*value + max(0, index('0123456789abcdef', id(i:i)) - 1)
+        end do
+        slot = modulo(value, n) + 1
+    end function lease_blob_home
 
     subroutine clear_lease_scope(lease)
         type(immutable_lease_t), intent(inout) :: lease
 
+        if (allocated(lease%blob_slots)) deallocate (lease%blob_slots)
         if (allocated(lease%store_root)) deallocate(lease%store_root)
         if (allocated(lease%protected_kinds)) deallocate(lease%protected_kinds)
         if (allocated(lease%protected_ids)) deallocate(lease%protected_ids)

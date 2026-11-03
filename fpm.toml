@@ -92,3 +92,7 @@ main = "test_immutable_gc.f90"
 name = "test_immutable_root_compact"
 source-dir = "test"
 main = "test_immutable_root_compact.f90"
+
+[[test]]
+name = "test_immutable_reuse"
+main = "test_immutable_reuse.f90"

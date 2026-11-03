@@ -106,6 +106,20 @@ module fx_immutable_owned
             integer(c_int), value :: root, kind
             character(kind=c_char), intent(in) :: id(*)
         end function open_object
+        integer(c_int) function hash_memo_get(fd, key, digest) &
+                bind(C, name='fx_owned_hash_memo_get')
+            import :: c_int, c_long_long, c_char
+            integer(c_int), value :: fd
+            integer(c_long_long), intent(out) :: key(7)
+            character(kind=c_char), intent(out) :: digest(*)
+        end function hash_memo_get
+        integer(c_int) function hash_memo_put(fd, key, digest) &
+                bind(C, name='fx_owned_hash_memo_put')
+            import :: c_int, c_long_long, c_char
+            integer(c_int), value :: fd
+            integer(c_long_long), intent(in) :: key(7)
+            character(kind=c_char), intent(in) :: digest(*)
+        end function hash_memo_put
         integer(c_int) function fd_size(fd, size_bytes) &
                 bind(C, name='fx_owned_fd_size')
             import :: c_int, c_long_long
@@ -134,32 +148,48 @@ module fx_immutable_owned
         end function fill_blob
     end interface
 contains
-    subroutine owned_hash_fd(fd, digest, ierr)
+    subroutine owned_hash_fd(fd, digest, ierr, memo_hit)
         integer(c_int), intent(in) :: fd
         character(len=64), intent(out) :: digest
         integer, intent(out) :: ierr
+        logical, intent(out), optional :: memo_hit
         character(kind=c_char), allocatable :: bytes(:)
-        integer(c_long_long) :: size_bytes, offset, n, after
-        integer :: chunk
+        integer(c_long_long) :: key(7), size_bytes, offset, n
+        integer :: chunk, hit, attempt, status
         type(sha256_state_t) :: state
 
         digest = ''
+        if (present(memo_hit)) memo_hit = .false.
         ierr = IMMUTABLE_IO_ERROR
-        if (fd_size(fd, size_bytes) /= 0) return
-        offset = 0_c_long_long
         allocate (bytes(HASH_BLOCK))
-        call sha256_init(state)
-        do while (offset < size_bytes)
-            chunk = int(min(int(HASH_BLOCK, c_long_long), size_bytes - offset))
-            n = read_at(fd, offset, bytes, int(chunk, c_int))
-            if (n <= 0) return
-            call sha256_update(state, bytes, int(n))
-            offset = offset + n
+        do attempt = 1, 32
+            hit = hash_memo_get(fd, key, digest)
+            if (hit < 0) return
+            if (hit == 1) then
+                if (present(memo_hit)) memo_hit = .true.
+                ierr = IMMUTABLE_OK
+                return
+            end if
+            size_bytes = key(3)
+            offset = 0_c_long_long
+            call sha256_init(state)
+            do while (offset < size_bytes)
+                chunk = int(min(int(HASH_BLOCK, c_long_long), size_bytes - offset))
+                n = read_at(fd, offset, bytes, int(chunk, c_int))
+                if (n <= 0) return
+                call sha256_update(state, bytes, int(n))
+                offset = offset + n
+            end do
+            digest = sha256_final(state)
+            status = hash_memo_put(fd, key, digest)
+            if (status == 0) then
+                ierr = IMMUTABLE_OK
+                return
+            end if
+            digest = ''
+            if (status < 0) return
+            ! Concurrent identical publishers may freshen timestamps mid-read.
         end do
-        if (fd_size(fd, after) /= 0) return
-        if (after /= size_bytes) return
-        digest = sha256_final(state)
-        ierr = IMMUTABLE_OK
     end subroutine owned_hash_fd
 
     subroutine owned_open_verified(root, kind, id, fd, ierr)

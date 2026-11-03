@@ -33,6 +33,8 @@ static int no_clone(int fd, int directory, const char *name, unsigned flags)
 #define fx_owned_copy_source fx_test_nolink_owned_copy_source
 #define fx_owned_dispose fx_test_nolink_owned_dispose
 #define fx_owned_fd fx_test_nolink_owned_fd
+#define fx_owned_hash_memo_get fx_test_nolink_owned_hash_memo_get
+#define fx_owned_hash_memo_put fx_test_nolink_owned_hash_memo_put
 #define fx_owned_fd_size fx_test_nolink_owned_fd_size
 #define fx_owned_file_info fx_test_nolink_owned_file_info
 #define fx_owned_fill fx_test_nolink_owned_fill
