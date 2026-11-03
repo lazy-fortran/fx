@@ -43,6 +43,63 @@ typedef struct {
 static _Atomic unsigned long serial;
 static int dir_flags(void) { return O_RDONLY | O_DIRECTORY | O_NOFOLLOW; }
 
+/* Cache verified bytes only while the complete descriptor identity is stable. */
+#define HASH_MEMO_CAP 131072u
+static struct { long long key[7]; char digest[64]; } hash_memo[HASH_MEMO_CAP];
+static atomic_flag hash_memo_lock = ATOMIC_FLAG_INIT;
+static int content_key(int fd, long long key[7])
+{
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    key[0] = st.st_dev; key[1] = st.st_ino; key[2] = st.st_size;
+#ifdef __APPLE__
+    key[3] = st.st_mtimespec.tv_sec; key[4] = st.st_mtimespec.tv_nsec;
+    key[5] = st.st_ctimespec.tv_sec; key[6] = st.st_ctimespec.tv_nsec;
+#else
+    key[3] = st.st_mtim.tv_sec; key[4] = st.st_mtim.tv_nsec;
+    key[5] = st.st_ctim.tv_sec; key[6] = st.st_ctim.tv_nsec;
+#endif
+    return 0;
+}
+static unsigned memo_home(const long long key[7])
+{
+    uint64_t h = (uint64_t)key[0] ^ (uint64_t)key[1];
+    h ^= h >> 33; h *= UINT64_C(0xff51afd7ed558ccd); h ^= h >> 33;
+    return (unsigned)h & (HASH_MEMO_CAP - 1);
+}
+int fx_owned_hash_memo_get(int fd, long long key[7], char digest[64])
+{
+    int found = 0;
+    if (content_key(fd, key) != 0) return -1;
+    while (atomic_flag_test_and_set(&hash_memo_lock)) {}
+    for (unsigned i = 0, home = memo_home(key); i < 16; ++i) {
+        unsigned slot = (home + i) & (HASH_MEMO_CAP - 1);
+        if (!hash_memo[slot].digest[0]) break;
+        if (memcmp(hash_memo[slot].key, key, sizeof(hash_memo[slot].key)) == 0) {
+            memcpy(digest, hash_memo[slot].digest, 64); found = 1; break;
+        }
+    }
+    atomic_flag_clear(&hash_memo_lock);
+    return found;
+}
+int fx_owned_hash_memo_put(int fd, const long long key[7], const char digest[64])
+{
+    long long after[7];
+    unsigned home = memo_home(key), slot = home;
+    if (content_key(fd, after) != 0) return -1;
+    if (memcmp(key, after, sizeof(after))) return 1;
+    while (atomic_flag_test_and_set(&hash_memo_lock)) {}
+    for (unsigned i = 0; i < 16; ++i) {
+        slot = (home + i) & (HASH_MEMO_CAP - 1);
+        if (!hash_memo[slot].digest[0] ||
+            memcmp(hash_memo[slot].key, key, sizeof(after)) == 0) break;
+    }
+    memcpy(hash_memo[slot].key, key, sizeof(after));
+    memcpy(hash_memo[slot].digest, digest, 64);
+    atomic_flag_clear(&hash_memo_lock);
+    return 0;
+}
+
 int fx_owned_open_store(const char *path)
 {
     return fx_immutable_open_directory(path);

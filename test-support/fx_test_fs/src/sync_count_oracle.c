@@ -37,6 +37,8 @@ static int observed_linkat(int from, const char *source, int to,
 #define fx_owned_copy_source fx_test_sync_owned_copy_source
 #define fx_owned_dispose fx_test_sync_owned_dispose
 #define fx_owned_fd fx_test_sync_owned_fd
+#define fx_owned_hash_memo_get fx_test_sync_owned_hash_memo_get
+#define fx_owned_hash_memo_put fx_test_sync_owned_hash_memo_put
 #define fx_owned_fd_size fx_test_sync_owned_fd_size
 #define fx_owned_file_info fx_test_sync_owned_file_info
 #define fx_owned_fill fx_test_sync_owned_fill
@@ -69,3 +71,27 @@ void fx_test_sync_reset(int fail)
 int fx_test_sync_calls(void) { return syncs; }
 int fx_test_sync_links(void) { return links; }
 int fx_test_sync_early_links(void) { return early_links; }
+
+int fx_test_edit_preserving_mtime(const char *path)
+{
+    struct stat st;
+    struct timespec times[2];
+    if (chmod(path, 0644) != 0) return -1;
+    int fd = open(path, O_RDWR | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) != 0) { close(fd); return -1; }
+    int rc = 0;
+#ifdef __APPLE__
+    times[0] = st.st_atimespec; times[1] = st.st_mtimespec;
+#elif defined(_WIN32)
+    times[0].tv_sec = 0; times[0].tv_nsec = UTIME_OMIT;
+    times[1] = st.st_mtim;
+#else
+    times[0] = st.st_atim; times[1] = st.st_mtim;
+#endif
+    if (rc == 0 && pwrite(fd, "X", 1, 0) != 1) rc = -1;
+    if (rc == 0) rc = futimens(fd, times);
+    if (fchmod(fd, 0444) != 0) rc = -1;
+    close(fd);
+    return rc;
+}
