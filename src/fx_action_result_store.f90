@@ -534,6 +534,8 @@ contains
         !! Run a persistent sweep. max_scan caps action directory entries and
         !! shard steps; GC separately inventories up to one million CAS objects.
         !! A busy owner skips without waiting. Fo calls this at owner start/stop.
+        !! Any attempted collection advances the GC throttle, so an incomplete
+        !! one is retried after gc_interval_seconds and not on the next tick.
         type(action_result_store_t), intent(in) :: store
         integer, intent(out) :: scanned, retired, deleted, ierr
         integer, intent(in), optional :: max_scan, pressure_objects, max_delete
@@ -616,6 +618,14 @@ contains
             call immutable_store_collect(store%objects, 1000000, delete_cap, &
                 age_floor, byte_cap, object_cap, objects_scanned, &
                 allocated_bytes, deleted, reclaimed_bytes, collected_status)
+            ! The inventory above already walked the whole CAS. Record the
+            ! attempt before the outcome branches: a store whose lease epoch
+            ! keeps moving never completes a collection, and re-walking it on
+            ! every tick is the cost this throttle exists to bound.
+            last_gc = now
+            status = c_maintenance_save(store%root_dir//c_null_char, shard, &
+                offset, last_scan, last_gc)
+            if (status /= 0_c_int) goto 900
             if (present(pressure)) then
                 pressure%sampled = .true.
                 pressure%complete = collected_status == IMMUTABLE_OK
@@ -630,10 +640,6 @@ contains
                 goto 900
             end if
             if (collected_status /= IMMUTABLE_OK) goto 900
-            last_gc = now
-            status = c_maintenance_save(store%root_dir//c_null_char, shard, &
-                offset, last_scan, last_gc)
-            if (status /= 0_c_int) goto 900
         end if
         ierr = ACTION_RESULT_OK
 900     end_status = c_maintenance_end(owner)

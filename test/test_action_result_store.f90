@@ -83,6 +83,13 @@ program test_action_result_store
             integer(c_int), value :: shard
             integer(c_long_long), value :: offset, last_scan, last_gc
         end function maintenance_save
+        integer(c_int) function maintenance_load(root_dir, shard, offset, &
+                last_scan, last_gc) bind(C, name='fx_action_maintenance_load')
+            import c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root_dir(*)
+            integer(c_int), intent(out) :: shard
+            integer(c_long_long), intent(out) :: offset, last_scan, last_gc
+        end function maintenance_load
     end interface
 
     type(test_suite_t) :: suite
@@ -124,6 +131,7 @@ program test_action_result_store
     call test_crash_boundaries()
     call test_retirement_boundary()
     call test_automatic_maintenance()
+    call test_gc_throttle_survives_incomplete_collection()
 
     ierr = fx_test_remove_tree(trim(root))
     call test_assert_equal_int(suite, 0, ierr, 'test root directory is removed')
@@ -475,6 +483,62 @@ contains
         call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
             'publication remains readable after maintenance error')
     end subroutine test_automatic_maintenance
+
+    subroutine test_gc_throttle_survives_incomplete_collection()
+        !! A CAS inventory that cannot complete still cost the full walk, so it
+        !! advances the GC throttle and is not repeated on the next tick.
+        type(action_result_store_t) :: throttled
+        type(action_result_pressure_t) :: pressure
+        type(immutable_tree_entry_t) :: entry(1)
+        character(len=512) :: source(1)
+        character(len=512) :: path
+        character(len=64) :: result_id
+        integer :: status, scanned, retired, deleted, unit
+        integer(c_int) :: shard
+        integer(c_long_long) :: offset, last_scan, last_gc
+
+        call action_result_store_init(throttled, trim(root)//'/gc-throttle', &
+            status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'gc throttle store initializes')
+        source(1) = trim(root)//'/gc-throttle-source'
+        call write_text(trim(source(1)), 'throttle bytes')
+        entry(1) = output_entry('out.bin', 'throttle-companion', 420)
+        call action_result_publish_files(throttled, 'gc-throttle-action', &
+            source, entry, result_id, status)
+        call test_assert_equal_int(suite, ACTION_RESULT_OK, status, &
+            'gc throttle action publishes')
+
+        ! An unreadable lease ledger fails the snapshot after the inventory.
+        ! It stands in for a busy store whose lease epoch keeps moving.
+        path = trim(throttled%root_dir)//'/.fx-metadata'
+        status = fx_test_mkdir_p(trim(path))
+        call test_assert_equal_int(suite, 0, status, 'throttle metadata exists')
+        path = trim(path)//'/leases'
+        open (newunit=unit, file=trim(path), action='write', form='formatted', &
+            status='replace')
+        write (unit, '(a)') 'fxleases-corrupt'
+        close (unit)
+
+        call action_result_maintenance_tick(throttled, scanned, retired, &
+            deleted, status, max_scan=1, pressure_objects=0, &
+            gc_interval_seconds=3600_c_long_long, pressure=pressure)
+        call test_assert_equal_int(suite, ACTION_RESULT_IO_ERROR, status, &
+            'incomplete collection reports its defect')
+        call test_assert(suite, pressure%sampled .and. .not. pressure%complete, &
+            'incomplete collection is attempted and incomplete')
+        status = maintenance_load(trim(throttled%root_dir)//c_null_char, &
+            shard, offset, last_scan, last_gc)
+        call test_assert_equal_int(suite, 0, status, 'throttle cursor reads')
+        call test_assert(suite, last_gc > 0_c_long_long, &
+            'attempted collection advances the GC throttle')
+
+        call action_result_maintenance_tick(throttled, scanned, retired, &
+            deleted, status, max_scan=1, pressure_objects=0, &
+            gc_interval_seconds=3600_c_long_long, pressure=pressure)
+        call test_assert(suite, .not. pressure%sampled, &
+            'throttled tick does not re-inventory the CAS')
+    end subroutine test_gc_throttle_survives_incomplete_collection
 
     subroutine test_retirement_boundary()
         type(action_result_read_t) :: active_read
