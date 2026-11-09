@@ -24,6 +24,7 @@ program test_json_parse
     call test_parse_nested(suite)
     call test_parse_array(suite)
     call test_parse_escaped_strings(suite)
+    call test_parse_long_string(suite)
     call test_parse_numbers(suite)
     call test_parse_booleans_null(suite)
     call test_extract_string_path(suite)
@@ -217,6 +218,30 @@ contains
         call test_assert_equal_str(suite, 'A', ev%string_val, &
             'escape: \\u0041 is A')
     end subroutine test_parse_escaped_strings
+
+    subroutine test_parse_long_string(suite)
+        !! A string of a few megabytes (a commit's patch) decodes in linear
+        !! time; growing it by one character at a time took minutes.
+        type(test_suite_t), intent(inout) :: suite
+        character(len=:), allocatable :: doc, value
+        integer(int64) :: t0, t1, rate
+        integer, parameter :: n = 400000
+        integer :: k
+        logical :: found
+
+        allocate (character(len=10 * n) :: doc)
+        do k = 1, n
+            doc(10 * k - 9:10 * k) = 'abcdefgh' // achar(92) // 'n'
+        end do
+        doc = '{"patch":"' // doc // achar(92) // 'u00e9"}'
+        call system_clock(t0, rate)
+        call json_extract_string(doc, 'patch', value, found)
+        call system_clock(t1)
+        call test_assert(suite, found .and. len(value) == 9 * n + 2, 'long string: length')
+        call test_assert(suite, value(9:9) == achar(10) .and. &
+            value(9 * n + 1:) == achar(195) // achar(169), 'long string: escapes')
+        call test_assert(suite, real(t1 - t0) / real(rate) < 2.0, 'long string: linear time')
+    end subroutine test_parse_long_string
 
     subroutine test_parse_numbers(suite)
         type(test_suite_t), intent(inout) :: suite

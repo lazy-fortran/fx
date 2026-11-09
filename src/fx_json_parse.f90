@@ -467,6 +467,8 @@ module fx_json_parse
         character(len=:), allocatable, intent(out) :: value
         logical, intent(out) :: valid
         integer, intent(out) :: error_offset
+        character(len=:), allocatable :: buf
+        integer :: n, last
         character(len=1) :: ch
         integer :: code, low, ios, escape_start
         character(len=4) :: hex
@@ -475,11 +477,22 @@ module fx_json_parse
         value = ''
         error_offset = p%pos
         if (p%input(p%pos:p%pos) /= '"') return
+        ! The value is never longer than its escaped form: it is written into a
+        ! buffer of that size, not grown by one character at a time.
+        last = p%pos + 1
+        do while (last <= len(p%input))
+            if (p%input(last:last) == '"') exit
+            if (p%input(last:last) == achar(92)) last = last + 1
+            last = last + 1
+        end do
+        allocate (character(len=max(0, last - p%pos - 1)) :: buf)
+        n = 0
         p%pos = p%pos + 1
         do while (p%pos <= len(p%input))
             ch = p%input(p%pos:p%pos)
             if (ch == '"') then
                 p%pos = p%pos + 1
+                value = buf(1:n)
                 valid = .true.
                 error_offset = 0
                 return
@@ -489,7 +502,7 @@ module fx_json_parse
                 return
             end if
             if (ch /= achar(92)) then
-                value = value // ch
+                call put(ch)
                 p%pos = p%pos + 1
                 cycle
             end if
@@ -502,17 +515,17 @@ module fx_json_parse
             ch = p%input(p%pos:p%pos)
             select case (ch)
             case ('"', achar(92), '/')
-                value = value // ch
+                call put(ch)
             case ('b')
-                value = value // achar(8)
+                call put(achar(8))
             case ('f')
-                value = value // achar(12)
+                call put(achar(12))
             case ('n')
-                value = value // achar(10)
+                call put(achar(10))
             case ('r')
-                value = value // achar(13)
+                call put(achar(13))
             case ('t')
-                value = value // achar(9)
+                call put(achar(9))
             case ('u')
                 p%pos = p%pos + 1
                 if (p%pos + 3 > len(p%input)) then
@@ -571,7 +584,7 @@ module fx_json_parse
                     error_offset = escape_start
                     return
                 end if
-                call append_utf8(value, code)
+                call put(utf8(code))
             case default
                 error_offset = escape_start
                 return
@@ -579,6 +592,15 @@ module fx_json_parse
             p%pos = p%pos + 1
         end do
         error_offset = len(p%input) + 1
+
+    contains
+
+        subroutine put(s)
+            character(len=*), intent(in) :: s
+            buf(n + 1:n + len(s)) = s
+            n = n + len(s)
+        end subroutine put
+
     end subroutine strict_string
 
     pure logical function is_hex_string(value)
@@ -596,23 +618,23 @@ module fx_json_parse
         is_hex_string = .true.
     end function is_hex_string
 
-    subroutine append_utf8(value, code)
-        character(len=:), allocatable, intent(inout) :: value
+    pure function utf8(code) result(value)
         integer, intent(in) :: code
+        character(len=:), allocatable :: value
 
         if (code < 128) then
-            value = value // achar(code)
+            value = achar(code)
         else if (code < 2048) then
-            value = value // achar(192 + code / 64) // achar(128 + mod(code, 64))
+            value = achar(192 + code / 64) // achar(128 + mod(code, 64))
         else if (code < 65536) then
-            value = value // achar(224 + code / 4096) // &
+            value = achar(224 + code / 4096) // &
                 achar(128 + mod(code / 64, 64)) // achar(128 + mod(code, 64))
         else
-            value = value // achar(240 + code / 262144) // &
+            value = achar(240 + code / 262144) // &
                 achar(128 + mod(code / 4096, 64)) // &
                 achar(128 + mod(code / 64, 64)) // achar(128 + mod(code, 64))
         end if
-    end subroutine append_utf8
+    end function utf8
 
     subroutine json_event_init(event)
         type(json_event_t), intent(inout) :: event
