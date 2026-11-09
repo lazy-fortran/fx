@@ -229,11 +229,14 @@ contains
         integer :: k
         logical :: found
 
-        allocate (character(len=10 * n) :: doc)
+        ! Filled in place: a concatenated temporary this large overflows the
+        ! stack with some compilers.
+        allocate (character(len=10 * n + 18) :: doc)
+        doc(1:10) = '{"patch":"'
         do k = 1, n
-            doc(10 * k - 9:10 * k) = 'abcdefgh' // achar(92) // 'n'
+            doc(10 * k + 1:10 * k + 10) = 'abcdefgh' // achar(92) // 'n'
         end do
-        doc = '{"patch":"' // doc // achar(92) // 'u00e9"}'
+        doc(10 * n + 11:) = achar(92) // 'u00e9"}'
         call system_clock(t0, rate)
         call json_extract_string(doc, 'patch', value, found)
         call system_clock(t1)
