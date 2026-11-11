@@ -529,7 +529,7 @@ contains
 
     function mcp_format_id(id_str) result(out)
         character(len=*), intent(in) :: id_str
-        character(len=MAX_LINE) :: out
+        character(len=:), allocatable :: out
 
         if (len_trim(id_str) == 0) then
             out = 'null'
