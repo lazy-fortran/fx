@@ -35,8 +35,8 @@ contains
         call mcp_make_initialize_response('7', '2025-03-26', 'fx', response)
         call test_assert(suite, index(response, '"jsonrpc":"2.0"') > 0, &
             'initialize response is jsonrpc response')
-        call test_assert(suite, index(response, '"id":7') > 0, &
-            'initialize response echoes id')
+        call test_assert(suite, index(response, '"id":7,"result"') > 0, &
+            'initialize response echoes id without padding')
         call test_assert(suite, &
             index(response, '"protocolVersion":"2025-03-26"') > 0, &
             'initialize response echoes protocol version')
