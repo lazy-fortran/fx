@@ -107,6 +107,7 @@ program test_immutable_store
     call test_killed_partial_is_hidden(suite, store, root)
     call test_corrupt_tree_is_reported(suite, store, object_id, tree_id, sub_id)
     call test_corruption_is_reported(suite, store, root)
+    call test_unreadable_ancestor(suite, root)
 
     call test_suite_summary(suite)
     call test_suite_exit(suite)
@@ -365,6 +366,42 @@ contains
         call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
             'EEXIST contender leaves the canonical winner complete and valid')
     end subroutine test_tree_eexist_preserves_winner
+
+    subroutine test_unreadable_ancestor(s, base)
+        !! A store below a directory that may be searched but not read (a
+        !! sandbox's denied home, or mode 0311) still initializes and publishes.
+        type(test_suite_t), intent(inout) :: s
+        character(len=*), intent(in) :: base
+        type(immutable_store_t) :: inner
+        character(len=512) :: closed, source_path, argv(3)
+        character(len=64) :: id
+        integer :: local_err, status
+
+        closed = trim(base)//'/search-only'
+        source_path = trim(base)//'/search-only-source.bin'
+        call write_text(trim(source_path), 'beneath')
+        argv(1) = 'mkdir'
+        argv(2) = '-p'
+        argv(3) = trim(closed)//'/below'
+        call proc_exec_silent(argv, 3, status)
+        argv(1) = 'chmod'
+        argv(2) = '311'
+        argv(3) = trim(closed)
+        call proc_exec_silent(argv, 3, status)
+        call test_assert_equal_int(s, 0, status, &
+            'test makes an ancestor searchable but unreadable')
+        call immutable_store_init(inner, trim(closed)//'/below/store', local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'store below a search-only ancestor initializes')
+        call immutable_store_put_blob(inner, trim(source_path), id, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'store below a search-only ancestor publishes')
+        call immutable_store_verify_blob(inner, id, local_err)
+        call test_assert_equal_int(s, IMMUTABLE_OK, local_err, &
+            'object below a search-only ancestor verifies')
+        argv(2) = '755'
+        call proc_exec_silent(argv, 3, status)
+    end subroutine test_unreadable_ancestor
 
     subroutine test_symlink_shard_rejected(s, base)
         type(test_suite_t), intent(inout) :: s

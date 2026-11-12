@@ -47,6 +47,30 @@ static int directory_flags(void)
     return flags;
 }
 
+#ifndef _WIN32
+/* Walking to a directory needs only search permission on its ancestors, which
+ * a sandbox or a mode such as 0311 may grant without read permission. Such an
+ * ancestor is held search-only; it can anchor lookups but not be synced. */
+static int open_component(int fd, const char *name, int last, int *search_only)
+{
+    int next = openat(fd, name, directory_flags());
+    *search_only = 0;
+#if defined(O_PATH) || defined(O_SEARCH)
+    if (next < 0 && !last && (errno == EACCES || errno == EPERM)) {
+#ifdef O_PATH
+        next = openat(fd, name, O_PATH | O_DIRECTORY | O_NOFOLLOW);
+#else
+        next = openat(fd, name, O_SEARCH | O_DIRECTORY | O_NOFOLLOW);
+#endif
+        *search_only = next >= 0;
+    }
+#else
+    (void)last;
+#endif
+    return next;
+}
+#endif
+
 static int open_existing_directory(const char *path)
 {
 #ifdef _WIN32
@@ -55,7 +79,7 @@ static int open_existing_directory(const char *path)
     char clean[PATH_MAX], component[PATH_MAX];
     const char *cursor, *start;
     size_t n, length;
-    int fd, next;
+    int fd, next, search_only;
     struct stat st;
     if (path == NULL || (n = strlen(path)) == 0 || n >= sizeof(clean)) {
         errno = EINVAL;
@@ -79,7 +103,7 @@ static int open_existing_directory(const char *path)
         }
         memcpy(component, start, length);
         component[length] = '\0';
-        next = openat(fd, component, directory_flags());
+        next = open_component(fd, component, *cursor == '\0', &search_only);
         if (next < 0) {
             close(fd);
             return -1;
@@ -184,7 +208,7 @@ static int immutable_mkdirs(const char *path, int sync)
     const char *cursor, *start;
     size_t n, length, used;
     struct stat st;
-    int fd, next;
+    int fd, next, search_only = 0, next_search_only;
     if (path == NULL || (n = strlen(path)) == 0 || n >= sizeof(clean))
         return -1;
     memcpy(clean, path, n + 1);
@@ -212,7 +236,7 @@ static int immutable_mkdirs(const char *path, int sync)
         if (mkdirat(fd, component, 0777) != 0 && errno != EEXIST) {
             goto fail;
         }
-        next = openat(fd, component, directory_flags());
+        next = open_component(fd, component, *cursor == '\0', &next_search_only);
         if (next < 0 || fstat(next, &st) != 0 || !S_ISDIR(st.st_mode)) {
             if (next >= 0) close(next);
             goto fail;
@@ -225,12 +249,13 @@ static int immutable_mkdirs(const char *path, int sync)
         used += length;
         walked[used] = '\0';
         if (sync) {
-            if (fsync(next) != 0) { close(next); goto fail; }
+            if (!next_search_only && fsync(next) != 0) { close(next); goto fail; }
             /* Another creator's mkdir may still await parent persistence. */
-            if (fsync(fd) != 0) { close(next); goto fail; }
+            if (!search_only && fsync(fd) != 0) { close(next); goto fail; }
         }
         close(fd);
         fd = next;
+        search_only = next_search_only;
     }
     close(fd);
     return 0;
