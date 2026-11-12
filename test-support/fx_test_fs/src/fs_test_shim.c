@@ -170,6 +170,7 @@ static int safe_fixture_root(const char *path)
     return 0;
 #else
     static const char *const roots[] = {"/tmp", "/var/tmp"};
+    char temporary[PATH_MAX];
     size_t i;
     if (path == NULL || path[0] == '\0') return 0;
     for (i = 0; i < sizeof(roots) / sizeof(roots[0]); ++i) {
@@ -178,6 +179,13 @@ static int safe_fixture_root(const char *path)
         if (realpath(roots[i], physical) != NULL &&
             fixture_child_path(path, physical)) return 1;
     }
+    /* Fixtures also live below the temporary root handed out above (TMPDIR),
+     * named as set or resolved. */
+    const char *selected = getenv("TMPDIR");
+    if (selected != NULL && selected[0] == '/' && selected[1] != '\0' &&
+        fixture_child_path(path, selected)) return 1;
+    if (fx_test_fs_temp_root(temporary, sizeof(temporary)) == 0 && temporary[1] != '\0' &&
+        fixture_child_path(path, temporary)) return 1;
     return 0;
 #endif
 }
