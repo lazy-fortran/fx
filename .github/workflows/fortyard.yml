@@ -13,8 +13,6 @@ jobs:
     runs-on: ${{ contains(github.ref_name, '-macos') && 'macos-latest' || (contains(github.ref_name, '-windows') && 'windows-latest' || 'ubuntu-latest') }}
     timeout-minutes: 360
     env:
-      FO_VERSION: v0.3.2
-      FO_COMMIT: 6277003c2b63dfd18fbce4bdb4cc952272c212e6
       FPM_VERSION: 0.13.0
       GIT_TERMINAL_PROMPT: 0
     defaults:
@@ -27,7 +25,12 @@ jobs:
           persist-credentials: false
       - name: Places
         run: |
-          echo "FY_TOOLS=$RUNNER_TOOL_CACHE/fortyard-fo-$FO_VERSION" >> "$GITHUB_ENV"
+          # fo's main, which fortyard keeps building with its dependencies'
+          # mains; a release falls behind them.
+          fo=$(git ls-remote https://github.com/lazy-fortran/fo.git refs/heads/main | cut -f1)
+          test -n "$fo"
+          echo "FO_COMMIT=$fo" >> "$GITHUB_ENV"
+          echo "FY_TOOLS=$RUNNER_TOOL_CACHE/fortyard-fo-$fo" >> "$GITHUB_ENV"
           echo "FO_CACHE_DIR=$RUNNER_TEMP/fo-cache" >> "$GITHUB_ENV"
           echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
           case "$GITHUB_REF_NAME" in
@@ -48,14 +51,14 @@ jobs:
             ${{ env.FO_CACHE_DIR }}
             ${{ env.CCACHE_DIR }}
             build/dependencies
-          key: fortyard-build-${{ github.repository }}-${{ env.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_VERSION }}-${{ hashFiles('fpm.toml') }}-${{ github.sha }}
+          key: fortyard-build-${{ github.repository }}-${{ env.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_COMMIT }}-${{ hashFiles('fpm.toml') }}-${{ github.sha }}
           restore-keys: |
-            fortyard-build-${{ github.repository }}-${{ env.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_VERSION }}-${{ hashFiles('fpm.toml') }}-
-            fortyard-build-${{ github.repository }}-${{ env.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_VERSION }}-
+            fortyard-build-${{ github.repository }}-${{ env.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_COMMIT }}-${{ hashFiles('fpm.toml') }}-
+            fortyard-build-${{ github.repository }}-${{ env.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_COMMIT }}-
       - name: fo
         run: |
-          # fo from its release tag, built once per machine kind and version
-          # with fpm's release binary of the pinned checksum.
+          # fo at FO_COMMIT, built once per machine kind and commit with fpm's
+          # release binary of the pinned checksum.
           if [ ! -x "$FY_TOOLS/bin/fo" ] && [ ! -x "$FY_TOOLS/bin/fo.exe" ]; then
             case "$RUNNER_OS-$RUNNER_ARCH" in
               Linux-X64) asset=linux-x86_64-gcc-12
@@ -76,10 +79,10 @@ jobs:
                 if command -v "gfortran-$v" > /dev/null; then export FPM_FC="gfortran-$v"; break; fi
               done
             fi
-            git clone --quiet --depth 1 --branch "$FO_VERSION" \
-              https://github.com/lazy-fortran/fo.git "$RUNNER_TEMP/fo-src"
-            # A tag can move; the commit cannot.
-            test "$(git -C "$RUNNER_TEMP/fo-src" rev-parse HEAD)" = "$FO_COMMIT"
+            git init --quiet "$RUNNER_TEMP/fo-src"
+            git -C "$RUNNER_TEMP/fo-src" fetch --quiet --depth 1 \
+              https://github.com/lazy-fortran/fo.git "$FO_COMMIT"
+            git -C "$RUNNER_TEMP/fo-src" checkout --quiet FETCH_HEAD
             (cd "$RUNNER_TEMP/fo-src" && "$FY_TOOLS/bin/fpm" install --profile release --prefix "$FY_TOOLS")
           fi
           echo "$FY_TOOLS/bin" >> "$GITHUB_PATH"
